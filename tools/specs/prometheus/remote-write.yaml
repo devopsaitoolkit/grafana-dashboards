@@ -1,0 +1,231 @@
+# Meta-monitoring: is remote_write shipping samples to long-term storage, or behind?
+uid: prometheus-remote-write
+title: Prometheus / Remote Write
+description: >-
+  Health of Prometheus remote_write to a long-term store: samples sent vs failed,
+  pending backlog, shard count and how far behind the queue has fallen. Answers
+  "is my data reaching long-term storage, and how stale is it?"
+datasource: prometheus
+tags: [prometheus, remote-write, ingestion, meta-monitoring]
+seo_phrase: Prometheus remote write Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are any samples failing to ship to the remote store?"
+  - "How far behind real time is the remote-write queue (lag)?"
+  - "Is a backlog of pending samples building (backpressure)?"
+  - "How many shards is the queue running, and is it saturating?"
+  - "Which remote endpoint is the bottleneck?"
+
+production_lessons: >-
+  Remote_write fails quietly: local Prometheus stays healthy while long-term
+  storage silently falls hours behind or drops samples, and you only notice when a
+  historical query returns a gap. The two signals that catch it are failed samples
+  (data being dropped outright) and lag — the difference between the newest sample
+  Prometheus has and the newest it has confirmed shipped. Pending samples and shard
+  count explain *why*: a slow or rate-limited endpoint forces the queue to buffer
+  and fan out shards until it either catches up or blows its memory budget.
+
+data_sources:
+  - "`prometheus` with a `remote_write` config, exposing the
+    `prometheus_remote_storage_*` series (samples, failures, pending, shards and
+    the highest-timestamp gauges)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(prometheus_remote_storage_samples_total, job)
+    description: Scrape job for the Prometheus doing remote_write.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(prometheus_remote_storage_samples_total{job="$job"}, instance)
+    description: Prometheus instance(s).
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Shipping health — read these first
+    panels:
+      - type: stat
+        title: Failed samples per second
+        description: Samples rejected by the remote endpoint and dropped. Any sustained value is permanent data loss.
+        unit: wps
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.001}
+        targets:
+          - expr: sum(rate(prometheus_remote_storage_samples_failed_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: failed
+      - type: stat
+        title: Remote-write lag
+        description: Seconds between the newest local sample and the newest one confirmed shipped — your effective staleness in long-term storage.
+        unit: s
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 30}
+          - {color: red, value: 120}
+        targets:
+          - expr: >-
+              max(
+                prometheus_remote_storage_highest_timestamp_in_seconds{job="$job", instance=~"$instance"}
+                - ignoring(remote_name, url) group_right
+                prometheus_remote_storage_queue_highest_sent_timestamp_seconds{job="$job", instance=~"$instance"}
+              ) or vector(0)
+            instant: true
+            legend: lag
+      - type: stat
+        title: Pending samples
+        description: Samples buffered in the queue waiting to ship — a rising backlog is backpressure from a slow endpoint.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 100000}
+          - {color: red, value: 1000000}
+        targets:
+          - expr: sum(prometheus_remote_storage_samples_pending{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: pending
+      - type: stat
+        title: Samples sent per second
+        description: Throughput to the remote store — should track local ingestion when healthy.
+        unit: wps
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(prometheus_remote_storage_samples_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: sent
+
+  - title: Throughput
+    panels:
+      - type: timeseries
+        title: Samples sent per second by endpoint
+        description: Per-remote shipping rate — split helps when you fan out to several stores.
+        unit: wps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (remote_name) (rate(prometheus_remote_storage_samples_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{remote_name}}"
+      - type: timeseries
+        title: Failed samples per second by endpoint
+        description: Per-remote drop rate — isolates which store is rejecting writes.
+        unit: wps
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.001}
+        targets:
+          - expr: sum by (remote_name) (rate(prometheus_remote_storage_samples_failed_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{remote_name}}"
+
+  - title: Backpressure
+    panels:
+      - type: timeseries
+        title: Pending samples by endpoint
+        description: Queue backlog per remote — a sawtooth is healthy catch-up; a steady climb is a losing battle.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (remote_name) (prometheus_remote_storage_samples_pending{job="$job", instance=~"$instance"})
+            legend: "{{remote_name}}"
+      - type: timeseries
+        title: Shards in use
+        description: Active queue shards per remote — the queue scales these up to push harder; pinned at max means it cannot keep up.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (remote_name) (prometheus_remote_storage_shards{job="$job", instance=~"$instance"})
+            legend: "{{remote_name}}"
+
+  - title: Lag
+    panels:
+      - type: timeseries
+        title: Remote-write lag by endpoint
+        description: Per-remote staleness in seconds — the single most important SLO for long-term storage freshness.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 120}
+        targets:
+          - expr: >-
+              prometheus_remote_storage_highest_timestamp_in_seconds{job="$job", instance=~"$instance"}
+              - ignoring(remote_name, url) group_right
+              prometheus_remote_storage_queue_highest_sent_timestamp_seconds{job="$job", instance=~"$instance"}
+            legend: "{{remote_name}}"
+
+alerts:
+  - name: RemoteWriteFailingSamples
+    severity: critical
+    expr: rate(prometheus_remote_storage_samples_failed_total[5m]) > 0
+    for: 10m
+    summary: "Prometheus {{ $labels.instance }} dropping remote-write samples to {{ $labels.remote_name }}"
+    why: Failed samples are dropped permanently, leaving gaps in long-term storage that no retry will fill.
+    investigate: "Open Prometheus / Remote Write, isolate the failing endpoint, and check the remote store's logs for 4xx/5xx."
+    runbook: "Fix auth/TLS or the rejected-series cause (out-of-order, label limit); if the store is overloaded, throttle send via queue_config."
+    recovery: Clears when no samples fail for 5m.
+    false_positives: A brief remote outage trips this; retries recover pending samples but not already-failed ones.
+  - name: RemoteWriteLagHigh
+    severity: warning
+    expr: >-
+      prometheus_remote_storage_highest_timestamp_in_seconds
+      - ignoring(remote_name, url) group_right
+      prometheus_remote_storage_queue_highest_sent_timestamp_seconds > 120
+    for: 15m
+    summary: "Remote write to {{ $labels.remote_name }} is >2m behind"
+    why: Lagging remote_write means recent data is missing from long-term storage, so dashboards and alerts on that store are stale.
+    investigate: "Check pending samples and shard count for the same endpoint, and the remote store's ingest latency."
+    runbook: "Raise max_shards / capacity in queue_config, or scale the remote store; reduce series volume if the endpoint is saturated."
+    recovery: Clears when lag falls below 120s for 5m.
+    false_positives: A large initial backfill after a restart shows transient lag that self-resolves.
+  - name: RemoteWriteBacklogGrowing
+    severity: warning
+    expr: prometheus_remote_storage_samples_pending > 1000000
+    for: 15m
+    summary: "Remote-write backlog to {{ $labels.remote_name }} above 1M pending"
+    why: A growing pending queue is backpressure that consumes memory and ends in dropped samples if it cannot drain.
+    investigate: "Confirm whether shards are pinned at max and whether the remote endpoint latency is rising."
+    runbook: "Increase shard capacity, improve remote-store throughput, or shed load by dropping low-value series before send."
+    recovery: Clears when pending samples drain below 1M for 5m.
+    false_positives: Catch-up after an endpoint outage temporarily inflates the backlog.
+
+troubleshooting:
+  - symptom: Lag panel is negative or empty
+    cause: Clock skew between Prometheus and the metric scrape, or no samples sent yet.
+    action: Verify NTP on the Prometheus host; confirm remote_write is actually configured and active.
+  - symptom: Sent rate is zero but no failures
+    cause: remote_write is disabled or the queue has no data because local ingestion stopped.
+    action: Check the remote_write config block and local samples-appended rate.
+  - symptom: Shards pinned at max with rising pending
+    cause: The remote endpoint cannot absorb the write rate.
+    action: Scale the remote store or reduce series volume; raise max_shards only if the store has headroom.
+
+performance: >-
+  Throughput and failure panels use 5m rates so they survive restarts. The lag
+  expression subtracts two highest-timestamp gauges with `ignoring(remote_name,
+  url)` matching, which keeps the join cheap and one series per endpoint. Pending
+  and shard panels read gauges directly.
+
+customization: >-
+  Tune the 120s lag and 1M pending thresholds to your freshness SLO and the
+  Prometheus memory budget. When fanning out to multiple stores, the per-endpoint
+  panels already separate them by `remote_name`; scope `$instance` to one server
+  when chasing a single replica's backlog.

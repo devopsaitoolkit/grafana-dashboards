@@ -1,0 +1,248 @@
+title: OpenStack / Neutron — Service Health
+description: >-
+  Neutron control-plane health for an OpenStack deployment scraped by
+  openstack-exporter: are the DHCP, L3, metadata and Open vSwitch agents alive,
+  is the API answering, and are tenant ports actually getting addresses? Leads
+  with the two signals that page you — agents down and ports stuck without IPs.
+datasource: prometheus
+tags: [openstack, neutron, networking, openstack-exporter, control-plane]
+seo_phrase: OpenStack Neutron Grafana dashboard
+
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are any Neutron agents (DHCP / L3 / metadata / OVS) down right now?"
+  - "Are tenant ports failing to get an IP (ports without IPs climbing)?"
+  - "Is the Neutron API being scraped at all, or has the exporter gone dark?"
+  - "How many networks, subnets, ports and routers does the deployment carry?"
+  - "Is one agent type or one host disproportionately unhealthy?"
+
+production_lessons: >-
+  Neutron outages rarely announce themselves as "the API is down" — they show up
+  as new instances that boot but never get networking. That is why this dashboard
+  leads with **agents down** and **ports without IPs** rather than raw object
+  counts: a dead DHCP agent on one network host leaves every new port on that
+  segment addressless while the API keeps returning 200s. The inventory counters
+  (networks/subnets/ports/routers) matter as a *trend* — a sudden drop usually
+  means a region or a tenant was deleted, or the exporter lost its admin scope and
+  is only seeing one project. Always confirm the exporter is scraping with full
+  admin credentials before trusting a low count as real.
+
+data_sources:
+  - "`openstack-exporter` (the `golang` or `prometheus-openstack-exporter`) with
+    Neutron enabled and admin-scoped credentials — exposes
+    `openstack_neutron_agent_state`, `openstack_neutron_ports_no_ips`,
+    `openstack_neutron_networks`, `openstack_neutron_subnets`,
+    `openstack_neutron_ports` and `openstack_neutron_routers`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_neutron_agent_state, job)
+    description: Prometheus scrape job for your openstack-exporter target(s).
+    multi: false
+    includeAll: false
+  - name: agent
+    label: Agent type
+    query: label_values(openstack_neutron_agent_state{job="$job"}, agent)
+    description: Neutron agent type (DHCP agent, L3 agent, Metadata agent, Open vSwitch agent).
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Health — read these first
+    panels:
+      - type: stat
+        title: Agents down
+        description: Count of Neutron agents reporting dead (state 0) across selected types.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(openstack_neutron_agent_state{job="$job", agent=~"$agent"} == 0) or vector(0)
+            instant: true
+            legend: down
+      - type: stat
+        title: Ports without IPs
+        description: Tenant ports that exist but have no fixed IP — instances that can't reach the network.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 10}
+        targets:
+          - expr: sum(openstack_neutron_ports_no_ips{job="$job"}) or vector(0)
+            instant: true
+            legend: portsNoIP
+      - type: gauge
+        title: Agent availability
+        description: Share of selected Neutron agents currently alive.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 90}
+          - {color: green, value: 100}
+        targets:
+          - expr: >-
+              100 * avg(openstack_neutron_agent_state{job="$job", agent=~"$agent"}) or vector(0)
+            instant: true
+            legend: available
+      - type: stat
+        title: Networks
+        description: Total Neutron networks visible to the exporter.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: sum(openstack_neutron_networks{job="$job"}) or vector(0)
+            instant: true
+            legend: networks
+      - type: stat
+        title: Routers
+        description: Total Neutron routers.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: sum(openstack_neutron_routers{job="$job"}) or vector(0)
+            instant: true
+            legend: routers
+
+  - title: Agent fleet state
+    panels:
+      - type: state-timeline
+        title: Agent state (1 = alive, 0 = dead)
+        description: Up/down history per agent type and host — spot the exact agent and moment of failure.
+        unit: short
+        mappings:
+          - {type: value, options: {"0": {text: dead, color: red}, "1": {text: alive, color: green}}}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: openstack_neutron_agent_state{job="$job", agent=~"$agent"}
+            legend: "{{agent}} @ {{hostname}}"
+      - type: bargauge
+        title: Dead agents by type
+        description: Where the failures cluster — a whole type dead usually means a control-plane or exporter scope problem.
+        unit: short
+        decimals: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count by (agent) (openstack_neutron_agent_state{job="$job", agent=~"$agent"} == 0)
+            instant: true
+            legend: "{{agent}}"
+
+  - title: Network inventory
+    panels:
+      - type: timeseries
+        title: Objects over time
+        description: Networks, subnets, ports and routers — watch for sudden cliffs (deletions or lost admin scope).
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(openstack_neutron_networks{job="$job"})
+            legend: networks
+          - expr: sum(openstack_neutron_subnets{job="$job"})
+            legend: subnets
+          - expr: sum(openstack_neutron_ports{job="$job"})
+            legend: ports
+          - expr: sum(openstack_neutron_routers{job="$job"})
+            legend: routers
+      - type: timeseries
+        title: Ports without IPs over time
+        description: A rising line means new ports are failing allocation — correlate with DHCP agent state.
+        unit: short
+        min: 0
+        fillOpacity: 30
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 10}
+        targets:
+          - expr: sum(openstack_neutron_ports_no_ips{job="$job"})
+            legend: ports without IPs
+      - type: stat
+        title: Security groups
+        description: Total Neutron security groups — a proxy for tenant/workload growth.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: sum(openstack_neutron_security_groups{job="$job"}) or vector(0)
+            instant: true
+            legend: secgroups
+
+alerts:
+  - name: NeutronAgentDown
+    severity: critical
+    expr: openstack_neutron_agent_state == 0
+    for: 5m
+    summary: "Neutron {{ $labels.agent }} on {{ $labels.hostname }} is dead"
+    why: A dead DHCP/L3/metadata/OVS agent breaks address allocation, routing or metadata for every port it serves, even though the API still answers.
+    investigate: "Open OpenStack / Neutron — Service Health, find the host, then check the agent process and `neutron agent-list` on the controller."
+    runbook: "Restart the agent service (neutron-dhcp-agent / neutron-l3-agent / neutron-metadata-agent / neutron-openvswitch-agent); if it won't start, check RabbitMQ connectivity and the agent log for the bind failure."
+    recovery: Clears when the agent reports alive (state 1) for 5m.
+    false_positives: A host drained for maintenance reports its agents dead — silence the host or set the agent admin-state down first.
+  - name: NeutronPortsWithoutIPs
+    severity: warning
+    expr: sum(openstack_neutron_ports_no_ips) > 10
+    for: 10m
+    summary: "More than 10 Neutron ports have no IP for 10m"
+    why: Ports without a fixed IP mean instances boot with no usable networking — the classic symptom of a stuck or dead DHCP agent or an exhausted subnet pool.
+    investigate: "Cross-check DHCP agent state and the affected subnet's allocation pool; identify which network the IP-less ports belong to."
+    runbook: "Restart the DHCP agent for the affected segment; if the subnet pool is exhausted, expand the allocation pool or add a subnet."
+    recovery: Clears when the count falls back below 10 for 5m.
+    false_positives: Ports intentionally created without addresses (e.g. for SR-IOV/direct attach) inflate this count — exclude them with a network selector.
+  - name: NeutronExporterDown
+    severity: critical
+    expr: absent(openstack_neutron_agent_state)
+    for: 5m
+    summary: "Neutron metrics absent — openstack-exporter not scraping Neutron"
+    why: With no agent metrics every other panel is blind; you cannot tell a healthy control plane from a dead one.
+    investigate: "Check the openstack-exporter target in Prometheus and the exporter logs for auth/endpoint errors."
+    runbook: "Restart openstack-exporter; confirm the Keystone endpoint, admin credentials and project scope are valid."
+    recovery: Clears once the series reappears.
+    false_positives: A planned exporter redeploy briefly trips this — keep `for` at 5m to ride out restarts.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: Wrong `$job`, or openstack-exporter not scraping Neutron.
+    action: "Check `up{job=\"$job\"}` in Explore and confirm the exporter has Neutron enabled with admin credentials."
+  - symptom: Object counts look far too low
+    cause: Exporter authenticated with a single-project (non-admin) scope.
+    action: Re-scope the exporter credentials to an admin role so it enumerates all projects.
+  - symptom: Agents flap between alive and dead
+    cause: RabbitMQ/messaging instability between agents and the server.
+    action: Check the message bus and the `agent_down_time` setting; the agents may simply be reporting late.
+
+performance: >-
+  Every panel aggregates with `sum`/`avg`/`count by` to keep the series count at one
+  per agent type or host rather than one per object, so this dashboard stays cheap
+  even on large deployments. The state-timeline is the only per-agent panel; scope
+  it with `$agent` if you run hundreds of network nodes.
+
+customization: >-
+  Tune the "ports without IPs" thresholds to your subnet sizing, and add a `region`
+  selector to the templating if your exporter exposes one for multi-region clouds.
+  To alert per agent type instead of globally, copy `NeutronPortsWithoutIPs` and add
+  a `by (agent)` clause.

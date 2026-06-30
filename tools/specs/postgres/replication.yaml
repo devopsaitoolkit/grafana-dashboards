@@ -1,0 +1,198 @@
+# PostgreSQL streaming replication and WAL. Leads with replica lag in seconds and
+# the number of replicas the primary can still see, because those two numbers decide
+# whether a failover would lose data.
+uid: postgres-replication
+title: PostgreSQL / Replication & WAL
+description: >-
+  Streaming-replication health for PostgreSQL via postgres_exporter: replica lag in
+  seconds, WAL byte lag per connected standby, how many replicas the primary sees, and
+  checkpoint activity. Answers "are my replicas keeping up, and is a safe failover
+  possible right now?".
+datasource: prometheus
+tags: [postgres, database, postgres-exporter, replication]
+seo_phrase: PostgreSQL replication Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "What is the worst replica lag in seconds right now?"
+  - "How many replicas is the primary actually streaming to?"
+  - "How many WAL bytes is each standby behind the primary?"
+  - "Are checkpoints firing on a healthy timed cadence?"
+
+production_lessons: >-
+  Replica lag is a data-loss budget, not a performance metric: if the primary fails
+  with a standby 40 seconds behind, promoting it loses 40 seconds of committed writes.
+  This dashboard leads with lag **in seconds** and the **replica count** so you know
+  before an incident whether failover is safe. WAL byte lag is the leading indicator —
+  it climbs first under write bursts or a slow standby, and the seconds-behind figure
+  follows. A drop in the connected-replica count is its own page: a standby that
+  silently disconnected is no longer protecting you.
+
+data_sources:
+  - "`postgres_exporter` on the primary and replicas (the `pg_replication_lag`,
+    `pg_stat_replication_pg_wal_lsn_diff`, `pg_stat_bgwriter_checkpoints_timed_total`
+    and `pg_stat_bgwriter_buffers_checkpoint_total` series)."
+
+templating:
+  - name: instance
+    label: Instance
+    query: label_values(pg_up, instance)
+    description: PostgreSQL primaries and replicas to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Replication health — read these first
+    panels:
+      - type: stat
+        title: Max replica lag
+        description: Highest standby lag in seconds. This is your failover data-loss exposure.
+        unit: s
+        decimals: 1
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10}
+          - {color: red, value: 30}
+        targets:
+          - expr: max(pg_replication_lag{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: max lag
+      - type: stat
+        title: Replicas connected
+        description: Standbys the primary is currently streaming to. A drop means a replica disconnected.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: count(pg_stat_replication_pg_wal_lsn_diff{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: replicas
+      - type: stat
+        title: Max WAL byte lag
+        description: Largest WAL backlog any standby has yet to replay, in bytes.
+        unit: bytes
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 67108864}
+          - {color: red, value: 268435456}
+        targets:
+          - expr: max(pg_stat_replication_pg_wal_lsn_diff{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: WAL lag
+
+  - title: Lag detail
+    panels:
+      - type: timeseries
+        title: Replica lag (seconds)
+        description: Per-instance replication delay. Sustained climbs mean the standby cannot keep up with the write rate.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 30}
+        targets:
+          - expr: pg_replication_lag{instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: WAL byte lag per standby
+        description: WAL bytes each standby is behind the primary. The leading indicator — it moves before seconds-behind does.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: pg_stat_replication_pg_wal_lsn_diff{instance=~"$instance"}
+            legend: "{{application_name}}"
+
+  - title: Checkpoints
+    panels:
+      - type: timeseries
+        title: Checkpoint rate
+        description: Timed checkpoints per second. A healthy server checkpoints on its scheduled cadence, not in bursts.
+        unit: ops
+        min: 0
+        targets:
+          - expr: sum(rate(pg_stat_bgwriter_checkpoints_timed_total{instance=~"$instance"}[5m]))
+            legend: timed checkpoints/s
+      - type: timeseries
+        title: Buffers written at checkpoint
+        description: Buffers flushed to disk during checkpoints. Large spikes pressure I/O and can stall the WAL stream.
+        unit: ops
+        min: 0
+        targets:
+          - expr: sum(rate(pg_stat_bgwriter_buffers_checkpoint_total{instance=~"$instance"}[5m]))
+            legend: buffers/s
+      - type: table
+        title: Standby detail
+        description: Current per-standby WAL byte lag, newest first.
+        unit: bytes
+        transformations:
+          - id: organize
+            options:
+              excludeByName: {Time: true, __name__: true, job: true}
+        sortBy:
+          - {displayName: Value, desc: true}
+        targets:
+          - expr: pg_stat_replication_pg_wal_lsn_diff{instance=~"$instance"}
+            instant: true
+            format: table
+            legend: "{{application_name}}"
+
+alerts:
+  - name: PostgresReplicationLagHigh
+    severity: warning
+    expr: pg_replication_lag > 30
+    for: 5m
+    summary: "PostgreSQL replica {{ $labels.instance }} lagging >30s"
+    why: A standby 30s behind means a failover would lose up to 30s of committed transactions.
+    investigate: "Open PostgreSQL / Replication & WAL; check WAL byte lag, standby I/O and the primary's write rate."
+    runbook: "Relieve the write burst, give the standby faster storage, or check the network between primary and replica."
+    recovery: Clears when lag drops below 30s for 5m.
+    false_positives: A large batch import or a standby running heavy read queries can lag transiently.
+  - name: PostgresNoReplicasConnected
+    severity: critical
+    expr: count by (instance) (pg_stat_replication_pg_wal_lsn_diff) == 0
+    for: 5m
+    summary: "PostgreSQL {{ $labels.instance }} has no connected replicas"
+    why: With zero streaming standbys there is no hot failover target — the primary is a single point of failure.
+    investigate: "Check the standbys' recovery state and the primary's pg_stat_replication; look for an auth or network break."
+    runbook: "Restart replication on the standby, fix pg_hba/replication slots, and confirm the WAL sender is running."
+    recovery: Clears once at least one replica reconnects.
+    false_positives: Standalone primaries with no replicas by design — scope this rule to instances that should have standbys.
+  - name: PostgresWALLagHigh
+    severity: warning
+    expr: pg_stat_replication_pg_wal_lsn_diff > 268435456
+    for: 10m
+    summary: "PostgreSQL standby {{ $labels.application_name }} >256MB of WAL behind"
+    why: A growing WAL backlog precedes seconds-behind lag and can exhaust WAL retention, breaking the replica entirely.
+    investigate: "Compare standby replay rate against the primary's WAL generation; check disk and replay bottlenecks."
+    runbook: "Increase wal_keep_size or use a replication slot; speed up standby replay (storage/CPU)."
+    recovery: Clears when WAL lag falls below 256MB for 5m.
+    false_positives: Short bursts during bulk loads; raise the threshold for write-heavy primaries.
+
+troubleshooting:
+  - symptom: Replica count and WAL panels are empty
+    cause: pg_stat_replication is only populated on the primary; the exporter is scraping a replica.
+    action: Point these panels at the primary's exporter, or include the primary in `$instance`.
+  - symptom: pg_replication_lag is missing
+    cause: The metric only exists on a server in recovery (a standby).
+    action: Scrape the replicas with postgres_exporter; the primary will not export this series.
+  - symptom: WAL byte lag is huge but seconds-behind is small
+    cause: A write burst just produced WAL the standby has not yet acknowledged.
+    action: Watch the trend — if it keeps climbing the standby is genuinely falling behind.
+
+performance: >-
+  Checkpoint and buffer panels use a 5m rate window so a restart never spikes them.
+  Lag panels read instantaneous gauges, so they are cheap regardless of fleet size.
+
+customization: >-
+  Set the 10s/30s lag thresholds to your RPO. If you use replication slots, add a
+  `pg_replication_slots`-based panel for retained WAL. For cascading replicas, group
+  the WAL-lag panel by `application_name` to separate each tier.

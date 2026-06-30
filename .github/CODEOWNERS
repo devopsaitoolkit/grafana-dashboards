@@ -1,0 +1,6 @@
+# Default owners for everything in the repo.
+*       @devopsaitoolkit
+
+# The generator is the foundation — review changes carefully.
+/tools/dashgen/   @devopsaitoolkit
+/.github/         @devopsaitoolkit

@@ -1,0 +1,219 @@
+# Hardware health sensors for Linux hosts scraped by node_exporter.
+uid: linux-hardware-sensors
+title: Linux / Hardware Sensors
+description: >-
+  Hardware health for bare-metal Linux hosts scraped by node_exporter: temperatures
+  from every hwmon sensor, CPU scaling frequency, and the hottest sensor on the fleet.
+  Answers "is anything overheating or being thermally throttled?" — the physical-layer
+  failures that no application metric can see.
+datasource: prometheus
+tags: [linux, hardware, temperature, sensors, node-exporter]
+seo_phrase: Node Exporter hardware sensors Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "What is the hottest sensor across the fleet right now?"
+  - "How many sensors are above their safe threshold?"
+  - "Is a CPU being thermally throttled (frequency dropping while busy)?"
+  - "Which host or component is trending hotter over time?"
+
+production_lessons: >-
+  On bare metal, the failure that application metrics cannot show you is **heat**: a clogged
+  filter, a dead fan or a failing AC unit pushes CPU temperature past the throttle point,
+  the kernel quietly drops the clock frequency, and your "healthy" host gets mysteriously
+  slow with no software cause. So this dashboard leads with the **hottest sensor** and the
+  **count of sensors over threshold**, then pairs temperature with **CPU scaling frequency**
+  so you can correlate a thermal spike with the throttle that follows it. hwmon sensor naming
+  is wildly inconsistent across boards — `coretemp`, `k10temp`, `acpitz`, NVMe composite —
+  so read sensors by chip+label rather than guessing, and set thresholds from the hardware's
+  own published `*_crit` limits, not a round number. This dashboard is for physical hosts;
+  VMs and most cloud instances expose no hwmon data at all.
+
+data_sources:
+  - "`node_exporter` `hwmon` collector (`node_hwmon_temp_celsius`) and `cpufreq` collector
+    (`node_cpu_scaling_frequency_hertz`). hwmon is bare-metal only; cloud/VM guests rarely
+    expose it."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job for your node_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(node_uname_info{job="$job"}, instance)
+    description: Host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Thermal — read these first
+    panels:
+      - type: stat
+        title: Hottest sensor
+        description: Highest temperature reported by any hwmon sensor across selected hosts.
+        unit: celsius
+        decimals: 1
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: max(node_hwmon_temp_celsius{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: hottest
+      - type: stat
+        title: Sensors over 85°C
+        description: Count of sensors currently reading above 85°C — the warm-to-throttle zone for most CPUs.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: count(node_hwmon_temp_celsius{job="$job", instance=~"$instance"} > 85) or vector(0)
+            instant: true
+            legend: hot sensors
+      - type: gauge
+        title: Fleet mean temperature
+        description: Average sensor temperature across the fleet — a baseline for spotting environmental shifts.
+        unit: celsius
+        decimals: 1
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 70}
+          - {color: red, value: 85}
+        targets:
+          - expr: avg(node_hwmon_temp_celsius{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: mean temp
+      - type: stat
+        title: Lowest CPU frequency
+        description: Minimum current CPU scaling frequency across hosts. A drop while busy suggests thermal or power throttling.
+        unit: hertz
+        decimals: 2
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 1500000000}
+          - {color: green, value: 2500000000}
+        targets:
+          - expr: min(node_cpu_scaling_frequency_hertz{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: min freq
+
+  - title: Temperatures
+    panels:
+      - type: timeseries
+        title: Temperature by sensor
+        description: Every hwmon sensor over time, labelled by host, chip and sensor. The throttle line is dashed.
+        unit: celsius
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: node_hwmon_temp_celsius{job="$job", instance=~"$instance"}
+            legend: "{{instance}} {{chip}} {{sensor}}"
+      - type: bargauge
+        title: Top sensors by temperature
+        description: Ranked current temperatures — the hottest components to check first.
+        unit: celsius
+        decimals: 1
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: topk(10, node_hwmon_temp_celsius{job="$job", instance=~"$instance"})
+            instant: true
+            legend: "{{instance}} {{chip}} {{sensor}}"
+
+  - title: Temperature distribution
+    panels:
+      - type: heatmap
+        title: Sensor temperature distribution
+        description: Distribution of sensor readings over time. A rising warm band signals a fleet-wide environmental shift.
+        unit: celsius
+        height: 9
+        targets:
+          - expr: node_hwmon_temp_celsius{job="$job", instance=~"$instance"}
+            legend: "{{instance}} {{sensor}}"
+
+  - title: CPU frequency
+    panels:
+      - type: timeseries
+        title: CPU scaling frequency per host
+        description: Current per-CPU clock frequency. A sustained drop while load is high is the fingerprint of thermal throttling.
+        unit: hertz
+        min: 0
+        legend: table
+        targets:
+          - expr: avg by (instance) (node_cpu_scaling_frequency_hertz{job="$job", instance=~"$instance"})
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Hottest temperature per host
+        description: The single hottest sensor per host over time — the line to correlate with the frequency panel.
+        unit: celsius
+        min: 0
+        legend: table
+        targets:
+          - expr: max by (instance) (node_hwmon_temp_celsius{job="$job", instance=~"$instance"})
+            legend: "{{instance}}"
+
+alerts:
+  - name: HostSensorOverheating
+    severity: critical
+    expr: node_hwmon_temp_celsius > 90
+    for: 5m
+    summary: "Sensor {{ $labels.sensor }} on {{ $labels.instance }} above 90°C"
+    why: Past ~90°C most CPUs thermally throttle and, if it climbs further, shut down to protect the silicon — slow service now, hard outage soon.
+    investigate: "Check the per-host frequency panel for a matching throttle, and inspect cooling (fan RPM, intake temperature, airflow obstruction)."
+    runbook: "Clear airflow blockages, replace failed fans, check thermal paste and rack/room cooling; drain the host if the temperature will not come down."
+    recovery: Clears when the sensor falls below 90°C for 5m.
+    false_positives: Some boards expose a constant `*_crit` limit value as a pseudo-sensor — exclude those sensor labels from the rule.
+  - name: HostCPUThrottling
+    severity: warning
+    expr: >-
+      avg by (instance, job) (node_cpu_scaling_frequency_hertz)
+      < 0.6 * max by (instance, job) (node_cpu_scaling_frequency_hertz)
+    for: 15m
+    summary: "Host {{ $labels.instance }} CPU frequency held well below its maximum"
+    why: A frequency stuck far below the ceiling means the CPU is being throttled — thermal or power capped — costing performance invisibly to software metrics.
+    investigate: "Correlate with the hottest-temperature panel; if temperature is high it is thermal, if temperature is fine suspect a power-cap or governor set to powersave."
+    runbook: "Resolve cooling if thermal; otherwise check the scaling governor (set performance), BIOS power limits, and PSU/rack power capping."
+    recovery: Clears when the average frequency returns above 60% of the maximum for 5m.
+    false_positives: Idle hosts legitimately scale down under the powersave governor — pair this with a CPU-busy condition or scope to known-loaded hosts.
+
+troubleshooting:
+  - symptom: All sensor panels show "No data"
+    cause: The host is a VM/cloud instance with no hwmon, or the hwmon collector is disabled.
+    action: Expected on virtualised hosts; on bare metal, enable the hwmon collector and confirm `node_hwmon_temp_celsius` in Explore.
+  - symptom: A sensor reads a flat, implausibly high value
+    cause: It is actually a `*_crit`/`*_max` limit pseudo-sensor, not a live reading.
+    action: Filter by the sensor label or exclude limit pseudo-sensors from panels and alerts.
+  - symptom: Frequency panel is flat at the maximum
+    cause: The governor is set to performance, or cpufreq scaling is disabled.
+    action: Normal under the performance governor; throttling detection then relies on the temperature panels.
+
+performance: >-
+  hwmon and cpufreq series are one per sensor/CPU and low cardinality on a typical server,
+  but very wide boards or many CPUs add series — scope `$instance` on large fleets. All
+  panels read gauge values directly with no rate windows, so query cost is minimal.
+
+customization: >-
+  Set the 90°C and 85°C thresholds from each component's published `*_crit` limit rather than
+  a round number. Exclude limit pseudo-sensors via the `sensor` label. Tune the 60%-of-max
+  throttle ratio to your CPUs' base/boost spread, and pair it with a CPU-busy condition to
+  avoid flagging idle powersave scaling.

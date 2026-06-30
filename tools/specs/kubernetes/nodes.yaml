@@ -1,0 +1,246 @@
+# Node health and capacity — Ready state, cordons, and per-node pressure.
+uid: kubernetes-nodes
+title: Kubernetes / Nodes
+description: >-
+  Per-node health and capacity for a Kubernetes cluster: which nodes are Ready or
+  cordoned, how much of each node's allocatable CPU and memory is actually in use,
+  and how close each node is to its pod-count ceiling. Answers "which node should
+  I drain?" rather than just listing nodes.
+datasource: prometheus
+tags: [kubernetes, nodes, kube-state-metrics, cadvisor, capacity]
+seo_phrase: Kubernetes node health Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which nodes are NotReady or cordoned right now?"
+  - "Which node is the most pressured on CPU or memory?"
+  - "Is any node approaching its maximum pod count?"
+  - "Is allocatable headroom evenly spread, or is one node hot while others idle?"
+
+production_lessons: >-
+  Node dashboards fail when they only show the Ready boolean — by the time a node
+  flips NotReady, pods are already being evicted. The leading indicator is per-node
+  pressure: a node sitting at 95% memory usage or near its pod cap will start
+  failing scheduling and evicting long before the condition changes. This dashboard
+  leads with NotReady and the single most-pressured node, then breaks usage down per
+  node so you can pick a drain target or spot an uneven scheduler. Usage is read
+  from cAdvisor (actual consumption), capacity from kube-state-metrics — never
+  confuse "requested" with "used" when deciding which node to relieve.
+
+data_sources:
+  - "`kube-state-metrics` for node conditions, schedulability and capacity
+    (`kube_node_status_condition`, `kube_node_spec_unschedulable`,
+    `kube_node_status_allocatable`, `kube_node_status_capacity`)."
+  - "`cAdvisor`/kubelet for actual per-node CPU and memory usage
+    (`container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`);
+    requires the `node` label that kube-prometheus-stack relabels onto cAdvisor."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(kube_node_info, cluster)
+    description: Cluster to scope to. Select All on single-cluster setups.
+    multi: false
+    includeAll: true
+  - name: node
+    label: Node
+    query: label_values(kube_node_info{cluster=~"$cluster"}, node)
+    description: Nodes to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Node health — read these first
+    panels:
+      - type: stat
+        title: Nodes NotReady
+        description: Nodes not reporting Ready — pods on them are being evicted.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(kube_node_info{cluster=~"$cluster", node=~"$node"})
+              - sum(kube_node_status_condition{cluster=~"$cluster", node=~"$node", condition="Ready", status="true"})
+              or vector(0)
+            instant: true
+            legend: notready
+      - type: stat
+        title: Nodes cordoned (unschedulable)
+        description: Nodes marked unschedulable — draining, under maintenance, or stuck cordoned.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+        targets:
+          - expr: >-
+              sum(kube_node_spec_unschedulable{cluster=~"$cluster", node=~"$node"}) or vector(0)
+            instant: true
+            legend: cordoned
+      - type: stat
+        title: Most-pressured node — CPU
+        description: Highest per-node CPU usage as a share of that node's allocatable cores.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(
+                100
+                * sum by (node) (rate(container_cpu_usage_seconds_total{cluster=~"$cluster", node=~"$node", container!="", pod!=""}[5m]))
+                / sum by (node) (kube_node_status_allocatable{cluster=~"$cluster", node=~"$node", resource="cpu"})
+              ) or vector(0)
+            instant: true
+            legend: cpu
+      - type: stat
+        title: Most-pressured node — memory
+        description: Highest per-node working-set memory as a share of that node's allocatable memory.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 92}
+        targets:
+          - expr: >-
+              max(
+                100
+                * sum by (node) (container_memory_working_set_bytes{cluster=~"$cluster", node=~"$node", container!="", pod!=""})
+                / sum by (node) (kube_node_status_allocatable{cluster=~"$cluster", node=~"$node", resource="memory"})
+              ) or vector(0)
+            instant: true
+            legend: memory
+
+  - title: Per-node usage
+    panels:
+      - type: timeseries
+        title: CPU usage per node (% of allocatable)
+        description: Actual CPU consumption per node against its allocatable cores. Spot the hot node.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100
+              * sum by (node) (rate(container_cpu_usage_seconds_total{cluster=~"$cluster", node=~"$node", container!="", pod!=""}[5m]))
+              / sum by (node) (kube_node_status_allocatable{cluster=~"$cluster", node=~"$node", resource="cpu"})
+            legend: "{{node}}"
+      - type: timeseries
+        title: Memory usage per node (% of allocatable)
+        description: Working-set memory per node against allocatable. Nodes near 100% will start evicting pods.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 92}
+        targets:
+          - expr: >-
+              100
+              * sum by (node) (container_memory_working_set_bytes{cluster=~"$cluster", node=~"$node", container!="", pod!=""})
+              / sum by (node) (kube_node_status_allocatable{cluster=~"$cluster", node=~"$node", resource="memory"})
+            legend: "{{node}}"
+
+  - title: Pod density
+    panels:
+      - type: bargauge
+        title: Pods per node vs capacity
+        description: Running pods on each node compared with the node's pod capacity (default 110). Nodes near the cap reject new pods.
+        unit: short
+        orientation: horizontal
+        targets:
+          - expr: >-
+              count by (node) (count by (node, pod) (container_cpu_usage_seconds_total{cluster=~"$cluster", node=~"$node", container!="", pod!=""}))
+            instant: true
+            legend: "{{node}}"
+      - type: timeseries
+        title: Pod capacity per node
+        description: Maximum schedulable pods per node as reported by the kubelet — the ceiling the bargauge fills toward.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: kube_node_status_capacity{cluster=~"$cluster", node=~"$node", resource="pods"}
+            legend: "{{node}}"
+
+  - title: Node inventory
+    panels:
+      - type: table
+        title: Node status table
+        description: Ready state per node — 1 is Ready, 0 is NotReady. Sort to surface problem nodes.
+        unit: short
+        targets:
+          - expr: sum by (node) (kube_node_status_condition{cluster=~"$cluster", node=~"$node", condition="Ready", status="true"})
+            instant: true
+            format: table
+            legend: "{{node}}"
+      - type: timeseries
+        title: Allocatable CPU cores per node
+        description: Schedulable CPU cores each node offers — the denominator for the usage panels.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: kube_node_status_allocatable{cluster=~"$cluster", node=~"$node", resource="cpu"}
+            legend: "{{node}}"
+
+alerts:
+  - name: KubeNodeNotReady
+    severity: critical
+    expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+    for: 5m
+    summary: "Node {{ $labels.node }} NotReady for 5m"
+    why: A NotReady node evicts its pods and removes its capacity, pushing load and Pending pressure onto the rest of the cluster.
+    investigate: "Check the node's kubelet and container runtime; review memory/disk/PID pressure conditions and recent kernel logs."
+    runbook: "Restart kubelet/containerd; if the node does not recover, drain and replace it. Investigate the host (disk full, OOM, network)."
+    recovery: Clears when the node reports Ready for 5m.
+    false_positives: Planned reboots and autoscaler scale-down — exclude cordoned nodes or raise `for`.
+  - name: KubeNodeMemoryPressure
+    severity: warning
+    expr: >-
+      100 * sum by (node) (container_memory_working_set_bytes{container!="", pod!=""})
+      / sum by (node) (kube_node_status_allocatable{resource="memory"}) > 92
+    for: 10m
+    summary: "Node {{ $labels.node }} memory at {{ $value | printf \"%.0f\" }}% of allocatable"
+    why: Memory cannot burst beyond the node — past ~92% the kubelet begins evicting pods, and an OOM kill of a system daemon can take the node NotReady.
+    investigate: "Open the per-node memory panel; identify the heaviest pods on that node in Kubernetes / Workload Resources."
+    runbook: "Evict or reschedule memory-heavy pods, lower memory requests/limits, or add nodes; cordon the node if it is flapping."
+    recovery: Clears when node memory falls below 92% for 5m.
+    false_positives: Cache-heavy workloads that report high working set but reclaim under pressure — validate with eviction events.
+
+troubleshooting:
+  - {symptom: Per-node usage panels are empty, cause: cAdvisor metrics lack a `node` label in this setup, action: "Confirm `container_cpu_usage_seconds_total` carries a `node` label; kube-prometheus-stack adds it via relabeling. Otherwise join through `kube_pod_info`."}
+  - {symptom: Usage % above 100, cause: Allocatable excludes system-reserved while usage includes it, action: Expected near the limit — treat anything over ~95% as full and act.}
+  - {symptom: Pods-per-node looks low, cause: Pods without running containers are not counted by the cAdvisor proxy, action: Cross-check with the pod capacity panel and node describe output.}
+
+performance: >-
+  Per-node panels aggregate with `sum by (node)`, bounding series to one per node.
+  CPU uses a 5m rate window (≥4× a typical 15s scrape) so counters survive a
+  restart. On very large clusters, back the usage expressions with
+  `node:container_cpu_usage:sum` style recording rules to keep render time low.
+
+customization: >-
+  Adjust the 90% CPU / 92% memory thresholds to your eviction policy. To watch a
+  single node pool, add a `label_values(kube_node_info, ...)` variable on your
+  pool label and filter $node. Pod capacity defaults to 110 — set per-pool caps in
+  your kubelet config and they flow through automatically.

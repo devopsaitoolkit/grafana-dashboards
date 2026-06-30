@@ -1,0 +1,79 @@
+# Alerting rules for the aws dashboards.
+# Generated from tools/specs/aws/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: aws.rules
+  rules:
+  - alert: Ec2StatusCheckFailed
+    expr: aws_ec2_status_check_failed_sum > 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: EC2 instance {{ $labels.instance_id }} failing status checks
+      description: A failed status check means the instance or its underlying host is unhealthy — the
+        workload is likely down or unreachable.
+      runbook: For a system-check failure, stop/start the instance to move it to healthy hardware; for
+        an instance-check failure, fix the guest (disk full, network, kernel) or replace via the ASG.
+      dashboard: dashboards/aws/ec2.json
+  - alert: Ec2HighCPU
+    expr: aws_ec2_cpuutilization_average > 90
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: EC2 instance {{ $labels.instance_id }} CPU >90%
+      description: Sustained high CPU means the instance is undersized for its load and will start dropping
+        or delaying work.
+      runbook: Scale the instance type up, add instances behind the load balancer/ASG, or move work off
+        the box.
+      dashboard: dashboards/aws/ec2.json
+  - alert: Ec2EBSIOBalanceLow
+    expr: aws_ec2_ebsio_balance_average < 20
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: EC2 instance {{ $labels.instance_id }} EBS IO balance <20%
+      description: Burstable EBS volumes throttle hard once credits run out, spiking disk latency while
+        CPU still looks healthy — a confusing, app-stalling failure.
+      runbook: Switch the volume to gp3 (baseline IOPS, no credits) or io1/io2, or provision a larger
+        gp2 volume for more baseline IOPS.
+      dashboard: dashboards/aws/ec2.json
+  - alert: RdsLowFreeStorage
+    expr: aws_rds_free_storage_space_average < 5000000000
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: RDS {{ $labels.dbinstance_identifier }} free storage <5GB
+      description: When free storage hits zero RDS enters storage-full and rejects writes — a hard, customer-facing
+        outage.
+      runbook: Enable/raise storage autoscaling or modify the instance to add storage now; reclaim space
+        (purge logs, drop bloat) and check binlog/WAL retention.
+      dashboard: dashboards/aws/rds.json
+  - alert: RdsHighReadLatency
+    expr: aws_rds_read_latency_average > 0.02
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: RDS {{ $labels.dbinstance_identifier }} read latency >20ms
+      description: Read latency above ~20 ms usually means the working set no longer fits in memory or
+        the EBS volume is throttling — query times balloon.
+      runbook: Add memory (scale the instance), add the missing index, switch to a higher-IOPS volume
+        (gp3/io2), or offload reads to a replica.
+      dashboard: dashboards/aws/rds.json
+  - alert: RdsReplicaLagHigh
+    expr: aws_rds_replica_lag_average > 30
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: RDS replica {{ $labels.dbinstance_identifier }} lagging >30s
+      description: A lagging replica serves stale data and, on failover, loses transactions the primary
+        already committed.
+      runbook: Reduce write bursts, scale the replica up, or kill long transactions on the primary; if
+        the replica can't keep up, resize it to match the primary.
+      dashboard: dashboards/aws/rds.json

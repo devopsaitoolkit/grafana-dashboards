@@ -1,0 +1,228 @@
+# Meta-monitoring: the Loki write path — volume, stream cardinality and rate limits.
+uid: loki-ingestion
+title: Loki / Ingestion Path
+description: >-
+  A focused view of Loki's write path: bytes and lines received per tenant, stream
+  cardinality, chunk flush rate and rate-limited (429) pushes. Answers "who is
+  sending what, is cardinality exploding, and are we throttling clients?"
+datasource: prometheus
+tags: [loki, logs, ingestion, meta-monitoring]
+seo_phrase: Loki ingestion Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which tenant is driving the most ingest volume right now?"
+  - "Is stream cardinality growing toward an ingester OOM?"
+  - "Are clients being rate-limited (429) on push?"
+  - "Are chunks flushing to storage at a healthy rate?"
+  - "How many chunks and streams are held in memory per ingester?"
+
+production_lessons: >-
+  Almost every Loki capacity incident traces back to one of two things: a single
+  tenant flooding bytes, or a high-cardinality label exploding streams. This
+  dashboard puts per-tenant volume next to stream cardinality so you can tell a
+  benign traffic spike (more bytes, flat streams) from a cardinality bomb (flat
+  bytes, exploding streams) — they have completely different fixes. Rate-limited
+  pushes are the third signal: when you see 429s, ingest limits are protecting the
+  cluster and a client is losing logs until it backs off or you raise the limit.
+
+data_sources:
+  - "`loki` exposing `loki_distributor_lines_received_total`,
+    `loki_distributor_bytes_received_total`, `loki_ingester_memory_streams`,
+    `loki_ingester_memory_chunks`, `loki_ingester_chunks_flushed_total` and
+    `loki_request_duration_seconds_count` (with the `status_code` label)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(loki_request_duration_seconds_count, job)
+    description: Loki component job, mainly distributor and ingester here.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Ingest volume & cardinality — read these first
+    panels:
+      - type: stat
+        title: Bytes received per second
+        description: Total log volume into the distributors — the bandwidth and storage-cost driver.
+        unit: Bps
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(loki_distributor_bytes_received_total[5m])) or vector(0)
+            instant: true
+            legend: bytes/s
+      - type: stat
+        title: Lines received per second
+        description: Total log lines into the distributors — the workload's line rate.
+        unit: ops
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(loki_distributor_lines_received_total[5m])) or vector(0)
+            instant: true
+            legend: lines/s
+      - type: stat
+        title: In-memory streams
+        description: Active streams in the ingesters — the cardinality figure that gates memory and triggers OOMs.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 100000}
+          - {color: red, value: 500000}
+        targets:
+          - expr: sum(loki_ingester_memory_streams) or vector(0)
+            instant: true
+            legend: streams
+      - type: stat
+        title: Rate-limited pushes per second
+        description: Push requests rejected with 429 — clients hitting ingest limits and shedding logs.
+        unit: ops
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.1}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(rate(loki_request_duration_seconds_count{status_code="429"}[5m])) or vector(0)
+            instant: true
+            legend: 429/s
+
+  - title: Volume by tenant
+    panels:
+      - type: timeseries
+        title: Bytes per second by tenant
+        description: Per-tenant byte rate — the fastest way to find who is flooding the cluster.
+        unit: Bps
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum by (tenant) (rate(loki_distributor_bytes_received_total[5m]))
+            legend: "{{tenant}}"
+      - type: timeseries
+        title: Lines per second by tenant
+        description: Per-tenant line rate — pair with bytes to spot tiny-line spam versus large payloads.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (tenant) (rate(loki_distributor_lines_received_total[5m]))
+            legend: "{{tenant}}"
+
+  - title: Stream cardinality
+    panels:
+      - type: timeseries
+        title: In-memory streams by ingester
+        description: Per-ingester stream count — a single climbing line is a cardinality bomb on its way to an OOM.
+        unit: short
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 500000}
+        targets:
+          - expr: sum by (instance) (loki_ingester_memory_streams)
+            legend: "{{instance}}"
+      - type: timeseries
+        title: In-memory chunks by ingester
+        description: Per-ingester chunk count — chunks held before flush; tracks streams and memory pressure.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (loki_ingester_memory_chunks)
+            legend: "{{instance}}"
+
+  - title: Flush & throttling
+    panels:
+      - type: timeseries
+        title: Chunk flush rate by ingester
+        description: Chunks flushed to object storage per second — a stall means data is stuck in memory and lost on a crash.
+        unit: ops
+        min: 0
+        legend: table
+        drawStyle: bars
+        fillOpacity: 40
+        targets:
+          - expr: sum by (instance) (rate(loki_ingester_chunks_flushed_total[5m]))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Rate-limited pushes per second
+        description: 429 responses over time — sustained throttling means a tenant needs a higher limit or must slow down.
+        unit: ops
+        min: 0
+        legend: table
+        drawStyle: bars
+        fillOpacity: 50
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(rate(loki_request_duration_seconds_count{job=~"$job", status_code="429"}[5m]))
+            legend: 429/s
+
+alerts:
+  - name: LokiPushesRateLimited
+    severity: warning
+    expr: sum(rate(loki_request_duration_seconds_count{status_code="429"}[5m])) > 1
+    for: 10m
+    summary: "Loki is rate-limiting pushes (>1 429/s)"
+    why: Rate-limited pushes mean clients are losing logs because they exceed the configured ingest limits.
+    investigate: "Open Loki / Ingestion Path, find the tenant driving bytes/lines, and confirm whether the spike is legitimate."
+    runbook: "Raise the tenant's ingestion_rate_mb / burst limits if justified, or have the client reduce its log volume."
+    recovery: Clears when 429 rate drops below 1/s for 5m.
+    false_positives: A short burst from a noisy deploy can trip this; raise the `for` if your traffic is bursty.
+  - name: LokiStreamCardinalityHigh
+    severity: warning
+    expr: sum(loki_ingester_memory_streams) > 500000
+    for: 30m
+    summary: "Loki ingesters above 500k in-memory streams"
+    why: High stream cardinality drives ingester memory toward an OOM kill that drops in-flight logs.
+    investigate: "Identify the tenant and the unbounded label (request_id, IP, trace_id) inflating stream count."
+    runbook: "Strip the dynamic label in pipeline_stages, enforce per-tenant max_streams, and scale ingesters if the growth is real."
+    recovery: Clears when in-memory streams fall below 500k for 5m.
+    false_positives: Large multi-tenant clusters — set the threshold to your provisioned ingester memory.
+  - name: LokiChunkFlushStalled
+    severity: critical
+    expr: >-
+      sum(rate(loki_ingester_chunks_flushed_total[10m])) == 0
+      and sum(loki_ingester_memory_chunks) > 0
+    for: 10m
+    summary: "Loki chunk flushing has stalled"
+    why: If chunks stop flushing while memory chunks remain, data is trapped in memory and will be lost if an ingester restarts.
+    investigate: "Check object-storage connectivity and credentials from the ingesters, and the ingester logs for flush errors."
+    runbook: "Restore storage access; if an ingester is wedged, flush on shutdown (graceful) before replacing it."
+    recovery: Clears when the flush rate returns above zero for 5m.
+    false_positives: A genuinely idle cluster with no chunks to flush — the memory-chunks guard prevents that case.
+
+troubleshooting:
+  - symptom: Per-tenant panels show a single "fake" tenant
+    cause: Auth is disabled, so all logs land under the default tenant.
+    action: Enable multi-tenancy or accept the single-tenant view; the totals are still accurate.
+  - symptom: 429s with low overall volume
+    cause: A per-tenant or per-stream limit is set tighter than the aggregate.
+    action: Check the specific tenant's limits, not just the global ingestion rate.
+  - symptom: Streams flat but bytes spiking
+    cause: A benign traffic increase, not a cardinality problem.
+    action: Scale ingest capacity; no label surgery needed.
+
+performance: >-
+  Volume panels use 5m rates aggregated by `tenant`; cardinality panels read the
+  in-memory gauges per instance. The flush-stall alert pairs a zero flush rate with
+  a non-zero memory-chunks guard so an idle cluster never false-fires.
+
+customization: >-
+  Tune the 500k stream and 1/s rate-limit thresholds to your limits config. If your
+  build lacks the `tenant` label, drop the `by (tenant)` grouping. Raise the 429
+  alert `for` window on intentionally bursty workloads.

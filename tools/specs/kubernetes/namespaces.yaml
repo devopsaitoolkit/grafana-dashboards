@@ -1,0 +1,203 @@
+# Per-namespace resource use — who is consuming the cluster.
+uid: kubernetes-namespaces
+title: Kubernetes / Namespaces
+description: >-
+  Resource consumption broken down by namespace: which namespaces burn the most
+  CPU and memory, how many pods each runs, and how close they sit to their
+  ResourceQuota. Answers "which team is eating the cluster?" and "who is about to
+  hit their quota?" from kube-state-metrics and cAdvisor.
+datasource: prometheus
+tags: [kubernetes, namespaces, kube-state-metrics, cadvisor, quota]
+seo_phrase: Kubernetes namespace resource usage Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which namespaces are consuming the most CPU and memory right now?"
+  - "How many pods is each namespace running?"
+  - "Which namespaces are closest to their ResourceQuota limit?"
+  - "Is one namespace's growth squeezing the rest of the cluster?"
+
+production_lessons: >-
+  In a shared cluster, capacity problems are almost always traceable to one or two
+  namespaces — a runaway batch job, a team that set requests far above usage, or a
+  namespace silently filling its quota until deploys start failing. This dashboard
+  ranks namespaces by actual CPU and memory (cAdvisor) so you can find the heavy
+  consumer instantly, then surfaces quota utilisation so you catch the namespace
+  that is about to reject its own pods. Ranking by usage, not requests, is the key:
+  a namespace can hold huge requests while using almost nothing, and that is a
+  right-sizing conversation, not an incident.
+
+data_sources:
+  - "`cAdvisor`/kubelet for per-namespace CPU and memory usage
+    (`container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`)."
+  - "`kube-state-metrics` for pod counts and quota state
+    (`kube_pod_status_phase`, `kube_resourcequota`, `kube_namespace_created`)."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(kube_node_info, cluster)
+    description: Cluster to scope to. Select All on single-cluster setups.
+    multi: false
+    includeAll: true
+
+rows:
+  - title: Top consumers — read these first
+    panels:
+      - type: bargauge
+        title: Top namespaces by CPU usage
+        description: Actual CPU cores consumed per namespace over the last 5 minutes, ranked.
+        unit: short
+        orientation: horizontal
+        displayMode: gradient
+        decimals: 2
+        targets:
+          - expr: >-
+              topk(15, sum by (namespace) (rate(container_cpu_usage_seconds_total{cluster=~"$cluster", container!="", pod!=""}[5m])))
+            instant: true
+            legend: "{{namespace}}"
+      - type: bargauge
+        title: Top namespaces by memory usage
+        description: Working-set memory consumed per namespace, ranked. The bytes a namespace would lose on eviction.
+        unit: bytes
+        orientation: horizontal
+        displayMode: gradient
+        targets:
+          - expr: >-
+              topk(15, sum by (namespace) (container_memory_working_set_bytes{cluster=~"$cluster", container!="", pod!=""}))
+            instant: true
+            legend: "{{namespace}}"
+
+  - title: Usage trends
+    panels:
+      - type: timeseries
+        title: CPU cores by namespace
+        description: CPU consumption per namespace over time — watch for a namespace that climbs and never comes down.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: >-
+              sum by (namespace) (rate(container_cpu_usage_seconds_total{cluster=~"$cluster", container!="", pod!=""}[5m]))
+            legend: "{{namespace}}"
+      - type: timeseries
+        title: Memory by namespace
+        description: Working-set memory per namespace over time, stacked to the cluster total.
+        unit: bytes
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: >-
+              sum by (namespace) (container_memory_working_set_bytes{cluster=~"$cluster", container!="", pod!=""})
+            legend: "{{namespace}}"
+
+  - title: Pod counts
+    panels:
+      - type: bargauge
+        title: Running pods by namespace
+        description: How many pods each namespace is running — density and blast radius at a glance.
+        unit: short
+        orientation: horizontal
+        targets:
+          - expr: >-
+              topk(20, sum by (namespace) (kube_pod_status_phase{cluster=~"$cluster", phase="Running"}))
+            instant: true
+            legend: "{{namespace}}"
+      - type: timeseries
+        title: Pending pods by namespace
+        description: Pending pods per namespace — a namespace that cannot schedule is either out of quota or out of cluster capacity.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              sum by (namespace) (kube_pod_status_phase{cluster=~"$cluster", phase="Pending"}) > 0
+            legend: "{{namespace}}"
+
+  - title: Quota pressure
+    panels:
+      - type: bargauge
+        title: CPU quota used (% of hard limit)
+        description: For namespaces with a ResourceQuota, used CPU request as a share of the hard cap. Near 100% means new pods will be rejected.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100
+              * sum by (namespace) (kube_resourcequota{cluster=~"$cluster", resource="requests.cpu", type="used"})
+              / sum by (namespace) (kube_resourcequota{cluster=~"$cluster", resource="requests.cpu", type="hard"})
+            instant: true
+            legend: "{{namespace}}"
+      - type: bargauge
+        title: Memory quota used (% of hard limit)
+        description: Used memory request as a share of the namespace's memory quota.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100
+              * sum by (namespace) (kube_resourcequota{cluster=~"$cluster", resource="requests.memory", type="used"})
+              / sum by (namespace) (kube_resourcequota{cluster=~"$cluster", resource="requests.memory", type="hard"})
+            instant: true
+            legend: "{{namespace}}"
+
+alerts:
+  - name: KubeNamespaceQuotaAlmostFull
+    severity: warning
+    expr: >-
+      100 * kube_resourcequota{resource="requests.cpu", type="used"}
+      / ignoring(type) kube_resourcequota{resource="requests.cpu", type="hard"} > 95
+    for: 15m
+    summary: "Namespace {{ $labels.namespace }} CPU quota at {{ $value | printf \"%.0f\" }}%"
+    why: A namespace at its ResourceQuota cannot create new pods — deploys and scale-ups silently fail with quota errors, not capacity errors.
+    investigate: "Open the quota pressure row; compare quota usage with actual CPU usage to tell over-allocation from genuine demand."
+    runbook: "Raise the quota, right-size the namespace's requests to actual usage, or remove idle workloads holding reservations."
+    recovery: Clears when quota usage falls below 95% for 5m.
+    false_positives: Namespaces intentionally pinned at their quota as a hard budget ceiling.
+  - name: KubeNamespaceCPUHeavyConsumer
+    severity: info
+    expr: >-
+      sum by (namespace) (rate(container_cpu_usage_seconds_total{container!="", pod!=""}[5m]))
+      > 0.4 * sum(rate(container_cpu_usage_seconds_total{container!="", pod!=""}[5m]))
+    for: 30m
+    summary: "Namespace {{ $labels.namespace }} using over 40% of cluster CPU"
+    why: A single namespace dominating cluster CPU is a noisy-neighbour and capacity-planning risk worth a deliberate review.
+    investigate: "Open the CPU-by-namespace trend; confirm whether the growth is expected load or a runaway/looping workload."
+    runbook: "Apply or tighten a ResourceQuota, move the workload to a dedicated node pool, or scale the cluster for the new baseline."
+    recovery: Clears when the namespace drops below 40% of cluster CPU for 5m.
+    false_positives: Single-tenant clusters where one namespace is meant to own the cluster.
+
+troubleshooting:
+  - {symptom: Quota panels are empty, cause: No ResourceQuota objects exist in those namespaces, action: Quota panels only populate where a ResourceQuota is defined — this is expected on unquota'd clusters.}
+  - {symptom: A namespace is missing from rankings, cause: "`topk` trimmed it below the top 15", action: Raise the `topk` count in the spec or scope with a namespace filter.}
+  - {symptom: Memory ranking dominated by one namespace, cause: Working set includes page cache for IO-heavy pods, action: Cross-check with container memory limits before treating it as a leak.}
+
+performance: >-
+  Rankings use `topk(15..20, sum by (namespace) (...))`, which keeps both query cost
+  and panel series bounded even on clusters with hundreds of namespaces. CPU uses a
+  5m rate window. For very large clusters, precompute
+  `namespace:container_cpu_usage:sum` and `namespace:container_memory_working_set:sum`
+  recording rules and point the panels at those.
+
+customization: >-
+  Change `topk(15, ...)` to show more or fewer namespaces. To exclude platform
+  namespaces, add `namespace!~"kube-.*|monitoring"` to the selectors. The 40%
+  heavy-consumer alert threshold should match how multi-tenant your cluster is —
+  lower it on shared clusters, disable it on single-tenant ones.

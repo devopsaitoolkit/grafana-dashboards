@@ -1,0 +1,214 @@
+# NTP/chrony time synchronisation for Linux hosts scraped by node_exporter.
+uid: linux-time-sync
+title: Linux / Time Sync
+description: >-
+  Clock synchronisation health for Linux hosts scraped by node_exporter: whether each
+  host's clock is disciplined (timex sync status), the current offset from true time,
+  and the kernel's maximum and estimated error bounds. Answers "are any clocks drifting
+  or unsynchronised?" — the silent cause of auth failures, broken TLS and corrupt logs.
+datasource: prometheus
+tags: [linux, time, ntp, chrony, node-exporter]
+seo_phrase: Node Exporter time sync Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many hosts are currently unsynchronised (clock not disciplined)?"
+  - "What is the largest clock offset across the fleet right now?"
+  - "Is any host's offset trending away from zero (a failing time source)?"
+  - "How wide are the kernel's max/estimated error bounds?"
+
+production_lessons: >-
+  Clock skew is the bug that disguises itself as ten other bugs: Kerberos/JWT auth rejects
+  "future" or "expired" tokens, TLS handshakes fail validity checks, distributed databases
+  reorder or reject writes, and your logs stop lining up across hosts so every
+  investigation gets harder. node_exporter exposes the kernel's own view via the `timex`
+  collector, and the single most important signal is **`node_timex_sync_status`**: 1 means
+  the clock is disciplined by NTP/chrony, 0 means it is free-running and will drift. So this
+  dashboard leads with the count of unsynchronised hosts and the worst offset, then trends
+  per-host offset so you can catch a host pulling away before it crosses your tolerance.
+  Offsets are tiny numbers — display them in milliseconds, alert in the tens of
+  milliseconds, and remember a single bad upstream time server can skew a whole fleet at
+  once.
+
+data_sources:
+  - "`node_exporter` `timex` collector (`node_timex_sync_status`, `node_timex_offset_seconds`,
+    `node_timex_maxerror_seconds`, `node_timex_esterror_seconds`)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job for your node_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(node_uname_info{job="$job"}, instance)
+    description: Host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Sync health — read these first
+    panels:
+      - type: stat
+        title: Hosts out of sync
+        description: Count of hosts whose clock is not currently disciplined by NTP/chrony (sync status 0).
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(node_timex_sync_status{job="$job", instance=~"$instance"} == 0) or vector(0)
+            instant: true
+            legend: out of sync
+      - type: stat
+        title: Worst clock offset
+        description: Largest absolute offset from true time across hosts. Tens of milliseconds is fine; seconds is not.
+        unit: s
+        decimals: 4
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.05}
+          - {color: red, value: 0.5}
+        targets:
+          - expr: max(abs(node_timex_offset_seconds{job="$job", instance=~"$instance"})) or vector(0)
+            instant: true
+            legend: worst offset
+      - type: stat
+        title: Hosts synchronised
+        description: Count of hosts whose clock is currently disciplined (sync status 1).
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: count(node_timex_sync_status{job="$job", instance=~"$instance"} == 1) or vector(0)
+            instant: true
+            legend: synced
+      - type: stat
+        title: Widest max error
+        description: Largest kernel maximum-error bound across hosts — how far off the clock could be in the worst case.
+        unit: s
+        decimals: 4
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.1}
+          - {color: red, value: 1}
+        targets:
+          - expr: max(node_timex_maxerror_seconds{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: max error
+
+  - title: Sync status
+    panels:
+      - type: state-timeline
+        title: Sync status over time
+        description: Per-host clock discipline. Green is synchronised; red is free-running and drifting.
+        unit: short
+        height: 9
+        mappings:
+          - type: value
+            options:
+              "0": {text: out of sync, color: red}
+              "1": {text: synced, color: green}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: node_timex_sync_status{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+
+  - title: Offset and error
+    panels:
+      - type: timeseries
+        title: Clock offset per host
+        description: Per-host offset from true time. A line trending away from zero is a host losing its time source.
+        unit: s
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.05}
+        targets:
+          - expr: node_timex_offset_seconds{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Max and estimated error (fleet)
+        description: Kernel-reported worst-case and estimated error bounds, averaged across the fleet.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: avg(node_timex_maxerror_seconds{job="$job", instance=~"$instance"})
+            legend: max error
+          - expr: avg(node_timex_esterror_seconds{job="$job", instance=~"$instance"})
+            legend: estimated error
+
+  - title: Worst offenders
+    panels:
+      - type: bargauge
+        title: Top hosts by absolute offset
+        description: Ranked absolute clock offset — the hosts furthest from true time first.
+        unit: s
+        decimals: 4
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.05}
+          - {color: red, value: 0.5}
+        targets:
+          - expr: topk(10, abs(node_timex_offset_seconds{job="$job", instance=~"$instance"}))
+            instant: true
+            legend: "{{instance}}"
+
+alerts:
+  - name: HostClockNotSynchronised
+    severity: warning
+    expr: node_timex_sync_status == 0
+    for: 10m
+    summary: "Host {{ $labels.instance }} clock is not synchronised"
+    why: A free-running clock drifts and will eventually break auth tokens, TLS validity windows and log correlation across the fleet.
+    investigate: "On the host check `chronyc tracking` / `timedatectl` and whether the NTP/chrony service is running and can reach its upstreams."
+    runbook: "Restart chrony/ntpd, verify reachable and trusted upstream time servers, and confirm UDP/123 is not blocked by a firewall."
+    recovery: Clears when the host reports sync status 1 for 5m.
+    false_positives: A brief unsynced window right after boot or a time-service restart before the first poll completes.
+  - name: HostClockOffsetHigh
+    severity: warning
+    expr: abs(node_timex_offset_seconds) > 0.1
+    for: 10m
+    summary: "Host {{ $labels.instance }} clock offset over 100ms"
+    why: An offset above 100ms is enough to fail tight TLS/Kerberos validity checks and to misorder events in distributed systems.
+    investigate: "Compare against other hosts — if many drift together, suspect a bad upstream time source; if one drifts alone, suspect its local service or a VM clock-steal issue."
+    runbook: "Correct the source (replace the bad upstream or fix the local daemon); on VMs, ensure the host time source and guest agent are healthy."
+    recovery: Clears when the absolute offset stays below 100ms for 5m.
+    false_positives: A short offset spike during a step correction after the service catches up from a large initial error.
+
+troubleshooting:
+  - symptom: All time-sync panels show "No data"
+    cause: The timex collector is disabled or unavailable (it is Linux-specific).
+    action: Confirm `node_timex_sync_status` appears in Explore; the timex collector is enabled by default on Linux node_exporter.
+  - symptom: Offset shows as a huge number once then recovers
+    cause: A step correction after the daemon disciplined a badly-wrong clock.
+    action: Expected after boot or after restoring connectivity; watch that it settles near zero.
+  - symptom: Many hosts drift in lockstep
+    cause: A shared upstream NTP source is itself wrong or unreachable.
+    action: Fix or replace the upstream; per-host remediation will not help a bad common source.
+
+performance: >-
+  All timex series are one per host and very low cardinality, so this dashboard is cheap
+  even on large fleets. Headline stats are instant reads aggregated with `max`/`count`; the
+  offset trend returns one series per instance. No rate windows are needed — these are gauge
+  metrics.
+
+customization: >-
+  Tune the 100ms offset threshold to your strictest consumer — Kerberos defaults to a 5m
+  skew tolerance, but databases and TLS pinning may need single-digit milliseconds. Scope
+  `$instance` by role if some hosts (PTP-disciplined, GPS-backed) have tighter requirements
+  than the rest.

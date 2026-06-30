@@ -1,0 +1,216 @@
+title: OpenStack / Cinder — Volume Inventory
+description: >-
+  Block-storage volume inventory and lifecycle states for an OpenStack deployment:
+  the status mix (available / in-use / error / creating), volumes stuck in error or
+  creating, and snapshot footprint. Leads with error and stuck-creating counts so
+  failed and wedged volumes surface before tenants open a ticket.
+datasource: prometheus
+tags: [openstack, cinder, volumes, block-storage, openstack-exporter]
+seo_phrase: OpenStack Cinder volumes Grafana dashboard
+
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many volumes are in error right now?"
+  - "Are any volumes stuck in creating (a wedged scheduler or backend)?"
+  - "What is the overall volume status mix — available vs in-use vs broken?"
+  - "How many snapshots exist, and is the count growing unusually fast?"
+  - "Is any single status trending up in a way that signals an incident?"
+
+production_lessons: >-
+  The status mix is the fastest lifecycle health check Cinder offers. A healthy
+  deployment sits almost entirely in `available` and `in-use`, with `creating` and
+  `deleting` flickering near zero. When `creating` climbs and stays up, the
+  scheduler or a backend is wedged and every new request is queuing behind it; when
+  `error` accumulates, past operations failed and left volumes that won't self-heal
+  and still consume quota. This dashboard separates those two failure shapes and
+  trends each status so you can see which way an incident is moving. Snapshots get
+  their own panel because a runaway snapshot job is a classic way to silently
+  consume backend capacity that the volume count alone never reveals.
+
+data_sources:
+  - "`openstack-exporter` with Cinder enabled — exposes
+    `openstack_cinder_volume_status` (label `status`),
+    `openstack_cinder_volumes` (total) and `openstack_cinder_snapshots`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_cinder_volumes, job)
+    description: Prometheus scrape job for your openstack-exporter target(s).
+    multi: false
+    includeAll: false
+
+rows:
+  - title: Broken volumes — read these first
+    panels:
+      - type: stat
+        title: Volumes in error
+        description: Volumes in the error state — failed operations that won't self-heal and still hold quota.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: sum(openstack_cinder_volume_status{job="$job", status="error"}) or vector(0)
+            instant: true
+            legend: error
+      - type: stat
+        title: Stuck creating
+        description: Volumes in creating — normally clears in seconds; a sustained count means a wedged scheduler or backend.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 3}
+          - {color: red, value: 10}
+        targets:
+          - expr: sum(openstack_cinder_volume_status{job="$job", status="creating"}) or vector(0)
+            instant: true
+            legend: creating
+      - type: stat
+        title: Total volumes
+        description: All Cinder volumes in the deployment.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: sum(openstack_cinder_volumes{job="$job"}) or vector(0)
+            instant: true
+            legend: volumes
+      - type: stat
+        title: Snapshots
+        description: Total Cinder snapshots — watch for runaway growth eating backend capacity.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: sum(openstack_cinder_snapshots{job="$job"}) or vector(0)
+            instant: true
+            legend: snapshots
+
+  - title: Status mix
+    panels:
+      - type: piechart
+        title: Volumes by status
+        description: Share of volumes in each lifecycle state — a healthy cloud is almost all available/in-use.
+        unit: short
+        pieType: donut
+        targets:
+          - expr: sum by (status) (openstack_cinder_volume_status{job="$job"})
+            instant: true
+            legend: "{{status}}"
+      - type: bargauge
+        title: Count by status
+        description: Absolute volume count per status, ranked.
+        unit: short
+        decimals: 0
+        orientation: horizontal
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: sum by (status) (openstack_cinder_volume_status{job="$job"})
+            instant: true
+            legend: "{{status}}"
+
+  - title: Trends
+    panels:
+      - type: timeseries
+        title: Status mix over time
+        description: Stacked status counts — a rising error or creating band shows an incident building.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum by (status) (openstack_cinder_volume_status{job="$job"})
+            legend: "{{status}}"
+      - type: timeseries
+        title: Error & creating over time
+        description: The two failure states isolated, so a slow climb is obvious against an otherwise quiet baseline.
+        unit: short
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5}
+        targets:
+          - expr: sum(openstack_cinder_volume_status{job="$job", status="error"})
+            legend: error
+          - expr: sum(openstack_cinder_volume_status{job="$job", status="creating"})
+            legend: creating
+      - type: timeseries
+        title: Volumes & snapshots
+        description: Total volume and snapshot counts over time — a diverging snapshot line flags a runaway job.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(openstack_cinder_volumes{job="$job"})
+            legend: volumes
+          - expr: sum(openstack_cinder_snapshots{job="$job"})
+            legend: snapshots
+
+alerts:
+  - name: CinderVolumesInError
+    severity: warning
+    expr: sum(openstack_cinder_volume_status{status="error"}) > 5
+    for: 15m
+    summary: "More than 5 Cinder volumes are in the error state"
+    why: Error volumes are failed operations that hold quota and never recover on their own — tenant-visible storage failures.
+    investigate: "Open OpenStack / Cinder — Volume Inventory; read the cinder-volume log for the backend/driver error behind the failures."
+    runbook: "Fix the backend cause, then `cinder reset-state` and retry or delete the affected volumes."
+    recovery: Clears when the error count drops to 5 or fewer.
+    false_positives: Leftover test volumes from a past incident inflate this — clean them up or scope by project.
+  - name: CinderVolumesStuckCreating
+    severity: warning
+    expr: sum(openstack_cinder_volume_status{status="creating"}) > 5
+    for: 30m
+    summary: "More than 5 Cinder volumes stuck creating for 30m"
+    why: Volumes should leave creating in seconds; a sustained backlog means the scheduler can't place them or a backend is wedged.
+    investigate: "Check cinder-scheduler state and per-pool free capacity; new requests are queuing behind the stuck ones."
+    runbook: "Restart cinder-scheduler if it is wedged, free or add backend capacity, and reset any genuinely stuck volumes."
+    recovery: Clears when creating drains below 5 for the window.
+    false_positives: A large legitimate provisioning burst transiently exceeds 5 — the 30m `for` filters normal bursts.
+  - name: CinderSnapshotRunaway
+    severity: info
+    expr: increase(sum(openstack_cinder_snapshots)[1h:]) > 200
+    for: 30m
+    summary: "Cinder snapshots grew by more than 200 in an hour"
+    why: A runaway snapshot job can silently consume backend capacity far faster than volume growth suggests, leading to a surprise out-of-space event.
+    investigate: "Identify the project/automation creating snapshots; check backend free capacity on the Storage Capacity dashboard."
+    runbook: "Pause or rate-limit the snapshot automation and prune obsolete snapshots."
+    recovery: Clears when hourly snapshot growth returns to normal.
+    false_positives: A planned bulk-backup window legitimately spikes snapshot creation — silence during those.
+
+troubleshooting:
+  - symptom: Status pie is mostly "error" or "creating"
+    cause: A backend or the scheduler is unhealthy.
+    action: Check service state on the Cinder Service Health dashboard.
+  - symptom: Snapshot count climbs but volumes are flat
+    cause: An automation is creating snapshots without pruning.
+    action: Find and rate-limit the job; prune old snapshots to reclaim backend space.
+  - symptom: Counts look too low
+    cause: Exporter scoped to a single project.
+    action: Re-scope the exporter to admin to enumerate all volumes.
+
+performance: >-
+  Every panel uses `sum by (status)` or `sum`, collapsing to one series per status,
+  so cost is independent of volume count. The status mix series is shared across the
+  pie, bargauge and trend panels for a consistent picture.
+
+customization: >-
+  Tune the error/creating thresholds and the snapshot-growth alert to your
+  provisioning velocity. To break the status mix down per backend, add a
+  `hostname`/`pool` selector if your exporter labels volumes with it.

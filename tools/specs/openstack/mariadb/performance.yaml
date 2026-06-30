@@ -1,0 +1,226 @@
+title: OpenStack / MariaDB — Performance
+description: >-
+  MariaDB throughput and saturation behind the OpenStack control plane: connection
+  pool headroom, running threads, query and slow-query rates, and InnoDB buffer
+  pool pressure. Answers "is the database the bottleneck — out of connections,
+  drowning in slow queries, or starved of buffer pool?" before API calls time out.
+datasource: prometheus
+tags: [openstack, mariadb, mysql, database, mysqld-exporter]
+seo_phrase: MariaDB performance Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How close is each node to max_connections (connection exhaustion)?"
+  - "How many threads are actually running (active concurrency) right now?"
+  - "Is the slow-query rate climbing (a bad plan or missing index)?"
+  - "Is the InnoDB buffer pool nearly full / churning (memory pressure)?"
+
+production_lessons: >-
+  The classic OpenStack database outage is connection exhaustion, not CPU: every
+  control service holds a SQLAlchemy pool, and when an agent storms reconnects (or
+  someone forgets to size `max_connections` for the fleet) the database starts
+  rejecting connections and every API returns 500 at once. So this dashboard leads
+  with connection saturation as a percent of `max_connections`, then running
+  threads (real concurrency, which `threads_connected` overstates). Slow queries
+  are the second story: a single missing index after a schema migration can quietly
+  multiply latency long before connections fill.
+
+data_sources:
+  - "`mysqld_exporter` with the global status and global variables collectors,
+    exposing `mysql_global_status_*` and `mysql_global_variables_max_connections`."
+  - "InnoDB buffer-pool pressure is read from `innodb_buffer_pool_pages_total` and
+    `innodb_buffer_pool_pages_free`; a true hit ratio needs the read-request
+    counters which are not assumed here, so this focuses on fill and free pages."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(mysql_global_status_threads_connected, job)
+    description: Prometheus scrape job for your mysqld_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Node
+    query: label_values(mysql_global_status_threads_connected{job="$job"}, instance)
+    description: MariaDB node(s); supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Saturation — read these first
+    panels:
+      - type: gauge
+        title: Max connection saturation
+        description: Highest threads_connected as a percent of max_connections across nodes. Near 100% the database starts refusing connections.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(100 * mysql_global_status_threads_connected{job="$job", instance=~"$instance"}
+                  / clamp_min(mysql_global_variables_max_connections{job="$job", instance=~"$instance"}, 1)) or vector(0)
+            instant: true
+            legend: saturation
+      - type: stat
+        title: Slow queries/s
+        description: Cluster-wide slow-query rate. A rising value points at a bad plan or a missing index.
+        unit: ops
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 10}
+        targets:
+          - expr: sum(rate(mysql_global_status_slow_queries{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: slow/s
+      - type: stat
+        title: Threads running
+        description: Threads actively executing a query right now (real concurrency). Spikes mean queries are queueing.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 20}
+          - {color: red, value: 50}
+        targets:
+          - expr: sum(mysql_global_status_threads_running{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: running
+      - type: stat
+        title: Queries/s
+        description: Cluster-wide query throughput. Useful as a baseline to spot sudden drops (stall) or spikes (storm).
+        unit: ops
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(mysql_global_status_queries{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: qps
+
+  - title: Connections & concurrency
+    panels:
+      - type: timeseries
+        title: Connections vs limit per node
+        description: threads_connected against max_connections per node. The gap is your headroom before the database refuses logins.
+        unit: short
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: mysql_global_status_threads_connected{job="$job", instance=~"$instance"}
+            legend: "{{instance}} connected"
+          - expr: mysql_global_variables_max_connections{job="$job", instance=~"$instance"}
+            legend: "{{instance}} max"
+      - type: timeseries
+        title: Threads connected vs running
+        description: Pooled connections (connected) versus active queries (running). A wide gap is idle pooled connections; a high running count is real load.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(mysql_global_status_threads_connected{job="$job", instance=~"$instance"})
+            legend: connected
+          - expr: sum(mysql_global_status_threads_running{job="$job", instance=~"$instance"})
+            legend: running
+
+  - title: Throughput & InnoDB
+    panels:
+      - type: timeseries
+        title: Query & slow-query rate
+        description: Overall query rate with slow queries overlaid. A flat QPS with rising slow queries means plans degraded, not load.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(mysql_global_status_queries{job="$job", instance=~"$instance"}[5m]))
+            legend: queries/s
+          - expr: sum(rate(mysql_global_status_slow_queries{job="$job", instance=~"$instance"}[5m]))
+            legend: slow/s
+      - type: gauge
+        title: InnoDB buffer pool used
+        description: Percent of InnoDB buffer pool pages in use (total minus free). Persistently ~100% means the working set exceeds RAM and pages are churning.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 90}
+          - {color: red, value: 98}
+        targets:
+          - expr: >-
+              max(100 * (1 - mysql_global_status_innodb_buffer_pool_pages_free{job="$job", instance=~"$instance"}
+                  / clamp_min(mysql_global_status_innodb_buffer_pool_pages_total{job="$job", instance=~"$instance"}, 1))) or vector(0)
+            instant: true
+            legend: pool used
+
+alerts:
+  - name: MariaDBConnectionSaturation
+    severity: critical
+    expr: >-
+      100 * mysql_global_status_threads_connected
+      / mysql_global_variables_max_connections > 90
+    for: 5m
+    summary: "MariaDB {{ $labels.instance }} connection pool >90% of max_connections"
+    why: Near the limit MariaDB starts rejecting new connections, and every OpenStack control service that cannot get a connection returns 500 — a full control-plane outage.
+    investigate: "Open OpenStack / MariaDB — Performance, check connections vs limit per node and which service opened a flood of connections (look at the API/agent logs)."
+    runbook: "Raise `max_connections` (and OS file-descriptor limits) for breathing room, then fix the root cause: a service leaking connections or a reconnect storm after a restart."
+    recovery: Clears when utilisation drops below 90% for several minutes.
+    false_positives: A brief reconnect storm right after a control-plane restart; the 5m `for` filters transients.
+  - name: MariaDBSlowQuerySpike
+    severity: warning
+    expr: sum(rate(mysql_global_status_slow_queries[5m])) > 10
+    for: 10m
+    summary: "MariaDB slow-query rate above 10/s for 10m"
+    why: A sustained slow-query rate usually follows a schema change or data growth that invalidated an index, multiplying control-plane latency well before connections fill.
+    investigate: "Enable/inspect the slow-query log, identify the offending statement, and check for a missing index after the last migration."
+    runbook: "Add the missing index or fix the query/ORM call; if it is a one-off report, run it off the primary write node."
+    recovery: Clears when the slow-query rate falls back below 10/s.
+    false_positives: Scheduled heavy reports or backups; silence during known maintenance windows.
+  - name: MariaDBBufferPoolExhausted
+    severity: warning
+    expr: >-
+      100 * (1 - mysql_global_status_innodb_buffer_pool_pages_free
+      / mysql_global_status_innodb_buffer_pool_pages_total) > 98
+    for: 15m
+    summary: "InnoDB buffer pool >98% used on {{ $labels.instance }}"
+    why: A buffer pool pinned near full means the working set no longer fits in RAM, so reads hit disk and query latency climbs across the board.
+    investigate: "Check whether data growth or a large scan filled the pool; review query/slow-query rate alongside."
+    runbook: "Increase `innodb_buffer_pool_size` if RAM allows, or reduce the working set (archiving, better indexes to avoid full scans)."
+    recovery: Clears when free pages recover below the threshold.
+    false_positives: A fully warmed pool on a right-sized server can legitimately sit near 100%; correlate with disk read latency before acting.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The global-status/variables collectors are off, or the exporter user lacks privileges.
+    action: "Grant the exporter user `PROCESS`/`SELECT` on the status tables and enable the collectors; confirm `mysql_up == 1`."
+  - symptom: Saturation gauge reads 0 or absurdly high
+    cause: max_connections is missing (variables collector disabled), so the ratio divides by the `clamp_min` floor.
+    action: Enable the `global_variables` collector so `max_connections` is exported.
+  - symptom: Slow-query rate is always zero
+    cause: The `long_query_time` threshold is high or the slow-query counter is disabled.
+    action: Tune `long_query_time` to a meaningful value (e.g. 1s) so genuinely slow statements are counted.
+
+performance: >-
+  Status counters are low cardinality; rates use a 5m window for smooth lines
+  across counter resets. Aggregations are `sum`/`max` by node, so series count is
+  one per node. On a large multi-cluster Prometheus, scope `$job` per cluster so
+  the cluster-wide `sum`s do not blend unrelated databases.
+
+customization: >-
+  Set the saturation thresholds to match your pool sizing and the slow-query alert
+  to your latency budget. If you export the InnoDB read-request counters, add a
+  true buffer-pool hit-ratio panel. Pair with the Galera dashboard so you can tell
+  a connection problem from a replication problem on the same node.

@@ -1,0 +1,239 @@
+# Apache httpd health from mod_status via apache_exporter.
+title: Apache / httpd Overview
+description: >-
+  Worker saturation, request and byte throughput, scoreboard state and CPU load
+  for Apache httpd scraped by apache_exporter. Answers "is Apache about to run out
+  of workers, and what are they doing?" rather than just plotting request count.
+datasource: prometheus
+tags: [apache, httpd, web, mod-status, saturation]
+seo_phrase: Apache httpd Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How close is Apache to exhausting its worker pool (saturation %)?"
+  - "What is the request rate and how many bytes are we pushing?"
+  - "What are the workers actually doing — sending, reading, keep-alive, closing?"
+  - "Is Apache burning CPU out of proportion to its traffic?"
+  - "Which instance is the hot spot?"
+
+production_lessons: >-
+  Apache outages are almost always **worker exhaustion**, not raw CPU. With the
+  prefork/worker MPM a fixed `MaxRequestWorkers` cap means that once every worker
+  is busy, new requests queue in the kernel backlog and then get refused — the
+  request-rate graph can even *drop* while users see timeouts. This dashboard
+  leads with busy-vs-idle worker saturation so you see the cliff coming, then uses
+  the scoreboard to tell you *why* workers are busy (slow upstreams hold workers in
+  the W "sending" state; many K states mean keep-alive is hoarding them).
+
+data_sources:
+  - "`apache_exporter` scraping `mod_status` with `ExtendedStatus On`
+    (`apache_up`, `apache_accesses_total`, `apache_sent_kilobytes_total`,
+    `apache_workers{state}`, `apache_scoreboard{state}`, `apache_cpuload`,
+    `apache_duration_ms_total`, `apache_uptime_seconds_total`)."
+  - "`apache_workers` carries `state=\"busy\"` and `state=\"idle\"`; the scoreboard
+    `state` label uses the mod_status single-letter codes (W, R, K, C, …)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(apache_up, job)
+    description: Prometheus scrape job for your apache_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(apache_up{job="$job"}, instance)
+    description: Apache host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Saturation & throughput — read these first
+    panels:
+      - type: gauge
+        title: Worker saturation
+        description: Busy workers as a percent of the total pool. Above 90% means you are about to queue and refuse requests.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 *
+              max by (instance) (apache_workers{job="$job", instance=~"$instance", state="busy"})
+              /
+              clamp_min(sum by (instance) (apache_workers{job="$job", instance=~"$instance"}), 1)
+            instant: true
+            legend: "{{instance}}"
+      - type: stat
+        title: Request rate
+        description: Requests per second served across the selected instances.
+        unit: reqps
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(apache_accesses_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: requests
+      - type: stat
+        title: Bytes sent /s
+        description: Response throughput in bytes per second (kilobytes counter × 1024).
+        unit: Bps
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(apache_sent_kilobytes_total{job="$job", instance=~"$instance"}[5m])) * 1024 or vector(0)
+            instant: true
+            legend: bytes
+      - type: stat
+        title: Instances down
+        description: Apache targets reporting apache_up == 0.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(apache_up{job="$job", instance=~"$instance"} == 0) or vector(0)
+            instant: true
+            legend: down
+
+  - title: Throughput trend
+    panels:
+      - type: timeseries
+        title: Request rate per instance
+        description: Per-instance requests/s — find the hot node and watch for a drop that signals worker exhaustion.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(apache_accesses_total{job="$job", instance=~"$instance"}[5m])
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Bytes sent per instance
+        description: Per-instance egress throughput in bytes per second.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(apache_sent_kilobytes_total{job="$job", instance=~"$instance"}[5m]) * 1024
+            legend: "{{instance}}"
+
+  - title: Worker pool & scoreboard
+    panels:
+      - type: timeseries
+        title: Busy vs idle workers
+        description: The worker pool over time. When idle approaches zero you are at the MaxRequestWorkers ceiling.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 40
+        legend: table
+        targets:
+          - expr: sum by (state) (apache_workers{job="$job", instance=~"$instance"})
+            legend: "{{state}}"
+      - type: bargauge
+        title: Scoreboard states
+        description: What workers are doing right now (W=sending, R=reading, K=keep-alive, C=closing, _=waiting). A wall of W means slow responses.
+        unit: short
+        min: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum by (state) (apache_scoreboard{job="$job", instance=~"$instance"})
+            instant: true
+            legend: "{{state}}"
+
+  - title: CPU & latency
+    panels:
+      - type: timeseries
+        title: Apache CPU load
+        description: CPU percentage attributed to Apache by mod_status. Can exceed 100% across multiple cores.
+        unit: percent
+        min: 0
+        legend: table
+        targets:
+          - expr: apache_cpuload{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Mean request duration
+        description: Average time per request (total duration ÷ total accesses). Rising duration with flat traffic points at slow backends.
+        unit: ms
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              rate(apache_duration_ms_total{job="$job", instance=~"$instance"}[5m])
+              /
+              clamp_min(rate(apache_accesses_total{job="$job", instance=~"$instance"}[5m]), 1)
+            legend: "{{instance}}"
+
+alerts:
+  - name: ApacheWorkerSaturationHigh
+    severity: critical
+    expr: >-
+      100 *
+      apache_workers{state="busy"}
+      /
+      clamp_min(sum by (job, instance) (apache_workers), 1)
+      > 90
+    for: 10m
+    summary: "Apache {{ $labels.instance }} worker pool >90% busy"
+    why: With almost no idle workers, Apache queues then refuses new connections — an imminent outage that raw CPU won't reveal.
+    investigate: "Open Apache / httpd Overview; check the scoreboard — a wall of W (sending) usually means a slow backend or DB is holding workers."
+    runbook: "Fix the slow upstream so workers free up; as a stopgap raise `MaxRequestWorkers`/`ServerLimit` (watch memory) and reload, or add an instance behind the LB."
+    recovery: Clears when busy workers fall below 90% of the pool for 5m.
+    false_positives: Brief saturation during a traffic burst that the pool absorbs — the 10m `for` filters spikes.
+  - name: ApacheDown
+    severity: critical
+    expr: apache_up == 0
+    for: 5m
+    summary: "Apache target {{ $labels.instance }} is down (apache_up == 0)"
+    why: The exporter can't reach mod_status — Apache is down or unreachable and you are blind to it.
+    investigate: "Check the httpd service and the `/server-status` handler; confirm the exporter can reach it."
+    runbook: "Restart httpd or the exporter; verify `mod_status` is loaded and the `/server-status` location permits the exporter's IP."
+    recovery: Clears when apache_up returns to 1.
+    false_positives: Planned restarts — the 5m `for` covers a normal graceful restart.
+  - name: ApacheHighCPULoad
+    severity: warning
+    expr: apache_cpuload > 85
+    for: 10m
+    summary: "Apache {{ $labels.instance }} CPU load >85%"
+    why: Sustained high CPU in Apache itself (not the app) often means TLS handshakes, mod_rewrite loops or compression overwhelming the box.
+    investigate: "Correlate with request rate; if CPU is high but traffic is flat, profile rewrite rules and TLS settings."
+    runbook: "Offload TLS to a terminator, enable keep-alive/HTTP-2, cache static content, or scale out."
+    recovery: Clears when CPU load falls below 85% for 5m.
+    false_positives: Multi-core boxes where mod_status reports load above 100% normally — set the threshold per core count.
+
+troubleshooting:
+  - symptom: All panels "No data"
+    cause: ExtendedStatus is off, or wrong `$job`.
+    action: "Set `ExtendedStatus On`, confirm `apache_accesses_total` appears in Explore, and check the job label."
+  - symptom: Saturation stuck at 100%
+    cause: Reporting only busy workers, or MaxRequestWorkers set very low.
+    action: Verify `apache_workers{state="idle"}` is exported; raise the worker limit if the pool is genuinely tiny.
+  - symptom: Bytes panel looks 1000× off
+    cause: Treating the kilobytes counter as bytes.
+    action: Keep the `× 1024` conversion as in this spec; the metric is kilobytes.
+
+performance: >-
+  Counters use a 5m rate window so they survive a graceful restart; gauges are
+  read instantly. Aggregations use `by (instance|state)` to keep one series per
+  host or worker state. The scoreboard bargauge is an instant query, so it stays
+  cheap even with many instances.
+
+customization: >-
+  Set the saturation thresholds relative to your `MaxRequestWorkers` headroom.
+  If you run the event MPM, the scoreboard semantics shift (async connections) —
+  relabel the legend accordingly. Scope `$instance` to a tier to separate edge
+  web nodes from internal ones.

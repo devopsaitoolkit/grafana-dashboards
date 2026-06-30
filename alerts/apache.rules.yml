@@ -1,0 +1,43 @@
+# Alerting rules for the apache dashboards.
+# Generated from tools/specs/apache/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: apache.rules
+  rules:
+  - alert: ApacheWorkerSaturationHigh
+    expr: 100 * apache_workers{state="busy"} / clamp_min(sum by (job, instance) (apache_workers), 1) >
+      90
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Apache {{ $labels.instance }} worker pool >90% busy
+      description: With almost no idle workers, Apache queues then refuses new connections — an imminent
+        outage that raw CPU won't reveal.
+      runbook: Fix the slow upstream so workers free up; as a stopgap raise `MaxRequestWorkers`/`ServerLimit`
+        (watch memory) and reload, or add an instance behind the LB.
+      dashboard: dashboards/apache/overview.json
+  - alert: ApacheDown
+    expr: apache_up == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Apache target {{ $labels.instance }} is down (apache_up == 0)
+      description: The exporter can't reach mod_status — Apache is down or unreachable and you are blind
+        to it.
+      runbook: Restart httpd or the exporter; verify `mod_status` is loaded and the `/server-status` location
+        permits the exporter's IP.
+      dashboard: dashboards/apache/overview.json
+  - alert: ApacheHighCPULoad
+    expr: apache_cpuload > 85
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Apache {{ $labels.instance }} CPU load >85%
+      description: Sustained high CPU in Apache itself (not the app) often means TLS handshakes, mod_rewrite
+        loops or compression overwhelming the box.
+      runbook: Offload TLS to a terminator, enable keep-alive/HTTP-2, cache static content, or scale out.
+      dashboard: dashboards/apache/overview.json

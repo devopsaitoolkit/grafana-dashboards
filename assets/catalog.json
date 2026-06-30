@@ -1,0 +1,2615 @@
+{
+  "dashboards": [
+    {
+      "title": "Apache / httpd Overview",
+      "uid": "apache-overview",
+      "category": "apache",
+      "slug": "overview",
+      "domain": "apache",
+      "datasource": "prometheus",
+      "tags": [
+        "apache",
+        "httpd",
+        "web",
+        "mod-status",
+        "saturation"
+      ],
+      "panels": 10,
+      "questions": [
+        "How close is Apache to exhausting its worker pool (saturation %)?",
+        "What is the request rate and how many bytes are we pushing?",
+        "What are the workers actually doing \u2014 sending, reading, keep-alive, closing?",
+        "Is Apache burning CPU out of proportion to its traffic?",
+        "Which instance is the hot spot?"
+      ],
+      "json": "dashboards/apache/overview.json",
+      "doc": "docs/dashboards/apache/overview.md",
+      "screenshot": "screenshots/apache/overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "AWS / EC2 (CloudWatch)",
+      "uid": "aws-ec2",
+      "category": "aws",
+      "slug": "ec2",
+      "domain": "aws",
+      "datasource": "prometheus",
+      "tags": [
+        "aws",
+        "ec2",
+        "cloudwatch",
+        "cloud",
+        "capacity"
+      ],
+      "panels": 10,
+      "questions": [
+        "Are any instances failing their EC2 status checks right now?",
+        "Which instances are running hottest on CPU?",
+        "How many instances are above my CPU threshold?",
+        "Is EBS burst-balance (IOPS credits) draining toward zero?",
+        "Is network in/out spiking on any instance?"
+      ],
+      "json": "dashboards/aws/ec2.json",
+      "doc": "docs/dashboards/aws/ec2.md",
+      "screenshot": "screenshots/aws/ec2.svg",
+      "alerts": 3
+    },
+    {
+      "title": "AWS / RDS (CloudWatch)",
+      "uid": "aws-rds",
+      "category": "aws",
+      "slug": "rds",
+      "domain": "aws",
+      "datasource": "prometheus",
+      "tags": [
+        "aws",
+        "rds",
+        "database",
+        "cloudwatch",
+        "capacity"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which database has the least free storage, and how fast is it shrinking?",
+        "Is any instance near its connection limit?",
+        "Are read/write latencies degrading?",
+        "Is a read replica lagging behind the primary?",
+        "Is freeable memory low enough to threaten the buffer cache?"
+      ],
+      "json": "dashboards/aws/rds.json",
+      "doc": "docs/dashboards/aws/rds.md",
+      "screenshot": "screenshots/aws/rds.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Azure / Virtual Machines",
+      "uid": "azure-virtual-machines",
+      "category": "azure",
+      "slug": "virtual-machines",
+      "domain": "azure",
+      "datasource": "prometheus",
+      "tags": [
+        "azure",
+        "vm",
+        "azure-monitor",
+        "cloud",
+        "capacity"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which VMs are running hottest on CPU right now?",
+        "How many VMs are low on available memory?",
+        "Is any VM's OS disk queue backing up (IO bottleneck)?",
+        "Which VMs are driving the most disk and network traffic?",
+        "Is a noisy VM consuming a resource group's headroom?"
+      ],
+      "json": "dashboards/azure/virtual-machines.json",
+      "doc": "docs/dashboards/azure/virtual-machines.md",
+      "screenshot": "screenshots/azure/virtual-machines.svg",
+      "alerts": 3
+    },
+    {
+      "title": "cAdvisor / Container Detail",
+      "uid": "cadvisor-container-detail",
+      "category": "cadvisor",
+      "slug": "container-detail",
+      "domain": "cadvisor",
+      "datasource": "prometheus",
+      "tags": [
+        "cadvisor",
+        "container",
+        "docker",
+        "single-container",
+        "saturation"
+      ],
+      "panels": 9,
+      "questions": [
+        "How close is this container to its memory limit?",
+        "Is the container being CPU throttled, and how hard?",
+        "Is its filesystem filling up?",
+        "What is its network throughput and is it erroring?"
+      ],
+      "json": "dashboards/cadvisor/container-detail.json",
+      "doc": "docs/dashboards/cadvisor/container-detail.md",
+      "screenshot": "screenshots/cadvisor/container-detail.svg",
+      "alerts": 3
+    },
+    {
+      "title": "cAdvisor / Container Overview",
+      "uid": "cadvisor-container-overview",
+      "category": "cadvisor",
+      "slug": "container-overview",
+      "domain": "cadvisor",
+      "datasource": "prometheus",
+      "tags": [
+        "cadvisor",
+        "containers",
+        "docker",
+        "overview",
+        "saturation"
+      ],
+      "panels": 9,
+      "questions": [
+        "Which containers are burning the most CPU and memory right now?",
+        "How many containers are running on this host?",
+        "Are any containers being CPU throttled (capped below what they want)?",
+        "What is the total container network throughput?"
+      ],
+      "json": "dashboards/cadvisor/container-overview.json",
+      "doc": "docs/dashboards/cadvisor/container-overview.md",
+      "screenshot": "screenshots/cadvisor/container-overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Docker / Compose Stack",
+      "uid": "docker-compose-stack",
+      "category": "docker",
+      "slug": "compose-stack",
+      "domain": "docker",
+      "datasource": "prometheus",
+      "tags": [
+        "docker",
+        "compose",
+        "stack",
+        "cadvisor",
+        "multi-tenant"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which Compose stack is consuming the most CPU and memory?",
+        "How much network bandwidth does each stack push?",
+        "Are any containers in a stack restarting?",
+        "How many containers does each stack currently run?"
+      ],
+      "json": "dashboards/docker/compose-stack.json",
+      "doc": "docs/dashboards/docker/compose-stack.md",
+      "screenshot": "screenshots/docker/compose-stack.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Docker / Container Inventory",
+      "uid": "docker-containers",
+      "category": "docker",
+      "slug": "containers",
+      "domain": "docker",
+      "datasource": "prometheus",
+      "tags": [
+        "docker",
+        "containers",
+        "inventory",
+        "restarts",
+        "health"
+      ],
+      "panels": 8,
+      "questions": [
+        "How many containers are running versus stopped right now?",
+        "Which containers have restarted in the last hour?",
+        "Is any container stuck in a crash/restart loop?",
+        "What is each container consuming in CPU and memory?"
+      ],
+      "json": "dashboards/docker/containers.json",
+      "doc": "docs/dashboards/docker/containers.md",
+      "screenshot": "screenshots/docker/containers.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Docker / Engine & Hosts",
+      "uid": "docker-engine-hosts",
+      "category": "docker",
+      "slug": "engine-hosts",
+      "domain": "docker",
+      "datasource": "prometheus",
+      "tags": [
+        "docker",
+        "engine",
+        "daemon",
+        "host",
+        "capacity"
+      ],
+      "panels": 11,
+      "questions": [
+        "How many containers are running, paused or stopped on each engine?",
+        "Does the host have CPU and memory headroom for more containers?",
+        "Is there unusual image pull/build activity?",
+        "Which engine version and configuration is each host running?"
+      ],
+      "json": "dashboards/docker/engine-hosts.json",
+      "doc": "docs/dashboards/docker/engine-hosts.md",
+      "screenshot": "screenshots/docker/engine-hosts.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Docker / Images & Volumes",
+      "uid": "docker-images-volumes",
+      "category": "docker",
+      "slug": "images-volumes",
+      "domain": "docker",
+      "datasource": "prometheus",
+      "tags": [
+        "docker",
+        "storage",
+        "filesystem",
+        "volumes",
+        "capacity"
+      ],
+      "panels": 8,
+      "questions": [
+        "How many containers are near their filesystem limit right now?",
+        "Which containers are consuming the most disk?",
+        "Which writable layers or volumes are growing fastest?",
+        "Will any container fill its filesystem within the next few hours?"
+      ],
+      "json": "dashboards/docker/images-volumes.json",
+      "doc": "docs/dashboards/docker/images-volumes.md",
+      "screenshot": "screenshots/docker/images-volumes.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Docker / Container Networking",
+      "uid": "docker-networks",
+      "category": "docker",
+      "slug": "networks",
+      "domain": "docker",
+      "datasource": "prometheus",
+      "tags": [
+        "docker",
+        "networking",
+        "cadvisor",
+        "bandwidth",
+        "errors"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which containers are using the most network bandwidth right now?",
+        "Is any container seeing receive or transmit errors?",
+        "Are packets being dropped on any container interface?",
+        "How does total ingress compare to egress for this host?"
+      ],
+      "json": "dashboards/docker/networks.json",
+      "doc": "docs/dashboards/docker/networks.md",
+      "screenshot": "screenshots/docker/networks.svg",
+      "alerts": 3
+    },
+    {
+      "title": "GCP / Compute Engine",
+      "uid": "gcp-compute",
+      "category": "gcp",
+      "slug": "compute",
+      "domain": "gcp",
+      "datasource": "prometheus",
+      "tags": [
+        "gcp",
+        "gce",
+        "compute",
+        "stackdriver",
+        "capacity"
+      ],
+      "panels": 9,
+      "questions": [
+        "Which instances are the busiest on CPU right now?",
+        "How many instances are above my utilisation threshold?",
+        "How is CPU utilisation distributed across the fleet (a few hot, or all warm)?",
+        "Which instances are pulling the most network traffic?",
+        "Is disk read throughput spiking anywhere?"
+      ],
+      "json": "dashboards/gcp/compute.json",
+      "doc": "docs/dashboards/gcp/compute.md",
+      "screenshot": "screenshots/gcp/compute.svg",
+      "alerts": 3
+    },
+    {
+      "title": "GCP / GKE Containers",
+      "uid": "gcp-gke",
+      "category": "gcp",
+      "slug": "gke",
+      "domain": "gcp",
+      "datasource": "prometheus",
+      "tags": [
+        "gcp",
+        "gke",
+        "kubernetes",
+        "stackdriver",
+        "containers"
+      ],
+      "panels": 9,
+      "questions": [
+        "Which namespace is consuming the most CPU and memory?",
+        "Which individual containers are the top CPU/memory consumers?",
+        "Are the nodes CPU-saturated?",
+        "Is one workload starving the rest of the cluster?",
+        "Did a deploy change the cluster's resource profile?"
+      ],
+      "json": "dashboards/gcp/gke.json",
+      "doc": "docs/dashboards/gcp/gke.md",
+      "screenshot": "screenshots/gcp/gke.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / API Server",
+      "uid": "kubernetes-apiserver",
+      "category": "kubernetes",
+      "slug": "apiserver",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "control-plane",
+        "apiserver",
+        "slo"
+      ],
+      "panels": 13,
+      "questions": [
+        "Is the API server inside its error budget (5xx ratio) right now?",
+        "What is read vs write p99 latency, and which verb is slow?",
+        "Are we saturating inflight capacity or being throttled by API Priority & Fairness?",
+        "Which resource/verb is generating the errors or the load?",
+        "Is slow etcd showing up as API server latency?"
+      ],
+      "json": "dashboards/kubernetes/apiserver.json",
+      "doc": "docs/dashboards/kubernetes/apiserver.md",
+      "screenshot": "screenshots/kubernetes/apiserver.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / Autoscaling",
+      "uid": "kubernetes-autoscaling",
+      "category": "kubernetes",
+      "slug": "autoscaling",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "autoscaling",
+        "hpa",
+        "kube-state-metrics"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which HPAs are pinned at their maximum replicas right now?",
+        "Is any HPA's desired count above its current \u2014 actively scaling up?",
+        "How close to the ceiling is each autoscaled workload?",
+        "Did a traffic spike push an HPA to max and hold it there?"
+      ],
+      "json": "dashboards/kubernetes/autoscaling.json",
+      "doc": "docs/dashboards/kubernetes/autoscaling.md",
+      "screenshot": "screenshots/kubernetes/autoscaling.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Kubernetes / Cluster Capacity",
+      "uid": "kubernetes-cluster-capacity",
+      "category": "kubernetes",
+      "slug": "cluster-capacity",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "capacity",
+        "planning",
+        "kube-state-metrics",
+        "headroom"
+      ],
+      "panels": 11,
+      "questions": [
+        "How much CPU, memory and pod headroom is left in the cluster right now?",
+        "At the current growth rate, how many days until CPU or memory is full?",
+        "Is committed capacity (requests) creeping toward allocatable?",
+        "Are we running out of pod slots before we run out of CPU or memory?"
+      ],
+      "json": "dashboards/kubernetes/cluster-capacity.json",
+      "doc": "docs/dashboards/kubernetes/cluster-capacity.md",
+      "screenshot": "screenshots/kubernetes/cluster-capacity.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Kubernetes / Cluster Overview",
+      "uid": "kubernetes-cluster-overview",
+      "category": "kubernetes",
+      "slug": "cluster-overview",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "cluster",
+        "kube-state-metrics",
+        "overview"
+      ],
+      "panels": 14,
+      "questions": [
+        "Are all nodes Ready, or is the control plane hiding a down node?",
+        "How many pods are Pending or Failed instead of Running right now?",
+        "How much CPU and memory has the scheduler committed versus what nodes can allocate?",
+        "Is anything crash-looping or restarting across the whole cluster?"
+      ],
+      "json": "dashboards/kubernetes/cluster-overview.json",
+      "doc": "docs/dashboards/kubernetes/cluster-overview.md",
+      "screenshot": "screenshots/kubernetes/cluster-overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / CoreDNS",
+      "uid": "kubernetes-coredns",
+      "category": "kubernetes",
+      "slug": "coredns",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "dns",
+        "coredns",
+        "networking"
+      ],
+      "panels": 10,
+      "questions": [
+        "Are queries failing with SERVFAIL right now?",
+        "What is DNS query p99 latency?",
+        "Is the cache hitting often enough, or is every lookup going upstream?",
+        "Which query types and zones drive the load?",
+        "Has any CoreDNS instance panicked?"
+      ],
+      "json": "dashboards/kubernetes/coredns.json",
+      "doc": "docs/dashboards/kubernetes/coredns.md",
+      "screenshot": "screenshots/kubernetes/coredns.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / DaemonSets",
+      "uid": "kubernetes-daemonsets",
+      "category": "kubernetes",
+      "slug": "daemonsets",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "daemonsets",
+        "kube-state-metrics",
+        "coverage"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which DaemonSets have fewer ready pods than nodes they should cover?",
+        "Are any daemon pods misscheduled onto nodes they should not be on?",
+        "How many nodes are missing a daemon pod entirely?",
+        "Is a DaemonSet update stalled partway across the fleet?"
+      ],
+      "json": "dashboards/kubernetes/daemonsets.json",
+      "doc": "docs/dashboards/kubernetes/daemonsets.md",
+      "screenshot": "screenshots/kubernetes/daemonsets.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Kubernetes / Deployments",
+      "uid": "kubernetes-deployments",
+      "category": "kubernetes",
+      "slug": "deployments",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "deployments",
+        "kube-state-metrics",
+        "rollout"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which deployments have fewer available replicas than they should?",
+        "How many replicas are unavailable across the cluster right now?",
+        "Which rollouts are still in progress versus fully settled?",
+        "Is a deployment stuck \u2014 desired set but availability never catching up?"
+      ],
+      "json": "dashboards/kubernetes/deployments.json",
+      "doc": "docs/dashboards/kubernetes/deployments.md",
+      "screenshot": "screenshots/kubernetes/deployments.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Kubernetes / etcd",
+      "uid": "kubernetes-etcd",
+      "category": "kubernetes",
+      "slug": "etcd",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "control-plane",
+        "etcd",
+        "raft"
+      ],
+      "panels": 14,
+      "questions": [
+        "Does the cluster have a leader and is quorum intact right now?",
+        "Is disk fsync/commit latency low enough to keep Raft healthy?",
+        "How close is the database to its space quota?",
+        "Are leader elections flapping (a sign of disk or network stress)?",
+        "Are Raft proposals failing or peers slow to round-trip?"
+      ],
+      "json": "dashboards/kubernetes/etcd.json",
+      "doc": "docs/dashboards/kubernetes/etcd.md",
+      "screenshot": "screenshots/kubernetes/etcd.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / Ingress NGINX",
+      "uid": "kubernetes-ingress-nginx",
+      "category": "kubernetes",
+      "slug": "ingress-nginx",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "ingress",
+        "nginx",
+        "networking"
+      ],
+      "panels": 10,
+      "questions": [
+        "Is the ingress returning 5xx errors right now, and for which ingress?",
+        "What is request p99 latency through the controller?",
+        "Which TLS certificate expires soonest?",
+        "How many connections is the controller handling?",
+        "Where is the traffic going and what status mix does each ingress serve?"
+      ],
+      "json": "dashboards/kubernetes/ingress-nginx.json",
+      "doc": "docs/dashboards/kubernetes/ingress-nginx.md",
+      "screenshot": "screenshots/kubernetes/ingress-nginx.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / Kubelet",
+      "uid": "kubernetes-kubelet",
+      "category": "kubernetes",
+      "slug": "kubelet",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "node",
+        "kubelet",
+        "runtime"
+      ],
+      "panels": 11,
+      "questions": [
+        "Does any node have a kubelet config error right now?",
+        "Is PLEG relist latency healthy, or is a node about to flip NotReady?",
+        "How long is the pod worker taking to sync pods?",
+        "Are container runtime operations erroring?",
+        "How many pods and containers is each node running?"
+      ],
+      "json": "dashboards/kubernetes/kubelet.json",
+      "doc": "docs/dashboards/kubernetes/kubelet.md",
+      "screenshot": "screenshots/kubernetes/kubelet.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / Namespaces",
+      "uid": "kubernetes-namespaces",
+      "category": "kubernetes",
+      "slug": "namespaces",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "namespaces",
+        "kube-state-metrics",
+        "cadvisor",
+        "quota"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which namespaces are consuming the most CPU and memory right now?",
+        "How many pods is each namespace running?",
+        "Which namespaces are closest to their ResourceQuota limit?",
+        "Is one namespace's growth squeezing the rest of the cluster?"
+      ],
+      "json": "dashboards/kubernetes/namespaces.json",
+      "doc": "docs/dashboards/kubernetes/namespaces.md",
+      "screenshot": "screenshots/kubernetes/namespaces.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Kubernetes / Nodes",
+      "uid": "kubernetes-nodes",
+      "category": "kubernetes",
+      "slug": "nodes",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "nodes",
+        "kube-state-metrics",
+        "cadvisor",
+        "capacity"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which nodes are NotReady or cordoned right now?",
+        "Which node is the most pressured on CPU or memory?",
+        "Is any node approaching its maximum pod count?",
+        "Is allocatable headroom evenly spread, or is one node hot while others idle?"
+      ],
+      "json": "dashboards/kubernetes/nodes.json",
+      "doc": "docs/dashboards/kubernetes/nodes.md",
+      "screenshot": "screenshots/kubernetes/nodes.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Kubernetes / Persistent Volumes",
+      "uid": "kubernetes-persistent-volumes",
+      "category": "kubernetes",
+      "slug": "persistent-volumes",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "storage",
+        "persistent-volume",
+        "kube-state-metrics"
+      ],
+      "panels": 11,
+      "questions": [
+        "Are any PersistentVolumes in the Failed phase right now?",
+        "How many PVs are unbound (Available/Released) and tying up capacity?",
+        "How is provisioned capacity split across storage classes?",
+        "Are there pending PVCs that can't bind?",
+        "Which released PVs are leaking capacity that should be reclaimed?"
+      ],
+      "json": "dashboards/kubernetes/persistent-volumes.json",
+      "doc": "docs/dashboards/kubernetes/persistent-volumes.md",
+      "screenshot": "screenshots/kubernetes/persistent-volumes.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / Pods",
+      "uid": "kubernetes-pods",
+      "category": "kubernetes",
+      "slug": "pods",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "pods",
+        "kube-state-metrics",
+        "crashloop",
+        "restarts"
+      ],
+      "panels": 10,
+      "questions": [
+        "How many pods are Pending or crash-looping in this namespace?",
+        "Which container waiting reason is blocking startup \u2014 image pull, crash loop, config?",
+        "Which pods are restarting the most, and how fast?",
+        "Which pods are running but not Ready (failing their readiness probe)?"
+      ],
+      "json": "dashboards/kubernetes/pods.json",
+      "doc": "docs/dashboards/kubernetes/pods.md",
+      "screenshot": "screenshots/kubernetes/pods.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / PVC Capacity",
+      "uid": "kubernetes-pvc-usage",
+      "category": "kubernetes",
+      "slug": "pvc-usage",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "storage",
+        "pvc",
+        "capacity"
+      ],
+      "panels": 11,
+      "questions": [
+        "Which PVCs are over 85% full right now?",
+        "Are any PVCs predicted to fill within a few days at the current growth rate?",
+        "What is the fullest PVC in the cluster?",
+        "How much capacity is requested versus actually used?",
+        "Are there pending PVCs blocking pods from starting?"
+      ],
+      "json": "dashboards/kubernetes/pvc-usage.json",
+      "doc": "docs/dashboards/kubernetes/pvc-usage.md",
+      "screenshot": "screenshots/kubernetes/pvc-usage.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / Scheduler",
+      "uid": "kubernetes-scheduler",
+      "category": "kubernetes",
+      "slug": "scheduler",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "control-plane",
+        "scheduler",
+        "scheduling"
+      ],
+      "panels": 10,
+      "questions": [
+        "How many pods are pending in the scheduler queue right now?",
+        "Is the scheduler keeping up (attempt p99 latency)?",
+        "Are placement failures from unschedulable pods or scheduler errors?",
+        "What is the end-to-end time from pod creation to scheduled?",
+        "Is the scheduling throughput high enough for the current churn?"
+      ],
+      "json": "dashboards/kubernetes/scheduler.json",
+      "doc": "docs/dashboards/kubernetes/scheduler.md",
+      "screenshot": "screenshots/kubernetes/scheduler.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Kubernetes / StatefulSets",
+      "uid": "kubernetes-statefulsets",
+      "category": "kubernetes",
+      "slug": "statefulsets",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "statefulsets",
+        "kube-state-metrics",
+        "stateful"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which StatefulSets have fewer ready replicas than desired?",
+        "Is any stateful workload running below quorum right now?",
+        "Which StatefulSet is the most degraded?",
+        "Is a rolling update progressing or stuck partway through the ordinals?"
+      ],
+      "json": "dashboards/kubernetes/statefulsets.json",
+      "doc": "docs/dashboards/kubernetes/statefulsets.md",
+      "screenshot": "screenshots/kubernetes/statefulsets.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Kubernetes / Workload Resources",
+      "uid": "kubernetes-workload-resources",
+      "category": "kubernetes",
+      "slug": "workload-resources",
+      "domain": "kubernetes",
+      "datasource": "prometheus",
+      "tags": [
+        "kubernetes",
+        "resources",
+        "cadvisor",
+        "throttling",
+        "right-sizing"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which workloads are being CPU-throttled by their limit right now?",
+        "Which pods are running close to their memory limit and risk an OOM kill?",
+        "Where are requests set far above actual usage (wasted, unschedulable capacity)?",
+        "Is usage bursting above requests (the scheduler under-counted this workload)?"
+      ],
+      "json": "dashboards/kubernetes/workload-resources.json",
+      "doc": "docs/dashboards/kubernetes/workload-resources.md",
+      "screenshot": "screenshots/kubernetes/workload-resources.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Linux / CPU",
+      "uid": "linux-cpu",
+      "category": "linux",
+      "slug": "cpu",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "cpu",
+        "node-exporter",
+        "saturation"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which hosts are CPU-saturated right now?",
+        "Is the CPU busy with user, system, iowait or steal?",
+        "Is the run queue longer than the core count (scheduling pressure)?",
+        "Are we losing cycles to a noisy hypervisor neighbour (steal)?"
+      ],
+      "json": "dashboards/linux/cpu.json",
+      "doc": "docs/dashboards/linux/cpu.md",
+      "screenshot": "screenshots/linux/cpu.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Linux / Disk IO",
+      "uid": "linux-disk-io",
+      "category": "linux",
+      "slug": "disk-io",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "disk",
+        "io",
+        "node-exporter",
+        "saturation"
+      ],
+      "panels": 9,
+      "questions": [
+        "Which device is busiest (%util) right now?",
+        "Is the disk latency- or throughput-bound \u2014 high await or high MB/s?",
+        "How are reads and writes split, in IOPS and bytes?",
+        "Is the IO queue backing up (weighted IO time climbing faster than wall time)?"
+      ],
+      "json": "dashboards/linux/disk-io.json",
+      "doc": "docs/dashboards/linux/disk-io.md",
+      "screenshot": "screenshots/linux/disk-io.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Linux / Filesystem",
+      "uid": "linux-filesystem",
+      "category": "linux",
+      "slug": "filesystem",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "filesystem",
+        "capacity",
+        "node-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which filesystem is fullest right now?",
+        "Which mount is predicted to run out of space first, and how soon?",
+        "Are we about to exhaust inodes even though bytes look fine?",
+        "Did any filesystem flip to read-only (a sign of underlying disk errors)?"
+      ],
+      "json": "dashboards/linux/filesystem.json",
+      "doc": "docs/dashboards/linux/filesystem.md",
+      "screenshot": "screenshots/linux/filesystem.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Linux / Hardware Sensors",
+      "uid": "linux-hardware-sensors",
+      "category": "linux",
+      "slug": "hardware-sensors",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "hardware",
+        "temperature",
+        "sensors",
+        "node-exporter"
+      ],
+      "panels": 9,
+      "questions": [
+        "What is the hottest sensor across the fleet right now?",
+        "How many sensors are above their safe threshold?",
+        "Is a CPU being thermally throttled (frequency dropping while busy)?",
+        "Which host or component is trending hotter over time?"
+      ],
+      "json": "dashboards/linux/hardware-sensors.json",
+      "doc": "docs/dashboards/linux/hardware-sensors.md",
+      "screenshot": "screenshots/linux/hardware-sensors.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Linux / Kernel",
+      "uid": "linux-kernel",
+      "category": "linux",
+      "slug": "kernel",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "kernel",
+        "limits",
+        "node-exporter"
+      ],
+      "panels": 9,
+      "questions": [
+        "Are we running out of file descriptors or conntrack entries?",
+        "Is the kernel taking major page faults (working set spilling off RAM)?",
+        "Is the context-switch rate abnormal (contention / oversubscription)?",
+        "Is the entropy pool starved enough to block cryptographic operations?"
+      ],
+      "json": "dashboards/linux/kernel.json",
+      "doc": "docs/dashboards/linux/kernel.md",
+      "screenshot": "screenshots/linux/kernel.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Linux / Load Average",
+      "uid": "linux-load",
+      "category": "linux",
+      "slug": "load",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "load",
+        "scheduler",
+        "node-exporter",
+        "saturation"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which hosts are overloaded relative to their core count (load \u00f7 cores > 1)?",
+        "Is the backlog growing (load1 > load5 > load15) or draining?",
+        "Are processes runnable (CPU-bound) or blocked (waiting on IO)?",
+        "Is high load CPU contention or uninterruptible-sleep disk wait in disguise?"
+      ],
+      "json": "dashboards/linux/load.json",
+      "doc": "docs/dashboards/linux/load.md",
+      "screenshot": "screenshots/linux/load.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Linux / Memory",
+      "uid": "linux-memory",
+      "category": "linux",
+      "slug": "memory",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "memory",
+        "node-exporter",
+        "saturation"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which hosts have the least available memory right now?",
+        "How much of the resident set is reclaimable cache vs real anonymous demand?",
+        "Is the host swapping, and how fast is it paging in/out?",
+        "Are we taking major page faults or \u2014 worse \u2014 OOM-killing processes?"
+      ],
+      "json": "dashboards/linux/memory.json",
+      "doc": "docs/dashboards/linux/memory.md",
+      "screenshot": "screenshots/linux/memory.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Linux / Network",
+      "uid": "linux-network",
+      "category": "linux",
+      "slug": "network",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "network",
+        "node-exporter",
+        "saturation"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which hosts/interfaces are the top talkers right now?",
+        "Are we dropping or erroring packets on receive or transmit?",
+        "How close is the conntrack table to its limit?",
+        "Is transmit or receive the saturated direction?"
+      ],
+      "json": "dashboards/linux/network.json",
+      "doc": "docs/dashboards/linux/network.md",
+      "screenshot": "screenshots/linux/network.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Linux / Pressure Stall (PSI)",
+      "uid": "linux-pressure-stall",
+      "category": "linux",
+      "slug": "pressure-stall",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "psi",
+        "pressure",
+        "saturation",
+        "node-exporter"
+      ],
+      "panels": 9,
+      "questions": [
+        "Which resource \u2014 CPU, IO or memory \u2014 is causing the most stall right now?",
+        "Are tasks merely contended (some pressure) or fully blocked (full pressure)?",
+        "Which host has the highest pressure on each resource?",
+        "Is memory pressure rising before swapping or OOM becomes visible?"
+      ],
+      "json": "dashboards/linux/pressure-stall.json",
+      "doc": "docs/dashboards/linux/pressure-stall.md",
+      "screenshot": "screenshots/linux/pressure-stall.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Linux / Processes",
+      "uid": "linux-processes",
+      "category": "linux",
+      "slug": "processes",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "processes",
+        "scheduler",
+        "node-exporter"
+      ],
+      "panels": 9,
+      "questions": [
+        "Are we close to exhausting system-wide file descriptors?",
+        "Is the scheduler context-switching far more than usual (lock contention, oversubscription)?",
+        "Is something fork-bombing \u2014 a runaway fork/exec rate?",
+        "How many processes are runnable vs blocked right now?"
+      ],
+      "json": "dashboards/linux/processes.json",
+      "doc": "docs/dashboards/linux/processes.md",
+      "screenshot": "screenshots/linux/processes.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Linux / systemd",
+      "uid": "linux-systemd",
+      "category": "linux",
+      "slug": "systemd",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "systemd",
+        "services",
+        "node-exporter"
+      ],
+      "panels": 7,
+      "questions": [
+        "Are any systemd units in the failed state right now, and on which hosts?",
+        "Which specific units failed (the table you would otherwise get from systemctl)?",
+        "Is the failed-unit count trending up across the fleet?",
+        "How many units are active vs inactive overall?"
+      ],
+      "json": "dashboards/linux/systemd.json",
+      "doc": "docs/dashboards/linux/systemd.md",
+      "screenshot": "screenshots/linux/systemd.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Linux / Time Sync",
+      "uid": "linux-time-sync",
+      "category": "linux",
+      "slug": "time-sync",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "time",
+        "ntp",
+        "chrony",
+        "node-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "How many hosts are currently unsynchronised (clock not disciplined)?",
+        "What is the largest clock offset across the fleet right now?",
+        "Is any host's offset trending away from zero (a failing time source)?",
+        "How wide are the kernel's max/estimated error bounds?"
+      ],
+      "json": "dashboards/linux/time-sync.json",
+      "doc": "docs/dashboards/linux/time-sync.md",
+      "screenshot": "screenshots/linux/time-sync.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Linux / Volume Capacity",
+      "uid": "linux-volume-capacity",
+      "category": "linux",
+      "slug": "volume-capacity",
+      "domain": "linux",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "storage",
+        "capacity",
+        "planning",
+        "node-exporter"
+      ],
+      "panels": 9,
+      "questions": [
+        "How many volumes have less than 10% free right now?",
+        "Which mount will fill first, and roughly how many days away is it?",
+        "How fast is each volume growing (bytes/day)?",
+        "Which mounts are the largest consumers of provisioned storage?"
+      ],
+      "json": "dashboards/linux/volume-capacity.json",
+      "doc": "docs/dashboards/linux/volume-capacity.md",
+      "screenshot": "screenshots/linux/volume-capacity.svg",
+      "alerts": 2
+    },
+    {
+      "title": "Loki / Ingestion Path",
+      "uid": "loki-ingestion",
+      "category": "loki",
+      "slug": "ingestion",
+      "domain": "loki",
+      "datasource": "prometheus",
+      "tags": [
+        "loki",
+        "logs",
+        "ingestion",
+        "meta-monitoring"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which tenant is driving the most ingest volume right now?",
+        "Is stream cardinality growing toward an ingester OOM?",
+        "Are clients being rate-limited (429) on push?",
+        "Are chunks flushing to storage at a healthy rate?",
+        "How many chunks and streams are held in memory per ingester?"
+      ],
+      "json": "dashboards/loki/ingestion.json",
+      "doc": "docs/dashboards/loki/ingestion.md",
+      "screenshot": "screenshots/loki/ingestion.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Loki / Overview",
+      "uid": "loki-overview",
+      "category": "loki",
+      "slug": "overview",
+      "domain": "loki",
+      "datasource": "prometheus",
+      "tags": [
+        "loki",
+        "logs",
+        "ingestion",
+        "meta-monitoring"
+      ],
+      "panels": 10,
+      "questions": [
+        "What is the current log ingest rate in lines and bytes per second?",
+        "What fraction of requests are returning 5xx?",
+        "How many streams and chunks are the ingesters holding in memory?",
+        "Where is request latency highest across routes?",
+        "Are chunks flushing to storage at a steady rate?"
+      ],
+      "json": "dashboards/loki/overview.json",
+      "doc": "docs/dashboards/loki/overview.md",
+      "screenshot": "screenshots/loki/overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Mimir / Overview",
+      "uid": "mimir-overview",
+      "category": "mimir",
+      "slug": "overview",
+      "domain": "mimir",
+      "datasource": "prometheus",
+      "tags": [
+        "mimir",
+        "cortex",
+        "tsdb",
+        "meta-monitoring"
+      ],
+      "panels": 10,
+      "questions": [
+        "What is the sample ingestion rate into the distributors?",
+        "How many series are the ingesters holding in memory?",
+        "What fraction of requests are returning 5xx?",
+        "Where is request latency highest across routes?",
+        "How many tenants are active?"
+      ],
+      "json": "dashboards/mimir/overview.json",
+      "doc": "docs/dashboards/mimir/overview.md",
+      "screenshot": "screenshots/mimir/overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Mimir / Reads & Writes",
+      "uid": "mimir-reads-writes",
+      "category": "mimir",
+      "slug": "reads-writes",
+      "domain": "mimir",
+      "datasource": "prometheus",
+      "tags": [
+        "mimir",
+        "cortex",
+        "read-write",
+        "meta-monitoring"
+      ],
+      "panels": 10,
+      "questions": [
+        "Is write-path or read-path latency the problem right now?",
+        "What is the push request rate versus the query rate?",
+        "Which routes are returning 5xx on each path?",
+        "Are queries from the query-frontend keeping up?",
+        "Is ingester write latency tracking distributor latency?"
+      ],
+      "json": "dashboards/mimir/reads-writes.json",
+      "doc": "docs/dashboards/mimir/reads-writes.md",
+      "screenshot": "screenshots/mimir/reads-writes.svg",
+      "alerts": 3
+    },
+    {
+      "title": "MySQL / InnoDB",
+      "uid": "mysql-innodb",
+      "category": "mysql",
+      "slug": "innodb",
+      "domain": "mysql",
+      "datasource": "prometheus",
+      "tags": [
+        "mysql",
+        "mariadb",
+        "database",
+        "mysqld-exporter",
+        "innodb"
+      ],
+      "panels": 10,
+      "questions": [
+        "Is the InnoDB buffer pool still absorbing reads, or are they hitting disk?",
+        "How much of the buffer pool is free vs in use?",
+        "Are row-lock waits serialising writes right now?",
+        "How long are transactions waiting on row locks?",
+        "What is the read/write row-operation mix?"
+      ],
+      "json": "dashboards/mysql/innodb.json",
+      "doc": "docs/dashboards/mysql/innodb.md",
+      "screenshot": "screenshots/mysql/innodb.svg",
+      "alerts": 3
+    },
+    {
+      "title": "MySQL / Overview",
+      "uid": "mysql-overview",
+      "category": "mysql",
+      "slug": "overview",
+      "domain": "mysql",
+      "datasource": "prometheus",
+      "tags": [
+        "mysql",
+        "mariadb",
+        "database",
+        "mysqld-exporter",
+        "overview"
+      ],
+      "panels": 12,
+      "questions": [
+        "Is MySQL up and serving queries right now?",
+        "How close are we to max_connections (thread saturation)?",
+        "Is the slow-query rate climbing?",
+        "What is the read/write command mix?",
+        "Is the InnoDB buffer pool still absorbing reads?"
+      ],
+      "json": "dashboards/mysql/overview.json",
+      "doc": "docs/dashboards/mysql/overview.md",
+      "screenshot": "screenshots/mysql/overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "MySQL / Replication",
+      "uid": "mysql-replication",
+      "category": "mysql",
+      "slug": "replication",
+      "domain": "mysql",
+      "datasource": "prometheus",
+      "tags": [
+        "mysql",
+        "mariadb",
+        "database",
+        "mysqld-exporter",
+        "replication"
+      ],
+      "panels": 8,
+      "questions": [
+        "How many seconds behind master is each replica right now?",
+        "Are both the IO and SQL replication threads running?",
+        "Did replication stop, and when?",
+        "Is lag trending up under write load?"
+      ],
+      "json": "dashboards/mysql/replication.json",
+      "doc": "docs/dashboards/mysql/replication.md",
+      "screenshot": "screenshots/mysql/replication.svg",
+      "alerts": 3
+    },
+    {
+      "title": "NGINX / Connections & Upstreams",
+      "uid": "nginx-connections-and-upstreams",
+      "category": "nginx",
+      "slug": "connections-and-upstreams",
+      "domain": "nginx",
+      "datasource": "prometheus",
+      "tags": [
+        "nginx",
+        "web",
+        "connections",
+        "upstreams",
+        "saturation"
+      ],
+      "panels": 9,
+      "questions": [
+        "How many connections are active, and how many are just waiting (keep-alive)?",
+        "Is NGINX dropping connections (accepted minus handled)?",
+        "Are reads or writes piling up, hinting at slow clients or slow upstreams?",
+        "Which upstream is unhealthy or slow right now?",
+        "Is the exporter \u2014 and therefore NGINX \u2014 up?"
+      ],
+      "json": "dashboards/nginx/connections-and-upstreams.json",
+      "doc": "docs/dashboards/nginx/connections-and-upstreams.md",
+      "screenshot": "screenshots/nginx/connections-and-upstreams.svg",
+      "alerts": 3
+    },
+    {
+      "title": "NGINX / Requests & Latency",
+      "uid": "nginx-requests-and-latency",
+      "category": "nginx",
+      "slug": "requests-and-latency",
+      "domain": "nginx",
+      "datasource": "prometheus",
+      "tags": [
+        "nginx",
+        "web",
+        "vts",
+        "errors",
+        "latency"
+      ],
+      "panels": 9,
+      "questions": [
+        "What is the request rate right now and is it trending up?",
+        "What share of responses are 5xx, and on which virtual host?",
+        "How slow is the 95th-percentile upstream response time?",
+        "Which upstream is returning the most 5xx?",
+        "Are 4xx spikes a client problem or a broken release?"
+      ],
+      "json": "dashboards/nginx/requests-and-latency.json",
+      "doc": "docs/dashboards/nginx/requests-and-latency.md",
+      "screenshot": "screenshots/nginx/requests-and-latency.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Node Exporter / Scrape Health",
+      "uid": "node-exporter-exporter-health",
+      "category": "node-exporter",
+      "slug": "exporter-health",
+      "domain": "node-exporter",
+      "datasource": "prometheus",
+      "tags": [
+        "prometheus",
+        "scrape",
+        "node-exporter",
+        "meta-monitoring",
+        "reliability"
+      ],
+      "panels": 11,
+      "questions": [
+        "How many targets are down right now, and which ones?",
+        "Are any scrapes slow enough to risk timing out?",
+        "Has any target's sample count suddenly dropped (a half-broken exporter)?",
+        "Is scrape duration trending up as the fleet grows?"
+      ],
+      "json": "dashboards/node-exporter/exporter-health.json",
+      "doc": "docs/dashboards/node-exporter/exporter-health.md",
+      "screenshot": "screenshots/node-exporter/exporter-health.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Node Exporter / Fleet Overview",
+      "uid": "node-exporter-fleet-overview",
+      "category": "node-exporter",
+      "slug": "fleet-overview",
+      "domain": "node-exporter",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "fleet",
+        "node-exporter",
+        "overview",
+        "capacity"
+      ],
+      "panels": 11,
+      "questions": [
+        "Are any hosts down (failing scrape) right now?",
+        "What is the worst CPU, memory and disk pressure anywhere in the fleet?",
+        "Which hosts are the top network talkers?",
+        "Which hosts rebooted recently or have suspicious uptime?"
+      ],
+      "json": "dashboards/node-exporter/fleet-overview.json",
+      "doc": "docs/dashboards/node-exporter/fleet-overview.md",
+      "screenshot": "screenshots/node-exporter/fleet-overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Node Exporter / Host USE Method",
+      "uid": "node-exporter-host-use-method",
+      "category": "node-exporter",
+      "slug": "host-use-method",
+      "domain": "node-exporter",
+      "datasource": "prometheus",
+      "tags": [
+        "linux",
+        "node-exporter",
+        "use-method",
+        "saturation",
+        "single-host"
+      ],
+      "panels": 14,
+      "questions": [
+        "Which resource on this host is the most utilised right now?",
+        "Is any resource saturated \u2014 run queue deep, memory exhausted, disk full?",
+        "Are the NICs reporting errors or drops?",
+        "Is the host healthy enough to take more load, or is it the bottleneck?"
+      ],
+      "json": "dashboards/node-exporter/host-use-method.json",
+      "doc": "docs/dashboards/node-exporter/host-use-method.md",
+      "screenshot": "screenshots/node-exporter/host-use-method.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Cinder \u2014 Service Health",
+      "uid": "openstack-cinder-api",
+      "category": "openstack/cinder",
+      "slug": "api",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "cinder",
+        "block-storage",
+        "openstack-exporter",
+        "control-plane"
+      ],
+      "panels": 8,
+      "questions": [
+        "Are any Cinder services (volume / scheduler / backup) down right now?",
+        "How many volumes are stuck in the error state?",
+        "Are volumes hanging in creating (a wedged scheduler or backend)?",
+        "Is the deployment still answering \u2014 are Cinder metrics being scraped at all?",
+        "Which storage host owns the failing service?"
+      ],
+      "json": "dashboards/openstack/cinder/api.json",
+      "doc": "docs/dashboards/openstack/cinder/api.md",
+      "screenshot": "screenshots/openstack/cinder/api.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Cinder \u2014 Storage Capacity",
+      "uid": "openstack-cinder-storage-capacity",
+      "category": "openstack/cinder",
+      "slug": "storage-capacity",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "cinder",
+        "capacity",
+        "storage",
+        "openstack-exporter"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which storage pool is the tightest right now (highest used %)?",
+        "How much free capacity is left across all pools?",
+        "How many pools are over the danger threshold?",
+        "Given the current fill rate, when does each pool run out?",
+        "Is tenant volume usage approaching the configured quota limit?"
+      ],
+      "json": "dashboards/openstack/cinder/storage-capacity.json",
+      "doc": "docs/dashboards/openstack/cinder/storage-capacity.md",
+      "screenshot": "screenshots/openstack/cinder/storage-capacity.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Cinder \u2014 Volume Inventory",
+      "uid": "openstack-cinder-volumes",
+      "category": "openstack/cinder",
+      "slug": "volumes",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "cinder",
+        "volumes",
+        "block-storage",
+        "openstack-exporter"
+      ],
+      "panels": 9,
+      "questions": [
+        "How many volumes are in error right now?",
+        "Are any volumes stuck in creating (a wedged scheduler or backend)?",
+        "What is the overall volume status mix \u2014 available vs in-use vs broken?",
+        "How many snapshots exist, and is the count growing unusually fast?",
+        "Is any single status trending up in a way that signals an incident?"
+      ],
+      "json": "dashboards/openstack/cinder/volumes.json",
+      "doc": "docs/dashboards/openstack/cinder/volumes.md",
+      "screenshot": "screenshots/openstack/cinder/volumes.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Glance \u2014 Image Service",
+      "uid": "openstack-glance-images",
+      "category": "openstack/glance",
+      "slug": "images",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "glance",
+        "images",
+        "storage",
+        "openstack-exporter"
+      ],
+      "panels": 9,
+      "questions": [
+        "How many images does the deployment hold?",
+        "How much total store capacity are images consuming?",
+        "How fast is image storage growing (last 24h)?",
+        "Which images are the largest consumers of the store?",
+        "Given the trend, when will the image store fill up?"
+      ],
+      "json": "dashboards/openstack/glance/images.json",
+      "doc": "docs/dashboards/openstack/glance/images.md",
+      "screenshot": "screenshots/openstack/glance/images.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / HAProxy \u2014 Backend Health",
+      "uid": "openstack-haproxy-backends",
+      "category": "openstack/haproxy",
+      "slug": "backends",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "haproxy",
+        "load-balancer",
+        "backends"
+      ],
+      "panels": 8,
+      "questions": [
+        "Are any backends fully down (no healthy servers)?",
+        "How many servers are up vs down in each backend pool?",
+        "What is the 5xx error ratio per backend right now?",
+        "Are response or connection errors climbing on any backend?"
+      ],
+      "json": "dashboards/openstack/haproxy/backends.json",
+      "doc": "docs/dashboards/openstack/haproxy/backends.md",
+      "screenshot": "screenshots/openstack/haproxy/backends.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / HAProxy \u2014 Frontend Traffic",
+      "uid": "openstack-haproxy-frontends",
+      "category": "openstack/haproxy",
+      "slug": "frontends",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "haproxy",
+        "load-balancer",
+        "frontends"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which frontend is busiest right now (sessions and request rate)?",
+        "How close is any frontend to its configured session limit (maxconn)?",
+        "What is the request rate per frontend, and is it spiking?",
+        "How much traffic (bytes) is flowing through the edge?"
+      ],
+      "json": "dashboards/openstack/haproxy/frontends.json",
+      "doc": "docs/dashboards/openstack/haproxy/frontends.md",
+      "screenshot": "screenshots/openstack/haproxy/frontends.svg",
+      "alerts": 2
+    },
+    {
+      "title": "OpenStack / Heat \u2014 Orchestration Stacks",
+      "uid": "openstack-heat-stacks",
+      "category": "openstack/heat",
+      "slug": "stacks",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "heat",
+        "orchestration",
+        "openstack-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "How many stacks are in a *_FAILED state right now?",
+        "How many stacks are mid-operation (CREATE/UPDATE/DELETE_IN_PROGRESS)?",
+        "Which specific stacks failed (name and status) so I can act?",
+        "Is the failed/in-progress mix trending worse over time?"
+      ],
+      "json": "dashboards/openstack/heat/stacks.json",
+      "doc": "docs/dashboards/openstack/heat/stacks.md",
+      "screenshot": "screenshots/openstack/heat/stacks.svg",
+      "alerts": 2
+    },
+    {
+      "title": "OpenStack / Horizon \u2014 Dashboard Service",
+      "uid": "openstack-horizon-overview",
+      "category": "openstack/horizon",
+      "slug": "overview",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "horizon",
+        "dashboard",
+        "blackbox",
+        "apache"
+      ],
+      "panels": 8,
+      "questions": [
+        "Is the Horizon endpoint up (probe succeeding) right now?",
+        "What HTTP status code is Horizon returning (200 vs 5xx/302-to-login)?",
+        "How long is a page probe taking (is the UI slow)?",
+        "How busy is the Apache/WSGI process behind Horizon (workers, request rate)?"
+      ],
+      "json": "dashboards/openstack/horizon/overview.json",
+      "doc": "docs/dashboards/openstack/horizon/overview.md",
+      "screenshot": "screenshots/openstack/horizon/overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Keystone \u2014 API & Inventory",
+      "uid": "openstack-keystone-api",
+      "category": "openstack/keystone",
+      "slug": "api",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "keystone",
+        "identity",
+        "openstack-exporter"
+      ],
+      "panels": 9,
+      "questions": [
+        "Is the Keystone API reachable from the exporter right now?",
+        "How many projects, users, domains and groups exist in the cloud?",
+        "Did the user or project count just jump or collapse (bad sync / mass delete)?",
+        "Are all Keystone scrape targets up, or is one region's identity endpoint dark?"
+      ],
+      "json": "dashboards/openstack/keystone/api.json",
+      "doc": "docs/dashboards/openstack/keystone/api.md",
+      "screenshot": "screenshots/openstack/keystone/api.svg",
+      "alerts": 2
+    },
+    {
+      "title": "OpenStack / Keystone \u2014 Usage & Growth",
+      "uid": "openstack-keystone-tokens",
+      "category": "openstack/keystone",
+      "slug": "tokens",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "keystone",
+        "identity",
+        "capacity",
+        "openstack-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "How many projects/users/groups exist now, and how fast is each growing?",
+        "What was net growth over the last 24h and the last 7d?",
+        "Is growth steady, or did a single onboarding event spike the count?",
+        "Is the directory shrinking anywhere (de-provisioning or a broken sync)?"
+      ],
+      "json": "dashboards/openstack/keystone/tokens.json",
+      "doc": "docs/dashboards/openstack/keystone/tokens.md",
+      "screenshot": "screenshots/openstack/keystone/tokens.svg",
+      "alerts": 2
+    },
+    {
+      "title": "OpenStack / MariaDB \u2014 Galera Cluster Health",
+      "uid": "openstack-mariadb-galera",
+      "category": "openstack/mariadb",
+      "slug": "galera",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "mariadb",
+        "galera",
+        "wsrep",
+        "mysqld-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "Are all nodes in the Synced state (wsrep_local_state = 4)?",
+        "Is the cluster the size I expect, or did a node drop out?",
+        "Is flow control pausing writes (a slow node throttling the whole cluster)?",
+        "Are the replication receive/send queues backing up on any node?"
+      ],
+      "json": "dashboards/openstack/mariadb/galera.json",
+      "doc": "docs/dashboards/openstack/mariadb/galera.md",
+      "screenshot": "screenshots/openstack/mariadb/galera.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / MariaDB \u2014 Performance",
+      "uid": "openstack-mariadb-performance",
+      "category": "openstack/mariadb",
+      "slug": "performance",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "mariadb",
+        "mysql",
+        "database",
+        "mysqld-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "How close is each node to max_connections (connection exhaustion)?",
+        "How many threads are actually running (active concurrency) right now?",
+        "Is the slow-query rate climbing (a bad plan or missing index)?",
+        "Is the InnoDB buffer pool nearly full / churning (memory pressure)?"
+      ],
+      "json": "dashboards/openstack/mariadb/performance.json",
+      "doc": "docs/dashboards/openstack/mariadb/performance.md",
+      "screenshot": "screenshots/openstack/mariadb/performance.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Neutron \u2014 Agent Fleet",
+      "uid": "openstack-neutron-agents",
+      "category": "openstack/neutron",
+      "slug": "agents",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "neutron",
+        "agents",
+        "openstack-exporter",
+        "networking"
+      ],
+      "panels": 9,
+      "questions": [
+        "Which Neutron agents are down right now, and of what type?",
+        "Are any agents flapping (repeatedly toggling alive/dead)?",
+        "Has an operator left agents admin-disabled by mistake?",
+        "Is the L3 router load balanced across L3 agents, or piled on one host?",
+        "Did a whole agent type just go dark (control-plane or messaging fault)?"
+      ],
+      "json": "dashboards/openstack/neutron/agents.json",
+      "doc": "docs/dashboards/openstack/neutron/agents.md",
+      "screenshot": "screenshots/openstack/neutron/agents.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Neutron \u2014 Service Health",
+      "uid": "openstack-neutron-api",
+      "category": "openstack/neutron",
+      "slug": "api",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "neutron",
+        "networking",
+        "openstack-exporter",
+        "control-plane"
+      ],
+      "panels": 10,
+      "questions": [
+        "Are any Neutron agents (DHCP / L3 / metadata / OVS) down right now?",
+        "Are tenant ports failing to get an IP (ports without IPs climbing)?",
+        "Is the Neutron API being scraped at all, or has the exporter gone dark?",
+        "How many networks, subnets, ports and routers does the deployment carry?",
+        "Is one agent type or one host disproportionately unhealthy?"
+      ],
+      "json": "dashboards/openstack/neutron/api.json",
+      "doc": "docs/dashboards/openstack/neutron/api.md",
+      "screenshot": "screenshots/openstack/neutron/api.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Neutron \u2014 Floating IPs",
+      "uid": "openstack-neutron-floating-ips",
+      "category": "openstack/neutron",
+      "slug": "floating-ips",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "neutron",
+        "floating-ips",
+        "capacity",
+        "openstack-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "How many floating IPs are still free in the pool?",
+        "Are there dangling FIPs \u2014 associated but pointing at an inactive port?",
+        "What percentage of the floating IP pool is allocated?",
+        "Given the current trend, when will the pool be exhausted?",
+        "Is FIP allocation growing steadily or did it just spike?"
+      ],
+      "json": "dashboards/openstack/neutron/floating-ips.json",
+      "doc": "docs/dashboards/openstack/neutron/floating-ips.md",
+      "screenshot": "screenshots/openstack/neutron/floating-ips.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Neutron \u2014 L3 Routing",
+      "uid": "openstack-neutron-l3-routers",
+      "category": "openstack/neutron",
+      "slug": "l3-routers",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "neutron",
+        "routers",
+        "l3",
+        "openstack-exporter"
+      ],
+      "panels": 9,
+      "questions": [
+        "How many routers exist, and are they all scheduled to an L3 agent?",
+        "Are any routers unscheduled (no L3 agent can route them)?",
+        "Is router load balanced across L3 agents or concentrated on one host?",
+        "How many ports does each network carry \u2014 which segments are largest?",
+        "Is the security-group count growing in a way that hints at sprawl?"
+      ],
+      "json": "dashboards/openstack/neutron/l3-routers.json",
+      "doc": "docs/dashboards/openstack/neutron/l3-routers.md",
+      "screenshot": "screenshots/openstack/neutron/l3-routers.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Nova Service & Agent Health",
+      "uid": "openstack-nova-api",
+      "category": "openstack/nova",
+      "slug": "api",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "nova",
+        "compute",
+        "agent-state",
+        "openstack-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "Are any nova-compute / conductor / scheduler agents down right now?",
+        "How many instances are stuck in ERROR or BUILD?",
+        "Is the scheduler keeping up, or is the build queue (current workload) backing up?",
+        "Which compute hosts have been disabled or have stopped reporting?",
+        "Is instance state churning (mass reboots, failed migrations)?"
+      ],
+      "json": "dashboards/openstack/nova/api.json",
+      "doc": "docs/dashboards/openstack/nova/api.md",
+      "screenshot": "screenshots/openstack/nova/api.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Nova Compute Hosts",
+      "uid": "openstack-nova-compute",
+      "category": "openstack/nova",
+      "slug": "compute",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "nova",
+        "compute",
+        "hypervisor",
+        "openstack-exporter"
+      ],
+      "panels": 9,
+      "questions": [
+        "Which compute hosts are past their vCPU/memory overcommit line?",
+        "How many instances is each hypervisor running?",
+        "Which host is carrying the build/migrate backlog?",
+        "Is memory the binding constraint before vCPU on any host?",
+        "Are any hosts effectively empty and ready to drain or decommission?"
+      ],
+      "json": "dashboards/openstack/nova/compute.json",
+      "doc": "docs/dashboards/openstack/nova/compute.md",
+      "screenshot": "screenshots/openstack/nova/compute.svg",
+      "alerts": 2
+    },
+    {
+      "title": "OpenStack / Nova Compute Utilisation",
+      "uid": "openstack-nova-compute-utilisation",
+      "category": "openstack/nova",
+      "slug": "compute-utilisation",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "nova",
+        "utilisation",
+        "overcommit",
+        "openstack-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "What is the fleet's current vCPU overcommit ratio?",
+        "How much allocatable headroom is left against the configured allocation ratios?",
+        "Is memory or vCPU the binding constraint on further overcommit?",
+        "Which aggregate is the most oversubscribed?",
+        "Are we allocating past physical memory (which has no safe overcommit)?"
+      ],
+      "json": "dashboards/openstack/nova/compute-utilisation.json",
+      "doc": "docs/dashboards/openstack/nova/compute-utilisation.md",
+      "screenshot": "screenshots/openstack/nova/compute-utilisation.svg",
+      "alerts": 2
+    },
+    {
+      "title": "OpenStack / Nova Hypervisor Capacity",
+      "uid": "openstack-nova-hypervisor-capacity",
+      "category": "openstack/nova",
+      "slug": "hypervisor-capacity",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "nova",
+        "capacity",
+        "hypervisor",
+        "openstack-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which hypervisor is closest to full right now?",
+        "How much vCPU, memory and disk headroom does the fleet have left?",
+        "Which resource \u2014 vCPU, memory or disk \u2014 will we exhaust first?",
+        "How many hosts are within a few percent of their allocation limit?",
+        "At the current growth rate, how long until memory runs out?"
+      ],
+      "json": "dashboards/openstack/nova/hypervisor-capacity.json",
+      "doc": "docs/dashboards/openstack/nova/hypervisor-capacity.md",
+      "screenshot": "screenshots/openstack/nova/hypervisor-capacity.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Nova Instances",
+      "uid": "openstack-nova-instances",
+      "category": "openstack/nova",
+      "slug": "instances",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "nova",
+        "instances",
+        "inventory",
+        "openstack-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "How many instances are in ERROR right now?",
+        "How many are stuck in a transitional state (BUILD, REBUILD, MIGRATING, RESIZE)?",
+        "What is the overall split of instance states?",
+        "Which projects own the most instances \u2014 and the most ERROR ones?",
+        "Is the ACTIVE count steady, or churning from mass reboots/rebuilds?"
+      ],
+      "json": "dashboards/openstack/nova/instances.json",
+      "doc": "docs/dashboards/openstack/nova/instances.md",
+      "screenshot": "screenshots/openstack/nova/instances.svg",
+      "alerts": 2
+    },
+    {
+      "title": "OpenStack / Nova Scheduler",
+      "uid": "openstack-nova-scheduler",
+      "category": "openstack/nova",
+      "slug": "scheduler",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "nova",
+        "scheduler",
+        "placement",
+        "openstack-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "Are new instances landing in ERROR (failed scheduling/placement)?",
+        "How many instances are stuck in BUILD and not draining?",
+        "Are the nova-scheduler agents up?",
+        "Is the scheduler spreading load, or packing one host while others sit empty?",
+        "Is the build/migrate workload backing up cloud-wide?"
+      ],
+      "json": "dashboards/openstack/nova/scheduler.json",
+      "doc": "docs/dashboards/openstack/nova/scheduler.md",
+      "screenshot": "screenshots/openstack/nova/scheduler.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Nova VM Density",
+      "uid": "openstack-nova-vm-density",
+      "category": "openstack/nova",
+      "slug": "vm-density",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "nova",
+        "density",
+        "distribution",
+        "openstack-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which hypervisor is packing the most instances?",
+        "How lopsided is the fleet \u2014 what is the gap between the densest and emptiest host?",
+        "How many hosts are effectively empty (drain or decommission candidates)?",
+        "Does vCPU density track instance density, or are a few hosts carrying fat flavours?",
+        "Is density drifting toward a few hosts over time?"
+      ],
+      "json": "dashboards/openstack/nova/vm-density.json",
+      "doc": "docs/dashboards/openstack/nova/vm-density.md",
+      "screenshot": "screenshots/openstack/nova/vm-density.svg",
+      "alerts": 2
+    },
+    {
+      "title": "OpenStack / Open vSwitch \u2014 Dataplane",
+      "uid": "openstack-ovs-openvswitch",
+      "category": "openstack/ovs",
+      "slug": "openvswitch",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "openvswitch",
+        "ovs",
+        "dataplane",
+        "networking"
+      ],
+      "panels": 9,
+      "questions": [
+        "Are OVS interfaces dropping or erroring packets right now?",
+        "How many datapath flows are installed \u2014 is the kernel flow table bloating?",
+        "Which interfaces are dropping the most packets?",
+        "Is the megaflow cache efficient, or are masks exploding (cache thrash)?",
+        "Are rx or tx drops dominating \u2014 receive pressure vs send pressure?"
+      ],
+      "json": "dashboards/openstack/ovs/openvswitch.json",
+      "doc": "docs/dashboards/openstack/ovs/openvswitch.md",
+      "screenshot": "screenshots/openstack/ovs/openvswitch.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / Placement Resource Providers",
+      "uid": "openstack-placement-resource-providers",
+      "category": "openstack/placement",
+      "slug": "resource-providers",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "placement",
+        "capacity",
+        "resource-provider",
+        "openstack-exporter"
+      ],
+      "panels": 8,
+      "questions": [
+        "How many resource providers have no headroom left in some resource class?",
+        "Which resource \u2014 VCPU, MEMORY_MB or DISK_GB \u2014 is tightest fleet-wide?",
+        "Which providers are closest to exhausting a resource class?",
+        "What allocation ratios are actually in effect per provider?",
+        "Is usage trending toward exhaustion on any resource class?"
+      ],
+      "json": "dashboards/openstack/placement/resource-providers.json",
+      "doc": "docs/dashboards/openstack/placement/resource-providers.md",
+      "screenshot": "screenshots/openstack/placement/resource-providers.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / RabbitMQ \u2014 Cluster Health",
+      "uid": "openstack-rabbitmq-overview",
+      "category": "openstack/rabbitmq",
+      "slug": "overview",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "rabbitmq",
+        "messaging",
+        "oslo-messaging"
+      ],
+      "panels": 9,
+      "questions": [
+        "Is any node over its memory or disk watermark (alarm active = publishers blocked)?",
+        "How close is each node to its memory and free-disk limits right now?",
+        "Are all expected RabbitMQ nodes up and clustered?",
+        "Is the total queued backlog growing across the cluster?"
+      ],
+      "json": "dashboards/openstack/rabbitmq/overview.json",
+      "doc": "docs/dashboards/openstack/rabbitmq/overview.md",
+      "screenshot": "screenshots/openstack/rabbitmq/overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "OpenStack / RabbitMQ \u2014 Queue Depth & Flow",
+      "uid": "openstack-rabbitmq-queues",
+      "category": "openstack/rabbitmq",
+      "slug": "queues",
+      "domain": "openstack",
+      "datasource": "prometheus",
+      "tags": [
+        "openstack",
+        "rabbitmq",
+        "messaging",
+        "queues"
+      ],
+      "panels": 8,
+      "questions": [
+        "Which queues are the deepest right now (ready + unacknowledged)?",
+        "Which queues have messages but zero consumers (a dead agent)?",
+        "Is publish rate outrunning delivery rate (backlog building)?",
+        "Which queues are growing fastest over the last few minutes?"
+      ],
+      "json": "dashboards/openstack/rabbitmq/queues.json",
+      "doc": "docs/dashboards/openstack/rabbitmq/queues.md",
+      "screenshot": "screenshots/openstack/rabbitmq/queues.svg",
+      "alerts": 2
+    },
+    {
+      "title": "PostgreSQL / Connections",
+      "uid": "postgres-connections",
+      "category": "postgres",
+      "slug": "connections",
+      "domain": "postgres",
+      "datasource": "prometheus",
+      "tags": [
+        "postgres",
+        "database",
+        "postgres-exporter",
+        "connections"
+      ],
+      "panels": 10,
+      "questions": [
+        "How close is each instance to max_connections?",
+        "How many backends are idle-in-transaction and wasting slots?",
+        "Which database is using the most connections?",
+        "How are connections split across active, idle and idle-in-transaction?",
+        "Are recovery conflicts terminating queries on standbys?"
+      ],
+      "json": "dashboards/postgres/connections.json",
+      "doc": "docs/dashboards/postgres/connections.md",
+      "screenshot": "screenshots/postgres/connections.svg",
+      "alerts": 3
+    },
+    {
+      "title": "PostgreSQL / Overview",
+      "uid": "postgres-overview",
+      "category": "postgres",
+      "slug": "overview",
+      "domain": "postgres",
+      "datasource": "prometheus",
+      "tags": [
+        "postgres",
+        "database",
+        "postgres-exporter",
+        "overview"
+      ],
+      "panels": 12,
+      "questions": [
+        "Is PostgreSQL up and accepting connections right now?",
+        "How close are we to max_connections (connection saturation)?",
+        "Is the shared-buffer cache still serving reads, or are we hitting disk?",
+        "Are transactions committing, or is the rollback rate climbing?",
+        "Which database is growing and how fast?"
+      ],
+      "json": "dashboards/postgres/overview.json",
+      "doc": "docs/dashboards/postgres/overview.md",
+      "screenshot": "screenshots/postgres/overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "PostgreSQL / Queries & Locks",
+      "uid": "postgres-queries-and-locks",
+      "category": "postgres",
+      "slug": "queries-and-locks",
+      "domain": "postgres",
+      "datasource": "prometheus",
+      "tags": [
+        "postgres",
+        "database",
+        "postgres-exporter",
+        "locks"
+      ],
+      "panels": 11,
+      "questions": [
+        "How many backends are stuck idle-in-transaction holding locks?",
+        "Are deadlocks happening right now?",
+        "Which lock modes are most contended?",
+        "Is the rollback ratio climbing because of aborted work?",
+        "Are queries spilling to temp files for want of work_mem?"
+      ],
+      "json": "dashboards/postgres/queries-and-locks.json",
+      "doc": "docs/dashboards/postgres/queries-and-locks.md",
+      "screenshot": "screenshots/postgres/queries-and-locks.svg",
+      "alerts": 3
+    },
+    {
+      "title": "PostgreSQL / Replication & WAL",
+      "uid": "postgres-replication",
+      "category": "postgres",
+      "slug": "replication",
+      "domain": "postgres",
+      "datasource": "prometheus",
+      "tags": [
+        "postgres",
+        "database",
+        "postgres-exporter",
+        "replication"
+      ],
+      "panels": 8,
+      "questions": [
+        "What is the worst replica lag in seconds right now?",
+        "How many replicas is the primary actually streaming to?",
+        "How many WAL bytes is each standby behind the primary?",
+        "Are checkpoints firing on a healthy timed cadence?"
+      ],
+      "json": "dashboards/postgres/replication.json",
+      "doc": "docs/dashboards/postgres/replication.md",
+      "screenshot": "screenshots/postgres/replication.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Prometheus / Alertmanager",
+      "uid": "prometheus-alertmanager",
+      "category": "prometheus",
+      "slug": "alertmanager",
+      "domain": "prometheus",
+      "datasource": "prometheus",
+      "tags": [
+        "prometheus",
+        "alertmanager",
+        "alerting",
+        "meta-monitoring"
+      ],
+      "panels": 10,
+      "questions": [
+        "Are notifications failing to any integration right now?",
+        "Is the Alertmanager cluster fully formed (all members gossiping)?",
+        "How many alerts are active vs suppressed?",
+        "Is notification latency within the receiver's expectations?",
+        "How many silences are active, and could one be hiding a real alert?"
+      ],
+      "json": "dashboards/prometheus/alertmanager.json",
+      "doc": "docs/dashboards/prometheus/alertmanager.md",
+      "screenshot": "screenshots/prometheus/alertmanager.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Prometheus / Overview",
+      "uid": "prometheus-overview",
+      "category": "prometheus",
+      "slug": "overview",
+      "domain": "prometheus",
+      "datasource": "prometheus",
+      "tags": [
+        "prometheus",
+        "meta-monitoring",
+        "tsdb",
+        "self"
+      ],
+      "panels": 10,
+      "questions": [
+        "Is Prometheus evaluating every rule group on time, or skipping iterations?",
+        "How fast is head-block cardinality (active series) growing?",
+        "Is query latency or rule-eval latency creeping up?",
+        "How much memory is the process using relative to recent baseline?",
+        "Is Prometheus successfully scraping itself (the canary for everything else)?"
+      ],
+      "json": "dashboards/prometheus/overview.json",
+      "doc": "docs/dashboards/prometheus/overview.md",
+      "screenshot": "screenshots/prometheus/overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Prometheus / Remote Write",
+      "uid": "prometheus-remote-write",
+      "category": "prometheus",
+      "slug": "remote-write",
+      "domain": "prometheus",
+      "datasource": "prometheus",
+      "tags": [
+        "prometheus",
+        "remote-write",
+        "ingestion",
+        "meta-monitoring"
+      ],
+      "panels": 9,
+      "questions": [
+        "Are any samples failing to ship to the remote store?",
+        "How far behind real time is the remote-write queue (lag)?",
+        "Is a backlog of pending samples building (backpressure)?",
+        "How many shards is the queue running, and is it saturating?",
+        "Which remote endpoint is the bottleneck?"
+      ],
+      "json": "dashboards/prometheus/remote-write.json",
+      "doc": "docs/dashboards/prometheus/remote-write.md",
+      "screenshot": "screenshots/prometheus/remote-write.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Prometheus / Scrape Targets",
+      "uid": "prometheus-scrape-targets",
+      "category": "prometheus",
+      "slug": "scrape-targets",
+      "domain": "prometheus",
+      "datasource": "prometheus",
+      "tags": [
+        "prometheus",
+        "scrape",
+        "targets",
+        "meta-monitoring"
+      ],
+      "panels": 10,
+      "questions": [
+        "Which targets are down right now, and in which jobs?",
+        "Are any scrapes slow enough to risk timing out?",
+        "Are targets hitting the per-scrape sample limit (silently truncated)?",
+        "How does scrape duration distribute across the fleet?",
+        "Which job has the most missing targets?"
+      ],
+      "json": "dashboards/prometheus/scrape-targets.json",
+      "doc": "docs/dashboards/prometheus/scrape-targets.md",
+      "screenshot": "screenshots/prometheus/scrape-targets.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Prometheus / TSDB Internals",
+      "uid": "prometheus-tsdb",
+      "category": "prometheus",
+      "slug": "tsdb",
+      "domain": "prometheus",
+      "datasource": "prometheus",
+      "tags": [
+        "prometheus",
+        "tsdb",
+        "storage",
+        "meta-monitoring"
+      ],
+      "panels": 10,
+      "questions": [
+        "Is active-series (head) cardinality growing without bound?",
+        "Have any WAL corruptions occurred (data-integrity risk)?",
+        "Is compaction keeping up, or are durations spiking?",
+        "Are TSDB reloads failing after a config/rule change?",
+        "How much resident memory is the storage engine consuming?"
+      ],
+      "json": "dashboards/prometheus/tsdb.json",
+      "doc": "docs/dashboards/prometheus/tsdb.md",
+      "screenshot": "screenshots/prometheus/tsdb.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Redis / Replication & Cluster",
+      "uid": "redis-cluster",
+      "category": "redis",
+      "slug": "cluster",
+      "domain": "redis",
+      "datasource": "prometheus",
+      "tags": [
+        "redis",
+        "cache",
+        "redis-exporter",
+        "replication"
+      ],
+      "panels": 11,
+      "questions": [
+        "How many replicas is the master streaming to right now?",
+        "How long since each replica last heard from its master?",
+        "Is the replication offset advancing on both master and replicas?",
+        "Are connections being rejected (maxclients reached)?",
+        "How is memory distributed across the nodes?"
+      ],
+      "json": "dashboards/redis/cluster.json",
+      "doc": "docs/dashboards/redis/cluster.md",
+      "screenshot": "screenshots/redis/cluster.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Redis / Keyspace & Memory",
+      "uid": "redis-keyspace-and-memory",
+      "category": "redis",
+      "slug": "keyspace-and-memory",
+      "domain": "redis",
+      "datasource": "prometheus",
+      "tags": [
+        "redis",
+        "cache",
+        "redis-exporter",
+        "memory"
+      ],
+      "panels": 11,
+      "questions": [
+        "How close is memory used to maxmemory?",
+        "Is Redis evicting keys under memory pressure?",
+        "How old is the last successful RDB snapshot?",
+        "How many keys are in each database, and how many have a TTL?",
+        "Are keys expiring at the expected rate?"
+      ],
+      "json": "dashboards/redis/keyspace-and-memory.json",
+      "doc": "docs/dashboards/redis/keyspace-and-memory.md",
+      "screenshot": "screenshots/redis/keyspace-and-memory.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Redis / Overview",
+      "uid": "redis-overview",
+      "category": "redis",
+      "slug": "overview",
+      "domain": "redis",
+      "datasource": "prometheus",
+      "tags": [
+        "redis",
+        "cache",
+        "redis-exporter",
+        "overview"
+      ],
+      "panels": 11,
+      "questions": [
+        "Is Redis up and responding right now?",
+        "How close is memory used to maxmemory?",
+        "What is the keyspace hit ratio (cache effectiveness)?",
+        "How many clients are connected, and are any blocked?",
+        "Is Redis evicting keys under memory pressure?"
+      ],
+      "json": "dashboards/redis/overview.json",
+      "doc": "docs/dashboards/redis/overview.md",
+      "screenshot": "screenshots/redis/overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "Tempo / Overview",
+      "uid": "tempo-overview",
+      "category": "tempo",
+      "slug": "overview",
+      "domain": "tempo",
+      "datasource": "prometheus",
+      "tags": [
+        "tempo",
+        "tracing",
+        "ingestion",
+        "meta-monitoring"
+      ],
+      "panels": 10,
+      "questions": [
+        "What is the current span ingest rate?",
+        "Is request latency healthy across the trace API routes?",
+        "Is the blocklist length growing (compaction falling behind)?",
+        "Are ingesters flushing blocks to storage at a steady rate?",
+        "How many traces and bytes are being created and received?"
+      ],
+      "json": "dashboards/tempo/overview.json",
+      "doc": "docs/dashboards/tempo/overview.md",
+      "screenshot": "screenshots/tempo/overview.svg",
+      "alerts": 3
+    },
+    {
+      "title": "VictoriaMetrics / Cluster",
+      "uid": "victoria-metrics-cluster",
+      "category": "victoria-metrics",
+      "slug": "cluster",
+      "domain": "victoria-metrics",
+      "datasource": "prometheus",
+      "tags": [
+        "victoriametrics",
+        "tsdb",
+        "storage",
+        "meta-monitoring"
+      ],
+      "panels": 10,
+      "questions": [
+        "How much free disk is left versus the data already on disk?",
+        "What is the current ingestion rate, and is it steady?",
+        "Are HTTP requests erroring (rejected writes or failed reads)?",
+        "Is the concurrent-insert pool saturating (ingest backpressure)?",
+        "Are rows being ignored (dropped) on ingest?"
+      ],
+      "json": "dashboards/victoria-metrics/cluster.json",
+      "doc": "docs/dashboards/victoria-metrics/cluster.md",
+      "screenshot": "screenshots/victoria-metrics/cluster.svg",
+      "alerts": 3
+    },
+    {
+      "title": "VictoriaMetrics / vmagent",
+      "uid": "victoria-metrics-vmagent",
+      "category": "victoria-metrics",
+      "slug": "vmagent",
+      "domain": "victoria-metrics",
+      "datasource": "prometheus",
+      "tags": [
+        "victoriametrics",
+        "vmagent",
+        "remote-write",
+        "meta-monitoring"
+      ],
+      "panels": 10,
+      "questions": [
+        "Is vmagent erroring on remote-write to any upstream?",
+        "Is pending data buffering up (backpressure or a persistent queue filling)?",
+        "Does vmagent have live connections to its remote-write targets?",
+        "What is the remote-write request rate, and is it steady?",
+        "Are rows being dropped before they ship?"
+      ],
+      "json": "dashboards/victoria-metrics/vmagent.json",
+      "doc": "docs/dashboards/victoria-metrics/vmagent.md",
+      "screenshot": "screenshots/victoria-metrics/vmagent.svg",
+      "alerts": 3
+    },
+    {
+      "title": "vSphere / Virtual Machines",
+      "uid": "vmware-virtual-machines",
+      "category": "vmware",
+      "slug": "virtual-machines",
+      "domain": "vmware",
+      "datasource": "prometheus",
+      "tags": [
+        "vmware",
+        "vsphere",
+        "vm",
+        "hypervisor",
+        "capacity"
+      ],
+      "panels": 9,
+      "questions": [
+        "How many VMs are powered on versus off right now?",
+        "Which VMs are consuming the most CPU (MHz) and memory?",
+        "Which host carries the most VMs (placement balance)?",
+        "Is a noisy VM starving its neighbours?",
+        "Did the powered-on count drop unexpectedly?"
+      ],
+      "json": "dashboards/vmware/virtual-machines.json",
+      "doc": "docs/dashboards/vmware/virtual-machines.md",
+      "screenshot": "screenshots/vmware/virtual-machines.svg",
+      "alerts": 3
+    },
+    {
+      "title": "vSphere / ESXi Hosts",
+      "uid": "vmware-vsphere-hosts",
+      "category": "vmware",
+      "slug": "vsphere-hosts",
+      "domain": "vmware",
+      "datasource": "prometheus",
+      "tags": [
+        "vmware",
+        "vsphere",
+        "esxi",
+        "hypervisor",
+        "capacity"
+      ],
+      "panels": 10,
+      "questions": [
+        "Are any ESXi hosts disconnected or not powered on?",
+        "Which host is the most CPU- or memory-pressured right now?",
+        "Which datastore has the least free space?",
+        "Is memory pressure trending toward ballooning/swapping?",
+        "Do we have headroom to absorb a host failure (HA)?"
+      ],
+      "json": "dashboards/vmware/vsphere-hosts.json",
+      "doc": "docs/dashboards/vmware/vsphere-hosts.md",
+      "screenshot": "screenshots/vmware/vsphere-hosts.svg",
+      "alerts": 3
+    }
+  ],
+  "count": 100
+}

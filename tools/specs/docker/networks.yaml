@@ -1,0 +1,232 @@
+title: Docker / Container Networking
+description: >-
+  Per-container network throughput, errors and drops for a Docker host scraped by
+  cAdvisor: who the bandwidth hogs are, and whether any container is seeing receive/
+  transmit errors or dropped packets. The board to open when an app is slow but CPU and
+  memory look fine — the network is the usual silent culprit.
+datasource: prometheus
+tags: [docker, networking, cadvisor, bandwidth, errors]
+seo_phrase: Docker container networking Grafana dashboard
+refresh: 30s
+time_from: now-3h
+
+questions:
+  - "Which containers are using the most network bandwidth right now?"
+  - "Is any container seeing receive or transmit errors?"
+  - "Are packets being dropped on any container interface?"
+  - "How does total ingress compare to egress for this host?"
+
+production_lessons: >-
+  Network problems hide better than CPU or memory because every utilisation gauge stays
+  green while requests quietly time out. That is why this board leads with both the
+  **top bandwidth talker** and the **error rate** side by side — the talker tells you who
+  might be saturating the bridge, the error rate tells you whether the bridge or NIC is
+  already failing. Drops and errors are the signal that matters: a container moving a lot
+  of bytes is usually fine, but a container with a rising drop rate is losing data, and
+  no other panel on any other dashboard will show you that.
+
+data_sources:
+  - "`cAdvisor` network counters: `container_network_receive_bytes_total`,
+    `container_network_transmit_bytes_total`, `container_network_receive_errors_total`
+    (plus the standard `container_network_transmit_errors_total` and
+    `container_network_receive_packets_dropped_total` it exports), keyed by the `name`
+    label. Empty-name cgroup series are excluded with `name!=\"\"`."
+
+templating:
+  - name: instance
+    label: Host
+    query: label_values(machine_cpu_cores, instance)
+    description: cAdvisor instance (Docker host) to inspect.
+    multi: false
+    includeAll: false
+
+rows:
+  - title: Headline — bandwidth & errors
+    panels:
+      - type: stat
+        title: Busiest container (total Bps)
+        description: Highest combined receive+transmit rate of any container.
+        unit: Bps
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              max(
+                sum by (name) (rate(container_network_receive_bytes_total{instance="$instance", name!=""}[5m]))
+                + sum by (name) (rate(container_network_transmit_bytes_total{instance="$instance", name!=""}[5m]))
+              ) or vector(0)
+            instant: true
+            legend: busiest
+      - type: stat
+        title: Total receive
+        description: Aggregate inbound bandwidth across all containers.
+        unit: Bps
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(container_network_receive_bytes_total{instance="$instance", name!=""}[5m])) or vector(0)
+            instant: true
+            legend: rx
+      - type: stat
+        title: Total transmit
+        description: Aggregate outbound bandwidth across all containers.
+        unit: Bps
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(container_network_transmit_bytes_total{instance="$instance", name!=""}[5m])) or vector(0)
+            instant: true
+            legend: tx
+      - type: stat
+        title: Error + drop rate
+        description: Combined receive errors and drops across all containers — should be zero.
+        unit: pps
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.1}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              sum(rate(container_network_receive_errors_total{instance="$instance", name!=""}[5m]))
+              + sum(rate(container_network_receive_packets_dropped_total{instance="$instance", name!=""}[5m])) or vector(0)
+            instant: true
+            legend: errors+drops
+
+  - title: Bandwidth by container
+    panels:
+      - type: timeseries
+        title: Receive throughput (top 10)
+        description: Inbound bandwidth per container over time.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              topk(10, sum by (name) (rate(container_network_receive_bytes_total{instance="$instance", name!=""}[5m])))
+            legend: "{{name}}"
+      - type: timeseries
+        title: Transmit throughput (top 10)
+        description: Outbound bandwidth per container over time.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              topk(10, sum by (name) (rate(container_network_transmit_bytes_total{instance="$instance", name!=""}[5m])))
+            legend: "{{name}}"
+      - type: bargauge
+        title: Total bandwidth by container (top 10)
+        description: Combined rx+tx per container, ranked — find the talker.
+        unit: Bps
+        min: 0
+        orientation: horizontal
+        targets:
+          - expr: >-
+              topk(10,
+                sum by (name) (rate(container_network_receive_bytes_total{instance="$instance", name!=""}[5m]))
+                + sum by (name) (rate(container_network_transmit_bytes_total{instance="$instance", name!=""}[5m])))
+            instant: true
+            legend: "{{name}}"
+
+  - title: Errors & drops
+    panels:
+      - type: timeseries
+        title: Receive errors by container
+        description: Inbound packet errors per container — non-zero means a stressed bridge or NIC.
+        unit: pps
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              topk(10, sum by (name) (rate(container_network_receive_errors_total{instance="$instance", name!=""}[5m])))
+            legend: "{{name}}"
+      - type: timeseries
+        title: Transmit errors by container
+        description: Outbound packet errors per container.
+        unit: pps
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              topk(10, sum by (name) (rate(container_network_transmit_errors_total{instance="$instance", name!=""}[5m])))
+            legend: "{{name}}"
+      - type: timeseries
+        title: Dropped packets by container
+        description: Receive drops per container — usually a full socket buffer or overloaded bridge.
+        unit: pps
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              topk(10, sum by (name) (rate(container_network_receive_packets_dropped_total{instance="$instance", name!=""}[5m])))
+            legend: "{{name}}"
+
+alerts:
+  - name: ContainerNetworkErrors
+    severity: warning
+    expr: >-
+      sum by (name, instance) (rate(container_network_receive_errors_total{name!=""}[5m]))
+      + sum by (name, instance) (rate(container_network_transmit_errors_total{name!=""}[5m])) > 1
+    for: 10m
+    summary: "Container {{ $labels.name }} network errors {{ printf \"%.1f\" $value }}/s"
+    why: NIC/bridge errors cause retransmits and tail latency the app feels as slowness, while every utilisation gauge stays green.
+    investigate: "Open Docker / Container Networking, scope to the host, and check whether one container or all of them are erroring (host NIC versus container)."
+    runbook: "Inspect the Docker bridge/overlay and host NIC; restart the container's network namespace if wedged; replace failing hardware."
+    recovery: Clears when the error rate returns to zero for 5m.
+    false_positives: A brief burst during container restart or network reconfiguration.
+  - name: ContainerPacketDrops
+    severity: warning
+    expr: sum by (name, instance) (rate(container_network_receive_packets_dropped_total{name!=""}[5m])) > 1
+    for: 10m
+    summary: "Container {{ $labels.name }} dropping {{ printf \"%.1f\" $value }} pkts/s"
+    why: Dropped packets mean lost data — the container's socket buffers or the bridge cannot keep up, causing retransmits and stalls.
+    investigate: "Correlate drops with the bandwidth panel; a talker overwhelming the bridge is the usual cause."
+    runbook: "Increase socket buffer sizes, rate-limit the noisy container, or move heavy talkers to separate networks."
+    recovery: Clears when drops return to zero for 5m.
+    false_positives: Momentary drops under a legitimate traffic spike.
+  - name: ContainerBandwidthSpike
+    severity: info
+    expr: >-
+      sum by (name, instance) (rate(container_network_receive_bytes_total{name!=""}[5m]))
+      + sum by (name, instance) (rate(container_network_transmit_bytes_total{name!=""}[5m])) > 1.0e8
+    for: 10m
+    summary: "Container {{ $labels.name }} sustained ~100 MB/s of network"
+    why: A container pushing ~800 Mbps for ten minutes can saturate a 1GbE host link and starve its neighbours.
+    investigate: "Confirm the traffic is expected (backup, replication) and check the host NIC for saturation."
+    runbook: "Throttle or schedule the transfer off-peak, or move it to a dedicated network/host."
+    recovery: Clears when throughput drops below the threshold for 5m.
+    false_positives: Legitimate bulk transfers — tune the byte threshold to your link speed.
+
+troubleshooting:
+  - symptom: Error and drop panels are always empty
+    cause: cAdvisor is not exposing the network error/drop counters, or there genuinely are none.
+    action: Confirm the counters exist in Explore; healthy hosts legitimately show zero.
+  - symptom: Bandwidth looks doubled
+    cause: Per-interface series summed without `by (name)` double-count multi-NIC containers.
+    action: Keep the `sum by (name) (rate(...))` shape used here.
+  - symptom: Busiest-container stat flaps wildly
+    cause: A short rate window over bursty traffic amplifies noise.
+    action: Widen the rate window from 5m to 10m for a smoother headline number.
+
+performance: >-
+  Network counters are moderate cardinality; `topk(10)` and `sum by (name)` bound every
+  panel. Rates use a 5m window (≥4× a 15s scrape). On hosts with many containers and
+  interfaces, drop per-interface series with metric_relabel_configs to keep cAdvisor
+  scrapes fast.
+
+customization: >-
+  Set the bandwidth-spike threshold to a fraction of your actual link speed (the 100MB/s
+  default assumes 1GbE). Add a `name` filter to focus on one service. Split rx and tx
+  alerts if egress and ingress have different SLAs.

@@ -1,0 +1,23 @@
+name: 💡 Feature request
+description: Suggest an improvement to the tooling, docs, or repository structure.
+title: "[Feature] <summary>"
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What's missing or painful today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to see. Roadmap ideas welcome (see ROADMAP.md).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

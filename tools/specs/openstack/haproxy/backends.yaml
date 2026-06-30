@@ -1,0 +1,220 @@
+title: OpenStack / HAProxy — Backend Health
+description: >-
+  HAProxy backend and server health in front of the OpenStack APIs: which backends
+  are down, how many servers are up per pool, the 5xx error ratio, and response and
+  connection errors. Answers "is the load balancer hiding a dead control-plane
+  service, and are clients getting 5xx?" — the layer most OpenStack outages route
+  through.
+datasource: prometheus
+tags: [openstack, haproxy, load-balancer, backends]
+seo_phrase: HAProxy backend Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are any backends fully down (no healthy servers)?"
+  - "How many servers are up vs down in each backend pool?"
+  - "What is the 5xx error ratio per backend right now?"
+  - "Are response or connection errors climbing on any backend?"
+
+production_lessons: >-
+  HAProxy is where OpenStack high availability lives and where it quietly fails:
+  a backend can lose two of its three API servers and still serve traffic, so the
+  cluster looks healthy while it is one failure from an outage. The first thing to
+  check in an incident is therefore "backends fully down" and "servers up per
+  backend", not aggregate request rate. The 5xx ratio is the client-visible truth:
+  it rises the moment a control service starts erroring even if HAProxy still marks
+  the server up, which is exactly the gap between "the LB is fine" and "users are
+  getting errors".
+
+data_sources:
+  - "`haproxy_exporter` or HAProxy's native Prometheus endpoint exposing
+    `haproxy_backend_up`, `haproxy_server_up`, `haproxy_backend_http_responses_total`
+    (with a `code` label of 2xx/5xx), `haproxy_backend_response_errors_total` and
+    `haproxy_backend_connection_errors_total`."
+  - "Series carry a `backend` (proxy) label and, for server metrics, a `server`
+    label. The 5xx ratio assumes the `code` label is exported on
+    `haproxy_backend_http_responses_total`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(haproxy_backend_up, job)
+    description: Prometheus scrape job for your HAProxy exporter/endpoint.
+    multi: false
+    includeAll: false
+  - name: backend
+    label: Backend
+    query: label_values(haproxy_backend_up{job="$job"}, backend)
+    description: HAProxy backend pool(s) — usually one per OpenStack API service.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Backend health — read these first
+    panels:
+      - type: stat
+        title: Backends down
+        description: Backend pools with no healthy server (haproxy_backend_up = 0). Any value >0 is a service outage behind the LB.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(haproxy_backend_up{job="$job", backend=~"$backend"} == 0) or vector(0)
+            instant: true
+            legend: down
+      - type: stat
+        title: Servers down
+        description: Individual backend servers currently failing health checks. Non-zero erodes redundancy even when the backend is still up.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: count(haproxy_server_up{job="$job", backend=~"$backend"} == 0) or vector(0)
+            instant: true
+            legend: servers down
+      - type: gauge
+        title: 5xx error ratio
+        description: Share of backend HTTP responses that are 5xx across selected backends — the client-visible error rate.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum(rate(haproxy_backend_http_responses_total{job="$job", backend=~"$backend", code="5xx"}[5m]))
+              / clamp_min(sum(rate(haproxy_backend_http_responses_total{job="$job", backend=~"$backend"}[5m])), 1) or vector(0)
+            instant: true
+            legend: 5xx
+      - type: stat
+        title: Backend sessions
+        description: Total current sessions across selected backends — a quick load baseline.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(haproxy_backend_current_sessions{job="$job", backend=~"$backend"}) or vector(0)
+            instant: true
+            legend: sessions
+
+  - title: Per-backend detail
+    panels:
+      - type: table
+        title: Servers up per backend
+        description: Healthy server count in each backend pool. Compare to the pool's expected size to spot eroded redundancy.
+        unit: short
+        filterable: true
+        transformations:
+          - id: organize
+            options:
+              renameByName:
+                backend: Backend
+                Value: Servers up
+        targets:
+          - expr: sum by (backend) (haproxy_server_up{job="$job", backend=~"$backend"})
+            instant: true
+            format: table
+            legend: "{{backend}}"
+      - type: timeseries
+        title: 5xx ratio per backend
+        description: Per-backend 5xx percentage over time — isolate which OpenStack service is erroring.
+        unit: percent
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              100 * sum by (backend) (rate(haproxy_backend_http_responses_total{job="$job", backend=~"$backend", code="5xx"}[5m]))
+              / clamp_min(sum by (backend) (rate(haproxy_backend_http_responses_total{job="$job", backend=~"$backend"}[5m])), 1)
+            legend: "{{backend}}"
+
+  - title: Errors & load
+    panels:
+      - type: timeseries
+        title: Response & connection errors
+        description: Backend response errors and connection errors per second. Connection errors point at a dead/refusing server; response errors at app-level failures.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (backend) (rate(haproxy_backend_response_errors_total{job="$job", backend=~"$backend"}[5m]))
+            legend: "{{backend}} resp err/s"
+          - expr: sum by (backend) (rate(haproxy_backend_connection_errors_total{job="$job", backend=~"$backend"}[5m]))
+            legend: "{{backend}} conn err/s"
+      - type: timeseries
+        title: Backend sessions
+        description: Current sessions per backend over time — find the pool absorbing a load spike.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (backend) (haproxy_backend_current_sessions{job="$job", backend=~"$backend"})
+            legend: "{{backend}}"
+
+alerts:
+  - name: HAProxyBackendDown
+    severity: critical
+    expr: haproxy_backend_up == 0
+    for: 1m
+    summary: "HAProxy backend {{ $labels.backend }} is down (no healthy servers)"
+    why: A backend with zero healthy servers means the OpenStack API behind it is unreachable through the load balancer — a hard outage for that service.
+    investigate: "Open OpenStack / HAProxy — Backend Health, read servers-up-per-backend, then check the API service and its health-check endpoint on each member."
+    runbook: "Restart the failed API service on its hosts; confirm the HAProxy health-check path and that the service is listening; check for a bad deploy."
+    recovery: Clears when at least one server in the backend passes health checks.
+    false_positives: A backend intentionally drained for maintenance; silence it during planned work.
+  - name: HAProxyBackend5xxHigh
+    severity: warning
+    expr: >-
+      100 * sum by (backend, job) (rate(haproxy_backend_http_responses_total{code="5xx"}[5m]))
+      / clamp_min(sum by (backend, job) (rate(haproxy_backend_http_responses_total[5m])), 1) > 5
+    for: 5m
+    summary: "Backend {{ $labels.backend }} serving >5% 5xx for 5m"
+    why: A sustained 5xx ratio is a client-visible error even though HAProxy may still mark servers up — the application behind the backend is failing requests.
+    investigate: "Correlate the per-backend 5xx panel with the API service logs and the database/RabbitMQ dashboards; control-plane 5xx often traces to a stalled dependency."
+    runbook: "Identify the failing member, drain it if isolated to one server, and fix the underlying service (DB connection exhaustion, RPC timeout, bad release)."
+    recovery: Clears when the 5xx ratio falls below 5%.
+    false_positives: A short error blip during a rolling deploy; the 5m window filters brief spikes.
+  - name: HAProxyServerRedundancyLow
+    severity: warning
+    expr: sum by (backend, job) (haproxy_server_up) < 2
+    for: 5m
+    summary: "Backend {{ $labels.backend }} down to fewer than 2 healthy servers"
+    why: A backend running on a single server has no redundancy left; the next failure is an outage, so this is the early warning before HAProxyBackendDown.
+    investigate: "Check which servers are failing health checks and why (host down, service crashed, check path wrong)."
+    runbook: "Restore the failed members so the pool returns to its full size; do not start a risky deploy while redundancy is degraded."
+    recovery: Clears when the backend has 2 or more healthy servers again.
+    false_positives: Single-server backends by design; exclude those backends from this rule.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The HAProxy Prometheus endpoint/exporter is not scraped, or stats are disabled.
+    action: "Enable HAProxy's native Prometheus endpoint (or run haproxy_exporter) and add the target; confirm `haproxy_backend_up` appears in Explore."
+  - symptom: 5xx ratio is blank
+    cause: The `code` label is not exported on `haproxy_backend_http_responses_total`.
+    action: Use HAProxy's native Prometheus output (which emits per-code counters) or upgrade the exporter.
+  - symptom: Servers-up table shows fewer servers than configured
+    cause: Some servers are in maintenance/drain and excluded, or the exporter only sees active servers.
+    action: Cross-check `haproxy_server_check_status` and the HAProxy stats page for the full server list and states.
+
+performance: >-
+  Backend/server series are bounded by your number of pools and members, so this is
+  light at 30s refresh. Ratios use a 5m rate window and `clamp_min` guards against
+  divide-by-zero on idle backends. For very large server fleets, drive the per-server
+  panels from a recording rule that pre-aggregates `by (backend)`.
+
+customization: >-
+  Adjust the 5xx thresholds to your SLO and the redundancy alert to each pool's
+  real size (exclude single-server backends). Add a `server` template variable to
+  drill into one pool, and pair with the HAProxy Frontends dashboard to see
+  client-side load alongside backend health.

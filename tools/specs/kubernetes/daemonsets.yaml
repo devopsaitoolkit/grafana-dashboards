@@ -1,0 +1,220 @@
+# DaemonSet coverage — ready vs desired across every node.
+uid: kubernetes-daemonsets
+title: Kubernetes / DaemonSets
+description: >-
+  Coverage health for DaemonSets: whether every node that should run a daemon pod
+  actually has a ready one, how many are misscheduled, and which DaemonSets are not
+  fully rolled out. Answers "is my logging/CNI/node agent running everywhere it
+  should?" from kube-state-metrics.
+datasource: prometheus
+tags: [kubernetes, daemonsets, kube-state-metrics, coverage]
+seo_phrase: Kubernetes DaemonSet coverage Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which DaemonSets have fewer ready pods than nodes they should cover?"
+  - "Are any daemon pods misscheduled onto nodes they should not be on?"
+  - "How many nodes are missing a daemon pod entirely?"
+  - "Is a DaemonSet update stalled partway across the fleet?"
+
+production_lessons: >-
+  DaemonSets run the invisible plumbing — the CNI agent, log shipper, node exporter,
+  CSI driver — so a DaemonSet that is not fully rolled out means some nodes are
+  silently missing a critical capability: a node with no log agent loses its logs,
+  a node with no CNI agent breaks pod networking. The failure is per-node and easy
+  to miss because the other nodes look fine. This dashboard leads with the count of
+  DaemonSets not fully ready and the number of uncovered nodes, then shows coverage
+  per DaemonSet so you can tell a slow rollout from a node that will never schedule
+  the pod (taint, resource, or affinity mismatch).
+
+data_sources:
+  - "`kube-state-metrics` for DaemonSet scheduling and readiness
+    (`kube_daemonset_status_number_ready`,
+    `kube_daemonset_status_desired_number_scheduled`)."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(kube_node_info, cluster)
+    description: Cluster to scope to. Select All on single-cluster setups.
+    multi: false
+    includeAll: true
+  - name: namespace
+    label: Namespace
+    query: label_values(kube_daemonset_status_desired_number_scheduled{cluster=~"$cluster"}, namespace)
+    description: Namespace(s) to inspect; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Coverage health — read these first
+    panels:
+      - type: stat
+        title: DaemonSets not fully ready
+        description: DaemonSets with fewer ready pods than nodes they should be scheduled on.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(
+                kube_daemonset_status_number_ready{cluster=~"$cluster", namespace=~"$namespace"}
+                < kube_daemonset_status_desired_number_scheduled{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: degraded
+      - type: stat
+        title: Uncovered node-slots (total)
+        description: Sum of missing daemon pods across all DaemonSets — nodes that should have a pod but do not have a ready one.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              sum(
+                kube_daemonset_status_desired_number_scheduled{cluster=~"$cluster", namespace=~"$namespace"}
+                - kube_daemonset_status_number_ready{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: uncovered
+      - type: stat
+        title: DaemonSets fully covered
+        description: DaemonSets with a ready pod on every node they target.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              count(
+                kube_daemonset_status_number_ready{cluster=~"$cluster", namespace=~"$namespace"}
+                >= kube_daemonset_status_desired_number_scheduled{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: covered
+      - type: gauge
+        title: Worst DaemonSet coverage
+        description: Lowest ready-vs-desired ratio across all DaemonSets — the least-covered daemon.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 90}
+          - {color: green, value: 100}
+        targets:
+          - expr: >-
+              100 * min(
+                kube_daemonset_status_number_ready{cluster=~"$cluster", namespace=~"$namespace"}
+                / clamp_min(kube_daemonset_status_desired_number_scheduled{cluster=~"$cluster", namespace=~"$namespace"}, 1)
+              ) or vector(0)
+            instant: true
+            legend: worst
+
+  - title: Coverage detail
+    panels:
+      - type: bargauge
+        title: Coverage % by DaemonSet
+        description: Ready pods as a share of desired-scheduled nodes, per DaemonSet. Below 100% means at least one node is uncovered.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 90}
+          - {color: green, value: 100}
+        targets:
+          - expr: >-
+              100
+              * kube_daemonset_status_number_ready{cluster=~"$cluster", namespace=~"$namespace"}
+              / clamp_min(kube_daemonset_status_desired_number_scheduled{cluster=~"$cluster", namespace=~"$namespace"}, 1)
+            instant: true
+            legend: "{{namespace}}/{{daemonset}}"
+      - type: table
+        title: DaemonSets missing pods
+        description: DaemonSets with uncovered nodes and how many — the worklist when a node agent is missing somewhere.
+        unit: short
+        targets:
+          - expr: >-
+              (kube_daemonset_status_desired_number_scheduled{cluster=~"$cluster", namespace=~"$namespace"}
+               - kube_daemonset_status_number_ready{cluster=~"$cluster", namespace=~"$namespace"}) > 0
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{daemonset}}"
+
+  - title: Rollout over time
+    panels:
+      - type: timeseries
+        title: Ready vs desired (cluster total)
+        description: Aggregate ready and desired daemon pods. A gap that opens during an update and does not close is a stalled rollout.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(kube_daemonset_status_desired_number_scheduled{cluster=~"$cluster", namespace=~"$namespace"})
+            legend: desired
+          - expr: sum(kube_daemonset_status_number_ready{cluster=~"$cluster", namespace=~"$namespace"})
+            legend: ready
+      - type: timeseries
+        title: Uncovered node-slots by DaemonSet
+        description: Per-DaemonSet count of nodes missing a ready pod over time.
+        unit: short
+        min: 0
+        legend: table
+        drawStyle: bars
+        targets:
+          - expr: >-
+              (kube_daemonset_status_desired_number_scheduled{cluster=~"$cluster", namespace=~"$namespace"}
+               - kube_daemonset_status_number_ready{cluster=~"$cluster", namespace=~"$namespace"}) > 0
+            legend: "{{namespace}}/{{daemonset}}"
+
+alerts:
+  - name: KubeDaemonSetNotFullyRolledOut
+    severity: warning
+    expr: >-
+      kube_daemonset_status_number_ready
+      < kube_daemonset_status_desired_number_scheduled
+    for: 15m
+    summary: "DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} not fully covered for 15m"
+    why: An uncovered node is silently missing whatever the daemon provides — logging, networking, storage or metrics — and that gap is invisible from the affected node's own perspective.
+    investigate: "Identify the uncovered node(s); check for taints the daemon does not tolerate, node resource pressure, or a stuck pod on that node."
+    runbook: "Add the missing toleration/affinity, free resources on the node, or delete the stuck daemon pod so it reschedules."
+    recovery: Clears when ready equals desired for 5m.
+    false_positives: A genuinely slow rolling update across a large fleet, or a node intentionally tainted away from the daemon.
+  - name: KubeDaemonSetFullyDown
+    severity: critical
+    expr: kube_daemonset_status_number_ready == 0 and kube_daemonset_status_desired_number_scheduled > 0
+    for: 10m
+    summary: "DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} has zero ready pods"
+    why: A DaemonSet with no ready pods means the capability is missing cluster-wide — every node has lost its log agent, CNI, or CSI driver.
+    investigate: "Check the DaemonSet's pod template for a recent bad change; inspect events on any one of its pods."
+    runbook: "Roll back the DaemonSet to the last working revision; if it is an admission/image issue, fix it then force a rollout restart."
+    recovery: Clears when at least one pod becomes ready and coverage recovers.
+    false_positives: A DaemonSet intentionally scaled to zero via a nodeSelector that currently matches no nodes.
+
+troubleshooting:
+  - {symptom: Coverage gauge shows under 100% but no node is obviously down, cause: A node taint the daemon does not tolerate, action: Compare desired-scheduled with node count; tolerations decide which nodes count as desired.}
+  - {symptom: Desired count is lower than total nodes, cause: The DaemonSet uses a nodeSelector limiting it to a subset, action: Expected — desired reflects only matching nodes, not all nodes.}
+  - {symptom: "No data", cause: kube-state-metrics not scraped or no DaemonSets in $namespace, action: Set $namespace to All and verify kube-state-metrics in Explore.}
+
+performance: >-
+  Panels read two gauges per DaemonSet with no rate windows, so cost is negligible.
+  Tables and bar panels filter with `> 0` so only under-covered DaemonSets render.
+  `clamp_min(desired, 1)` guards the coverage ratio against divide-by-zero when a
+  selector currently matches no nodes.
+
+customization: >-
+  Scope to platform daemons with a `daemonset=~"fluent-bit|cilium|node-exporter"`
+  selector. Tighten the `for` on `KubeDaemonSetNotFullyRolledOut` if your rollouts
+  are fast and any lingering gap is a real problem. The worst-coverage gauge is a
+  good single number for a fleet status wall.

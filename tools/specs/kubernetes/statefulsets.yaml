@@ -1,0 +1,223 @@
+# StatefulSet health — ready vs desired replicas for stateful workloads.
+uid: kubernetes-statefulsets
+title: Kubernetes / StatefulSets
+description: >-
+  Health for StatefulSets — databases, queues and other ordered, stateful
+  workloads: how many replicas are ready against desired, which sets are degraded,
+  and a per-StatefulSet status table. Answers "is my data tier at full strength?"
+  from kube-state-metrics.
+datasource: prometheus
+tags: [kubernetes, statefulsets, kube-state-metrics, stateful]
+seo_phrase: Kubernetes StatefulSet health Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which StatefulSets have fewer ready replicas than desired?"
+  - "Is any stateful workload running below quorum right now?"
+  - "Which StatefulSet is the most degraded?"
+  - "Is a rolling update progressing or stuck partway through the ordinals?"
+
+production_lessons: >-
+  StatefulSets back the things you cannot afford to lose — databases, brokers,
+  clustered caches — and they update one ordinal at a time, in order, blocking on
+  each pod becoming Ready before moving on. That makes a single stuck pod able to
+  freeze an entire rollout, and a quorum-based system (etcd, Kafka, a 3-node DB)
+  can tip from "degraded" to "unavailable" the moment ready replicas drop below a
+  majority. This dashboard leads with degraded StatefulSets and the worst readiness
+  ratio so you immediately know whether the data tier is at strength, then breaks it
+  down per set. Treat readiness here as more urgent than for stateless apps:
+  unavailable replicas may mean a stalled, ordered, manual-intervention rollout.
+
+data_sources:
+  - "`kube-state-metrics` for StatefulSet replica state
+    (`kube_statefulset_status_replicas_ready`, `kube_statefulset_replicas`)."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(kube_node_info, cluster)
+    description: Cluster to scope to. Select All on single-cluster setups.
+    multi: false
+    includeAll: true
+  - name: namespace
+    label: Namespace
+    query: label_values(kube_statefulset_replicas{cluster=~"$cluster"}, namespace)
+    description: Namespace(s) to inspect; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: StatefulSet health — read these first
+    panels:
+      - type: stat
+        title: StatefulSets degraded
+        description: StatefulSets with fewer ready replicas than desired — running below full strength.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(
+                kube_statefulset_status_replicas_ready{cluster=~"$cluster", namespace=~"$namespace"}
+                < kube_statefulset_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: degraded
+      - type: stat
+        title: Missing replicas (total)
+        description: Sum of not-ready replicas across all StatefulSets — the missing stateful capacity.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: >-
+              sum(
+                kube_statefulset_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+                - kube_statefulset_status_replicas_ready{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: missing
+      - type: stat
+        title: StatefulSets fully ready
+        description: StatefulSets where every desired replica is ready.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              count(
+                kube_statefulset_status_replicas_ready{cluster=~"$cluster", namespace=~"$namespace"}
+                >= kube_statefulset_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: ready
+      - type: gauge
+        title: Worst StatefulSet readiness
+        description: Lowest ready-vs-desired ratio across all StatefulSets — the most degraded data tier.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 67}
+          - {color: green, value: 100}
+        targets:
+          - expr: >-
+              100 * min(
+                kube_statefulset_status_replicas_ready{cluster=~"$cluster", namespace=~"$namespace"}
+                / clamp_min(kube_statefulset_replicas{cluster=~"$cluster", namespace=~"$namespace"}, 1)
+              ) or vector(0)
+            instant: true
+            legend: worst
+
+  - title: Readiness detail
+    panels:
+      - type: bargauge
+        title: Readiness % by StatefulSet
+        description: Ready replicas as a share of desired, per StatefulSet. Below the quorum line for a clustered system is an availability risk.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 67}
+          - {color: green, value: 100}
+        targets:
+          - expr: >-
+              100
+              * kube_statefulset_status_replicas_ready{cluster=~"$cluster", namespace=~"$namespace"}
+              / clamp_min(kube_statefulset_replicas{cluster=~"$cluster", namespace=~"$namespace"}, 1)
+            instant: true
+            legend: "{{namespace}}/{{statefulset}}"
+      - type: table
+        title: Degraded StatefulSets
+        description: StatefulSets running below desired replicas, with ready and desired counts — the worklist for a stuck data-tier rollout.
+        unit: short
+        targets:
+          - expr: >-
+              kube_statefulset_status_replicas_ready{cluster=~"$cluster", namespace=~"$namespace"}
+              < kube_statefulset_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{statefulset}}"
+
+  - title: Readiness over time
+    panels:
+      - type: timeseries
+        title: Ready vs desired replicas (cluster total)
+        description: Aggregate ready and desired stateful replicas. A gap that opens on an update and does not close is a stalled, ordered rollout.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(kube_statefulset_replicas{cluster=~"$cluster", namespace=~"$namespace"})
+            legend: desired
+          - expr: sum(kube_statefulset_status_replicas_ready{cluster=~"$cluster", namespace=~"$namespace"})
+            legend: ready
+      - type: timeseries
+        title: Missing replicas by StatefulSet
+        description: Per-StatefulSet count of not-ready replicas over time — watch which set is stuck and for how long.
+        unit: short
+        min: 0
+        legend: table
+        drawStyle: bars
+        targets:
+          - expr: >-
+              (kube_statefulset_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+               - kube_statefulset_status_replicas_ready{cluster=~"$cluster", namespace=~"$namespace"}) > 0
+            legend: "{{namespace}}/{{statefulset}}"
+
+alerts:
+  - name: KubeStatefulSetReplicasMismatch
+    severity: warning
+    expr: >-
+      kube_statefulset_status_replicas_ready
+      < kube_statefulset_replicas
+    for: 15m
+    summary: "StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} below desired replicas for 15m"
+    why: A stateful workload short of replicas for 15 minutes usually means a pod is stuck Pending or failing readiness, and a sequential update will not advance past it.
+    investigate: "Find the lowest-ordinal not-ready pod; check its PVC binding, readiness probe and events — StatefulSets block on ordinals in order."
+    runbook: "Resolve the blocking pod (PVC, node placement, probe, or a bad image), then let the ordered rollout continue; roll back if the new revision is bad."
+    recovery: Clears when ready replicas reach desired for 5m.
+    false_positives: A deliberately slow, hands-on database upgrade where degraded time is expected and supervised.
+  - name: KubeStatefulSetBelowQuorum
+    severity: critical
+    expr: >-
+      kube_statefulset_status_replicas_ready
+      < (kube_statefulset_replicas / 2)
+      and kube_statefulset_replicas >= 3
+    for: 5m
+    summary: "StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} below majority of replicas"
+    why: For a quorum-based cluster (etcd, Kafka, many databases) fewer than half the replicas ready risks loss of quorum — writes stall and the system may go read-only or unavailable.
+    investigate: "Treat as a data-tier incident; check the cluster's own health endpoint and storage for the down members."
+    runbook: "Restore failed members fast (storage, scheduling); do not start risky maintenance while below quorum. Engage the data-store owner."
+    recovery: Clears when a majority of replicas are ready for 5m.
+    false_positives: Single- or double-replica StatefulSets (excluded by the `>= 3` guard) that are not quorum systems.
+
+troubleshooting:
+  - {symptom: Readiness stuck at the same fraction during an update, cause: A higher-ordinal pod is not becoming Ready so the rollout blocks, action: Inspect the lowest not-ready ordinal's PVC and probe — fix it to unblock the sequence.}
+  - {symptom: A StatefulSet shows 0 desired, cause: Scaled to zero, action: Excluded from ratios by `clamp_min`; expected for paused stateful workloads.}
+  - {symptom: Readiness recovers then drops repeatedly, cause: A pod that passes readiness then crashes (often storage or OOM), action: Cross-check Kubernetes / Pods for restarts and OOMKilled on that pod.}
+
+performance: >-
+  Two gauges per StatefulSet, read directly with no rate windows — negligible cost.
+  Filters use `> 0` and `<` comparisons so only degraded sets populate the tables.
+  `clamp_min(desired, 1)` protects the readiness ratio from divide-by-zero on
+  scaled-to-zero sets.
+
+customization: >-
+  The quorum alert assumes odd-sized clusters of 3+; adjust the `>= 3` guard and the
+  `/ 2` fraction to your replication factor. Scope to one data store with a
+  `statefulset=~"postgres|kafka"` selector. Lower the `for` window for tiers where
+  any degraded time warrants an immediate page.

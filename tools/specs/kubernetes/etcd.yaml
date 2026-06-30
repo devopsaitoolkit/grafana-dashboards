@@ -1,0 +1,294 @@
+# etcd cluster health dashboard — the foundation the whole control plane stands on.
+# Leads with quorum (has_leader), disk write latency (WAL fsync / backend commit)
+# and database size against its quota, because those three predict every etcd outage.
+title: Kubernetes / etcd
+description: >-
+  Quorum, leader stability, disk write latency (WAL fsync and backend commit),
+  database size versus quota, and Raft proposal health for an etcd cluster backing
+  Kubernetes. Answers "is etcd healthy and fast enough to keep the API server
+  responsive?" instead of just plotting Raft internals.
+datasource: prometheus
+tags: [kubernetes, control-plane, etcd, raft]
+seo_phrase: etcd Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Does the cluster have a leader and is quorum intact right now?"
+  - "Is disk fsync/commit latency low enough to keep Raft healthy?"
+  - "How close is the database to its space quota?"
+  - "Are leader elections flapping (a sign of disk or network stress)?"
+  - "Are Raft proposals failing or peers slow to round-trip?"
+
+production_lessons: >-
+  etcd outages almost never start as "etcd is down" — they start as **slow disk**.
+  When WAL fsync or backend commit p99 crosses ~tens of milliseconds, Raft heartbeats
+  miss, leader elections start flapping, and the API server latency you were paging on
+  is really an etcd disk problem. So this dashboard leads with **fsync and backend
+  commit p99**, then leader stability, then **database size vs quota** (the other
+  classic outage: hit the 2 GiB default quota and etcd goes read-only until you
+  defrag/compact). Run etcd on dedicated low-latency SSDs and never share the disk —
+  this dashboard exists to prove that you did.
+
+data_sources:
+  - "`etcd` metrics endpoint (the `etcd_server_has_leader`,
+    `etcd_disk_wal_fsync_duration_seconds_bucket`,
+    `etcd_disk_backend_commit_duration_seconds_bucket`,
+    `etcd_mvcc_db_total_size_in_bytes` and `etcd_server_proposals_*` series)."
+  - "`grpc_server_handled_total` for the gRPC error view and
+    `etcd_network_peer_round_trip_time_seconds_bucket` for peer latency."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(etcd_server_has_leader, job)
+    description: Prometheus scrape job for the etcd members.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Member
+    query: label_values(etcd_server_has_leader{job="$job"}, instance)
+    description: etcd member(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Cluster health — read these first
+    panels:
+      - type: stat
+        title: Members without a leader
+        description: Count of etcd members that currently cannot see a leader. Anything above zero risks quorum.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(etcd_server_has_leader{job="$job", instance=~"$instance"} == 0) or vector(0)
+            instant: true
+            legend: no leader
+      - type: stat
+        title: WAL fsync p99
+        description: 99th percentile time to fsync the write-ahead log to disk. The single best predictor of etcd health.
+        unit: s
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.01}
+          - {color: red, value: 0.05}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(etcd_disk_wal_fsync_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            instant: true
+            legend: fsync p99
+      - type: stat
+        title: Backend commit p99
+        description: 99th percentile time to commit a batch to the backend (boltdb). High values mean a slow disk.
+        unit: s
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.025}
+          - {color: red, value: 0.1}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(etcd_disk_backend_commit_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            instant: true
+            legend: commit p99
+      - type: stat
+        title: Database size
+        description: Largest member's on-disk MVCC database size. Compare against your space quota (2 GiB by default).
+        unit: bytes
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1610612736}
+          - {color: red, value: 1932735283}
+        targets:
+          - expr: max(etcd_mvcc_db_total_size_in_bytes{job="$job", instance=~"$instance"})
+            instant: true
+            legend: db size
+      - type: stat
+        title: Leader changes (1h)
+        description: Number of leader elections in the last hour. Sustained churn means disk or network stress.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 4}
+        targets:
+          - expr: max(increase(etcd_server_leader_changes_seen_total{job="$job", instance=~"$instance"}[1h])) or vector(0)
+            instant: true
+            legend: elections
+
+  - title: Disk latency — the usual culprit
+    panels:
+      - type: timeseries
+        title: WAL fsync p99 by member
+        description: Per-member fsync latency. A single slow disk drags the whole cluster.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.05}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le, instance) (rate(etcd_disk_wal_fsync_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Backend commit p99 by member
+        description: Per-member backend commit latency — the boltdb write path.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.1}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le, instance) (rate(etcd_disk_backend_commit_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: "{{instance}}"
+      - type: heatmap
+        title: WAL fsync distribution
+        description: Full latency distribution for fsync — spot a bimodal disk before the p99 alert fires.
+        unit: s
+        targets:
+          - expr: sum by (le) (rate(etcd_disk_wal_fsync_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m]))
+            format: heatmap
+            legend: "{{le}}"
+
+  - title: Consensus and Raft
+    panels:
+      - type: timeseries
+        title: Leader changes
+        description: Rate of leader elections. Flat is good; spikes correlate with disk/network stalls.
+        unit: short
+        min: 0
+        drawStyle: bars
+        legend: table
+        targets:
+          - expr: sum by (instance) (increase(etcd_server_leader_changes_seen_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Proposals — failed vs committed
+        description: Raft proposal throughput and failures. Failed proposals mean writes are being lost to quorum problems.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(etcd_server_proposals_committed_total{job="$job", instance=~"$instance"}[5m]))
+            legend: committed
+          - expr: sum(rate(etcd_server_proposals_failed_total{job="$job", instance=~"$instance"}[5m]))
+            legend: failed
+      - type: timeseries
+        title: Peer round-trip p99
+        description: Network latency between etcd members. High values delay Raft replication and elections.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le, To) (rate(etcd_network_peer_round_trip_time_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: "{{To}}"
+
+  - title: Storage and gRPC
+    panels:
+      - type: timeseries
+        title: Database size vs in-use
+        description: Total on-disk size vs logically in-use bytes. A large gap means fragmentation — defrag to reclaim it.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: max by (instance) (etcd_mvcc_db_total_size_in_bytes{job="$job", instance=~"$instance"})
+            legend: "{{instance}} total"
+          - expr: max by (instance) (etcd_mvcc_db_total_size_in_use_in_bytes{job="$job", instance=~"$instance"})
+            legend: "{{instance}} in-use"
+      - type: gauge
+        title: Quota usage (default 2 GiB)
+        description: Database size as a percent of the default 2 GiB space quota. At 100% etcd goes read-only until you compact and defrag.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: 100 * max(etcd_mvcc_db_total_size_in_bytes{job="$job", instance=~"$instance"}) / 2147483648
+            instant: true
+            legend: quota
+      - type: timeseries
+        title: gRPC error rate by method
+        description: Server-side gRPC failures (non-OK codes). A spike here often precedes API server errors.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              sum by (grpc_method) (rate(grpc_server_handled_total{job="$job", instance=~"$instance", grpc_code!="OK"}[5m])) > 0
+            legend: "{{grpc_method}}"
+
+alerts:
+  - name: EtcdNoLeader
+    severity: critical
+    expr: etcd_server_has_leader == 0
+    for: 1m
+    summary: "etcd member {{ $labels.instance }} has no leader"
+    why: A member without a leader cannot serve writes; if a majority lose the leader the cluster loses quorum and the API server stops accepting changes.
+    investigate: "Open Kubernetes / etcd, check leader changes and peer round-trip latency, and confirm how many members are affected."
+    runbook: "Check the member's logs and disk/network health; if a minority is affected it should re-join, if a majority is down restore quorum from a healthy member or backup."
+    recovery: Clears within 1m of the member seeing a leader again.
+    false_positives: A brief blip during an intentional leader transfer or rolling restart.
+  - name: EtcdHighFsyncDuration
+    severity: critical
+    expr: >-
+      histogram_quantile(0.99, sum by (le, instance, job) (rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m]))) > 0.05
+    for: 10m
+    summary: "etcd WAL fsync p99 above 50ms on {{ $labels.instance }}"
+    why: Slow fsync stalls the Raft log; heartbeats miss, elections flap and API server latency climbs across the whole cluster.
+    investigate: "Compare fsync vs backend commit per member; check the underlying disk for contention or a noisy co-tenant."
+    runbook: "Move etcd to dedicated low-latency SSD/NVMe; remove any disk sharing; verify the storage is not throttled or degraded."
+    recovery: Clears when fsync p99 stays below 50ms for 5m.
+    false_positives: A transient spike during a large compaction or snapshot.
+  - name: EtcdDatabaseQuotaNearFull
+    severity: warning
+    expr: etcd_mvcc_db_total_size_in_bytes / 2147483648 > 0.8
+    for: 15m
+    summary: "etcd database above 80% of the default 2 GiB quota on {{ $labels.instance }}"
+    why: When the database hits its space quota etcd switches to read-only (NOSPACE alarm) and the cluster can no longer accept writes.
+    investigate: "Check the database size vs in-use panel for fragmentation, and review history retention/compaction settings."
+    runbook: "Trigger compaction and run `etcdctl defrag` on each member; if usage is legitimately high, raise `--quota-backend-bytes` and provision more disk."
+    recovery: Clears when database size drops below 80% of quota after compaction/defrag.
+    false_positives: Clusters that intentionally raised the quota above 2 GiB — adjust the divisor to match.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: etcd metrics require client-cert auth and many setups don't scrape them by default.
+    action: "Confirm Prometheus has the etcd client cert/key and `up{job=\"$job\"}` is 1; etcd serves /metrics on the client (2379) or a dedicated metrics port."
+  - symptom: Quota gauge reads wrong percentage
+    cause: Your cluster runs a non-default `--quota-backend-bytes`.
+    action: Replace the `2147483648` divisor with your configured quota in bytes.
+  - symptom: Peer round-trip panel is empty
+    cause: Single-member etcd, or the `To` label casing differs by version.
+    action: Multi-member clusters only emit peer metrics; verify the bucket metric exists in Explore.
+
+performance: >-
+  All rates use a 5m window (>=4x a 30s scrape). Quantiles aggregate the histogram
+  with `sum by (le, ...)` before `histogram_quantile`. The fsync heatmap is the
+  heaviest panel because it keeps every `le` bucket; narrow the time range on large
+  multi-member clusters or pre-aggregate with a recording rule.
+
+customization: >-
+  Adjust the 10ms/50ms fsync and 25ms/100ms commit thresholds to your disk class —
+  NVMe can hold far tighter targets. If you raised `--quota-backend-bytes`, update the
+  quota gauge divisor and the `EtcdDatabaseQuotaNearFull` alert. Scope `$instance` to
+  a single member to debug one slow disk.

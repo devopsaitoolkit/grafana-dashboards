@@ -1,0 +1,279 @@
+# Capacity planning — headroom now and projected days-to-full.
+uid: kubernetes-cluster-capacity
+title: Kubernetes / Cluster Capacity
+description: >-
+  Capacity-planning view for a cluster: how much CPU, memory and pod headroom is
+  left between what nodes can allocate and what is already committed, plus a linear
+  projection of how many days until each dimension fills at the current growth rate.
+  Answers "do we need to add nodes, and by when?" before Pending pods force the
+  question.
+datasource: prometheus
+tags: [kubernetes, capacity, planning, kube-state-metrics, headroom]
+seo_phrase: Kubernetes cluster capacity planning Grafana dashboard
+refresh: 1m
+time_from: now-24h
+
+questions:
+  - "How much CPU, memory and pod headroom is left in the cluster right now?"
+  - "At the current growth rate, how many days until CPU or memory is full?"
+  - "Is committed capacity (requests) creeping toward allocatable?"
+  - "Are we running out of pod slots before we run out of CPU or memory?"
+
+production_lessons: >-
+  Capacity runs out as a request that suddenly will not schedule, and by then the
+  fix — provisioning and joining nodes — takes longer than the incident allows. The
+  job of this dashboard is to make "we will be full in N days" visible weeks ahead.
+  It leads with current headroom across all three schedulable dimensions — CPU,
+  memory and pod count — because clusters often hit the pod-count ceiling (default
+  110/node) long before CPU or memory, and teams that only watch CPU get blindsided.
+  The days-to-full projection uses a linear fit over the last several hours: it is a
+  trend indicator, not a promise, and a single large rollout will skew it — read it
+  alongside the headroom trend, not on its own.
+
+data_sources:
+  - "`kube-state-metrics` for allocatable capacity, committed requests and pod phase
+    (`kube_node_status_allocatable`, `kube_node_status_capacity`,
+    `kube_pod_container_resource_requests`, `kube_pod_status_phase`,
+    `kube_node_spec_unschedulable`)."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(kube_node_info, cluster)
+    description: Cluster to scope to. Select All on single-cluster setups.
+    multi: false
+    includeAll: true
+
+rows:
+  - title: Headroom now — read these first
+    panels:
+      - type: gauge
+        title: CPU headroom
+        description: Allocatable CPU not yet committed to requests, as a percentage. Low headroom means the next pod may not schedule.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 10}
+          - {color: green, value: 25}
+        targets:
+          - expr: >-
+              100 * (1 -
+                sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="cpu"})
+                / sum(kube_node_status_allocatable{cluster=~"$cluster", resource="cpu"})
+              )
+            instant: true
+            legend: cpu
+      - type: gauge
+        title: Memory headroom
+        description: Allocatable memory not yet committed to requests, as a percentage.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 10}
+          - {color: green, value: 25}
+        targets:
+          - expr: >-
+              100 * (1 -
+                sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="memory"})
+                / sum(kube_node_status_allocatable{cluster=~"$cluster", resource="memory"})
+              )
+            instant: true
+            legend: memory
+      - type: gauge
+        title: Pod-slot headroom
+        description: Free pod slots as a percentage of total allocatable pod capacity. Clusters often hit this ceiling before CPU or memory.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 10}
+          - {color: green, value: 25}
+        targets:
+          - expr: >-
+              100 * (1 -
+                sum(kube_pod_status_phase{cluster=~"$cluster", phase="Running"})
+                / sum(kube_node_status_allocatable{cluster=~"$cluster", resource="pods"})
+              )
+            instant: true
+            legend: pods
+      - type: stat
+        title: Schedulable nodes
+        description: Nodes that are not cordoned — the pool the scheduler can actually place new pods on.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: >-
+              count(kube_node_info{cluster=~"$cluster"})
+              - sum(kube_node_spec_unschedulable{cluster=~"$cluster"})
+              or vector(0)
+            instant: true
+            legend: schedulable
+
+  - title: Days to full (linear projection)
+    panels:
+      - type: stat
+        title: Days to CPU full
+        description: Projected time until CPU requests reach allocatable, from a linear fit of the last 6 hours. A trend estimate, not a guarantee.
+        unit: dtdurations
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 604800}
+          - {color: green, value: 2592000}
+        targets:
+          - expr: >-
+              (sum(kube_node_status_allocatable{cluster=~"$cluster", resource="cpu"})
+               - sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="cpu"}))
+              / clamp_min(deriv(sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="cpu"})[6h:30m]), 0.0000000001)
+            instant: true
+            legend: cpu_seconds
+      - type: stat
+        title: Days to memory full
+        description: Projected time until memory requests reach allocatable, from a linear fit of the last 6 hours.
+        unit: dtdurations
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 604800}
+          - {color: green, value: 2592000}
+        targets:
+          - expr: >-
+              (sum(kube_node_status_allocatable{cluster=~"$cluster", resource="memory"})
+               - sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="memory"}))
+              / clamp_min(deriv(sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="memory"})[6h:30m]), 0.0000000001)
+            instant: true
+            legend: mem_seconds
+      - type: stat
+        title: Days to pod-slots full
+        description: Projected time until running pods reach allocatable pod capacity, from a linear fit of the last 6 hours.
+        unit: dtdurations
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 604800}
+          - {color: green, value: 2592000}
+        targets:
+          - expr: >-
+              (sum(kube_node_status_allocatable{cluster=~"$cluster", resource="pods"})
+               - sum(kube_pod_status_phase{cluster=~"$cluster", phase="Running"}))
+              / clamp_min(deriv(sum(kube_pod_status_phase{cluster=~"$cluster", phase="Running"})[6h:30m]), 0.0000000001)
+            instant: true
+            legend: pod_seconds
+
+  - title: CPU and memory commitment
+    panels:
+      - type: timeseries
+        title: CPU cores — allocatable vs requested
+        description: The gap between these lines is your CPU headroom. When they meet, scheduling stops.
+        unit: short
+        min: 0
+        fillOpacity: 10
+        legend: table
+        targets:
+          - expr: sum(kube_node_status_allocatable{cluster=~"$cluster", resource="cpu"})
+            legend: allocatable
+          - expr: sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="cpu"})
+            legend: requested
+      - type: timeseries
+        title: Memory — allocatable vs requested
+        description: The gap between these lines is your memory headroom in bytes.
+        unit: bytes
+        min: 0
+        fillOpacity: 10
+        legend: table
+        targets:
+          - expr: sum(kube_node_status_allocatable{cluster=~"$cluster", resource="memory"})
+            legend: allocatable
+          - expr: sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="memory"})
+            legend: requested
+
+  - title: Pod slots and headroom trend
+    panels:
+      - type: timeseries
+        title: Pods — running vs allocatable capacity
+        description: Running pods against total pod capacity. The pod-count ceiling (default 110/node) is the limit teams forget to watch.
+        unit: short
+        min: 0
+        fillOpacity: 10
+        legend: table
+        targets:
+          - expr: sum(kube_node_status_allocatable{cluster=~"$cluster", resource="pods"})
+            legend: capacity
+          - expr: sum(kube_pod_status_phase{cluster=~"$cluster", phase="Running"})
+            legend: running
+      - type: timeseries
+        title: Headroom % over time
+        description: CPU, memory and pod headroom trended together — the shape that tells you whether you are filling steadily or in steps.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 10}
+        targets:
+          - expr: >-
+              100 * (1 - sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="cpu"})
+              / sum(kube_node_status_allocatable{cluster=~"$cluster", resource="cpu"}))
+            legend: cpu
+          - expr: >-
+              100 * (1 - sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="memory"})
+              / sum(kube_node_status_allocatable{cluster=~"$cluster", resource="memory"}))
+            legend: memory
+          - expr: >-
+              100 * (1 - sum(kube_pod_status_phase{cluster=~"$cluster", phase="Running"})
+              / sum(kube_node_status_allocatable{cluster=~"$cluster", resource="pods"}))
+            legend: pods
+
+alerts:
+  - name: KubeClusterCPUHeadroomLow
+    severity: warning
+    expr: >-
+      100 * (1 - sum(kube_pod_container_resource_requests{resource="cpu"})
+      / sum(kube_node_status_allocatable{resource="cpu"})) < 10
+    for: 30m
+    summary: "Cluster CPU headroom below 10%"
+    why: Under 10% headroom the cluster cannot absorb a rolling update, a node failure, or an autoscaling event without producing Pending pods.
+    investigate: "Open the commitment timeseries and Kubernetes / Namespaces to see whether growth is real demand or over-sized requests."
+    runbook: "Add nodes (or enable/expand the cluster autoscaler), right-size the heaviest requests, or reschedule low-priority workloads."
+    recovery: Clears when CPU headroom returns above 10% for 5m.
+    false_positives: Intentionally tightly packed clusters that run a separate burst pool — exclude that pool from the sums.
+  - name: KubeClusterPodSlotsLow
+    severity: warning
+    expr: >-
+      100 * (1 - sum(kube_pod_status_phase{phase="Running"})
+      / sum(kube_node_status_allocatable{resource="pods"})) < 10
+    for: 30m
+    summary: "Cluster pod-slot headroom below 10%"
+    why: Pods have a hard per-node cap (default 110); hitting it produces Pending pods even when CPU and memory look plentiful — a failure mode CPU-only dashboards miss.
+    investigate: "Check pods-per-node in Kubernetes / Nodes; many tiny pods can exhaust slots while leaving resources idle."
+    runbook: "Add nodes, raise the kubelet maxPods where the OS/CNI allows, or consolidate many tiny pods into fewer."
+    recovery: Clears when pod-slot headroom returns above 10% for 5m.
+    false_positives: Short bursts of completed Job pods inflating the running count before they are garbage-collected.
+
+troubleshooting:
+  - {symptom: Days-to-full shows years or a flat huge value, cause: Requests are flat or shrinking, so the linear slope is ~0, action: Expected when not growing — read it as "ample headroom", confirm with the trend panel.}
+  - {symptom: Days-to-full is "No data", cause: Less than 6 hours of history, or the metric was just added, action: The projection needs a 6h window — wait for data to accumulate.}
+  - {symptom: Headroom negative, cause: Requests exceed allocatable (overcommit beyond capacity), action: The cluster is already over-full on requests; expect Pending pods and add capacity now.}
+
+performance: >-
+  Headroom and commitment panels are simple cluster-wide sums — cheap at any scale.
+  The projection uses `deriv(...[6h:30m])`, a subquery evaluated every 30 minutes
+  over 6 hours; it is the most expensive query here, so the dashboard defaults to a
+  1m refresh and a 24h window rather than tight, frequent refreshes.
+
+customization: >-
+  Tune the 10%/25% headroom bands to your provisioning lead time — set yellow to the
+  headroom you can rebuild before it runs out. Widen the `[6h:30m]` projection window
+  for steadier, slower-moving estimates. To plan a single node pool, filter the
+  allocatable sums by your pool label.

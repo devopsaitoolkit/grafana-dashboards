@@ -1,0 +1,242 @@
+# Block-device IO for a fleet of Linux hosts scraped by node_exporter.
+uid: linux-disk-io
+title: Linux / Disk IO
+description: >-
+  Block-device IO health for Linux hosts scraped by node_exporter: IOPS, throughput,
+  average request latency derived from weighted IO time, and device utilisation
+  (%util). Answers "which disk is the bottleneck and is it latency- or
+  throughput-bound?" rather than drawing raw completion counters.
+datasource: prometheus
+tags: [linux, disk, io, node-exporter, saturation]
+seo_phrase: Node Exporter disk IO Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which device is busiest (%util) right now?"
+  - "Is the disk latency- or throughput-bound — high await or high MB/s?"
+  - "How are reads and writes split, in IOPS and bytes?"
+  - "Is the IO queue backing up (weighted IO time climbing faster than wall time)?"
+
+production_lessons: >-
+  A disk at "200 MB/s" tells you nothing without knowing the device ceiling, so this
+  dashboard leads with **%util and average latency** — the two signals that actually
+  correlate with application slowness. %util is the fraction of wall-clock time the device
+  had at least one request in flight (`rate(node_disk_io_time_seconds_total)`); at 100% the
+  device is saturated regardless of IOPS. Average latency comes from the weighted IO-time
+  counter divided by completed operations, which is the closest node_exporter gets to
+  iostat's `await`. The classic incident pattern is high %util with low throughput: many
+  small random IOPS hitting a spinning disk or a throttled cloud volume — completely
+  different from a streaming backup saturating bandwidth.
+
+data_sources:
+  - "`node_exporter` `diskstats` collector (`node_disk_reads_completed_total`,
+    `node_disk_writes_completed_total`, `node_disk_read_bytes_total`,
+    `node_disk_written_bytes_total`, `node_disk_io_time_seconds_total`,
+    `node_disk_io_time_weighted_seconds_total`)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job for your node_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(node_uname_info{job="$job"}, instance)
+    description: Host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Saturation — read these first
+    panels:
+      - type: gauge
+        title: Busiest device %util
+        description: Highest device utilisation across selected hosts — fraction of time the device had IO in flight. 100% means saturated.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              max(100 * rate(node_disk_io_time_seconds_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])) or vector(0)
+            instant: true
+            legend: max util
+      - type: stat
+        title: Worst average latency
+        description: Highest average request latency (weighted IO time per completed op) across all devices.
+        unit: s
+        decimals: 3
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.02}
+          - {color: red, value: 0.1}
+        targets:
+          - expr: >-
+              max(
+                rate(node_disk_io_time_weighted_seconds_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+                /
+                clamp_min(
+                  rate(node_disk_reads_completed_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+                  + rate(node_disk_writes_completed_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m]), 1)
+              ) or vector(0)
+            instant: true
+            legend: worst await
+      - type: stat
+        title: Fleet IOPS
+        description: Total read + write operations per second across selected devices.
+        unit: ops
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              sum(rate(node_disk_reads_completed_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+              + rate(node_disk_writes_completed_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])) or vector(0)
+            instant: true
+            legend: iops
+      - type: stat
+        title: Fleet throughput
+        description: Total read + write bytes per second across selected devices.
+        unit: Bps
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              sum(rate(node_disk_read_bytes_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+              + rate(node_disk_written_bytes_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])) or vector(0)
+            instant: true
+            legend: throughput
+
+  - title: IOPS and throughput
+    panels:
+      - type: timeseries
+        title: IOPS by device (read vs write)
+        description: Per-device read and write operations per second. Split tells random-read from write-heavy workloads.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_disk_reads_completed_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+            legend: "{{instance}} {{device}} read"
+          - expr: rate(node_disk_writes_completed_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+            legend: "{{instance}} {{device}} write"
+      - type: timeseries
+        title: Throughput by device (read vs write)
+        description: Per-device read and write bytes per second. Compare against the device or volume bandwidth ceiling.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_disk_read_bytes_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+            legend: "{{instance}} {{device}} read"
+          - expr: rate(node_disk_written_bytes_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+            legend: "{{instance}} {{device}} write"
+
+  - title: Latency and utilisation
+    panels:
+      - type: timeseries
+        title: Average latency by device
+        description: Weighted IO time per completed operation — the node_exporter analogue of iostat await.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.1}
+        targets:
+          - expr: >-
+              rate(node_disk_io_time_weighted_seconds_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+              /
+              clamp_min(
+                rate(node_disk_reads_completed_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+                + rate(node_disk_writes_completed_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m]), 1)
+            legend: "{{instance}} {{device}}"
+      - type: timeseries
+        title: Device utilisation (%util)
+        description: Fraction of time each device was servicing IO. Sustained near 100% means the device is the bottleneck.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        targets:
+          - expr: 100 * rate(node_disk_io_time_seconds_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m])
+            legend: "{{instance}} {{device}}"
+
+  - title: Busiest devices
+    panels:
+      - type: bargauge
+        title: Top devices by %util
+        description: Ranked device utilisation — the saturated devices to look at first.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              topk(10, 100 * rate(node_disk_io_time_seconds_total{job="$job", instance=~"$instance", device!~"loop.*|ram.*|dm-.*"}[5m]))
+            instant: true
+            legend: "{{instance}} {{device}}"
+
+alerts:
+  - name: HostDiskUtilisationHigh
+    severity: warning
+    expr: >-
+      100 * rate(node_disk_io_time_seconds_total{device!~"loop.*|ram.*|dm-.*"}[5m]) > 95
+    for: 10m
+    summary: "Disk {{ $labels.device }} on {{ $labels.instance }} > 95% utilised for 10m"
+    why: A device pinned near 100% util is the bottleneck; every additional request queues, so application latency rises non-linearly.
+    investigate: "Open Linux / Disk IO and compare IOPS vs throughput for the device — many small ops at low MB/s means random-IO bound, high MB/s means bandwidth bound."
+    runbook: "Move hot data to faster storage, raise the cloud volume's provisioned IOPS/throughput, or shed the IO source (compaction, backup, log spew)."
+    recovery: Clears when utilisation falls below 95% for 5m.
+    false_positives: Scheduled backups, RAID rebuilds and database compactions saturate disks by design — scope or silence during known windows.
+  - name: HostDiskLatencyHigh
+    severity: warning
+    expr: >-
+      rate(node_disk_io_time_weighted_seconds_total{device!~"loop.*|ram.*|dm-.*"}[5m])
+      / clamp_min(rate(node_disk_reads_completed_total{device!~"loop.*|ram.*|dm-.*"}[5m])
+      + rate(node_disk_writes_completed_total{device!~"loop.*|ram.*|dm-.*"}[5m]), 1) > 0.1
+    for: 10m
+    summary: "Disk {{ $labels.device }} on {{ $labels.instance }} average latency > 100ms for 10m"
+    why: High average await means requests are spending most of their time queued or on slow media — a direct hit to user-facing latency.
+    investigate: "Check whether util is also high (saturation) or low (slow media / throttled volume); inspect the queue via the IOPS panel."
+    runbook: "If util is high, reduce load or add IOPS; if util is low but latency high, the underlying media or network-attached volume is degraded — escalate to storage."
+    recovery: Clears when average latency drops below 100ms for 5m.
+    false_positives: Bursty fsync-heavy workloads can spike await briefly; the 10m `for` filters most transients.
+
+troubleshooting:
+  - symptom: Utilisation reads above 100%
+    cause: Summing io_time across devices, or multipath/dm devices double-counting the same physical disk.
+    action: Keep the `device!~"dm-.*"` filter and read util per physical device, not summed.
+  - symptom: Latency panel shows huge spikes after a reboot
+    cause: Counter reset makes the first rate sample unreliable.
+    action: rate() handles resets, but ignore the first window after boot; the `clamp_min(...,1)` guards divide-by-zero when IOPS is 0.
+  - symptom: No data for a known disk
+    cause: Device name filtered out (loop/ram/dm) or the diskstats collector disabled.
+    action: Adjust the device regex; confirm `node_disk_io_time_seconds_total` exists in Explore.
+
+performance: >-
+  Rates use a 5m window (≥4× a 15s scrape). Per-device panels can be high-cardinality on
+  hosts with many volumes; the `device!~"loop.*|ram.*|dm-.*"` filter trims pseudo and
+  mapper devices. The latency expression divides two rates and guards the denominator with
+  `clamp_min(...,1)` so idle devices report 0 rather than NaN.
+
+customization: >-
+  Adjust the device regex to include or exclude `dm-`/`nvme`/`md` devices to match your
+  storage layout. Tune the 95% util and 100ms latency thresholds to the slowest acceptable
+  device class. On large fleets, pre-aggregate %util with a recording rule before widening
+  the time range.

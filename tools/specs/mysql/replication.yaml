@@ -1,0 +1,216 @@
+# MySQL / MariaDB replication. Leads with seconds-behind-master and whether the IO and
+# SQL replication threads are actually running — the two facts that decide if a replica
+# is safe to read from or fail over to.
+uid: mysql-replication
+title: MySQL / Replication
+description: >-
+  Replica health for MySQL and MariaDB via mysqld_exporter: seconds behind master, the
+  running state of the IO and SQL replication threads over time, and the lag trend.
+  Answers "are my replicas keeping up, and have the replication threads stopped?".
+datasource: prometheus
+tags: [mysql, mariadb, database, mysqld-exporter, replication]
+seo_phrase: MySQL replication Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many seconds behind master is each replica right now?"
+  - "Are both the IO and SQL replication threads running?"
+  - "Did replication stop, and when?"
+  - "Is lag trending up under write load?"
+
+production_lessons: >-
+  MySQL replication fails in two distinct ways and you must watch both. **Lag**
+  (seconds_behind_master) is a data-loss and staleness budget: read replicas serving
+  stale data, or a failover that drops the lagging window of writes. And a **stopped
+  thread**: the SQL thread hits a duplicate-key or schema error and halts, at which
+  point seconds_behind_master often reads NULL/0 and looks deceptively healthy while the
+  replica silently stops applying changes. This dashboard leads with lag and a
+  state-timeline of both threads so a stopped SQL thread is impossible to miss — that is
+  the failure that quietly diverges a replica for hours.
+
+data_sources:
+  - "`mysqld_exporter` with the slave-status collector on each replica (the
+    `mysql_slave_status_seconds_behind_master`, `mysql_slave_status_slave_io_running`
+    and `mysql_slave_status_slave_sql_running` series)."
+
+templating:
+  - name: instance
+    label: Instance
+    query: label_values(mysql_up, instance)
+    description: MySQL/MariaDB replicas to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Replication health — read these first
+    panels:
+      - type: stat
+        title: Max replica lag
+        description: Highest seconds_behind_master across selected replicas — the staleness and failover exposure.
+        unit: s
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10}
+          - {color: red, value: 30}
+        targets:
+          - expr: max(mysql_slave_status_seconds_behind_master{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: max lag
+      - type: stat
+        title: IO threads running
+        description: Replicas whose IO thread (pulling the binlog from the master) is running.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: min(mysql_slave_status_slave_io_running{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: io running
+      - type: stat
+        title: SQL threads running
+        description: Replicas whose SQL thread (applying the relay log) is running. A stopped SQL thread halts replication.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: min(mysql_slave_status_slave_sql_running{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: sql running
+      - type: stat
+        title: Replicas reporting
+        description: Number of servers exporting slave status — i.e. configured as replicas.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: count(mysql_slave_status_seconds_behind_master{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: replicas
+
+  - title: Thread status
+    panels:
+      - type: state-timeline
+        title: IO thread state
+        description: Running (green) vs stopped (red) over time for each replica's IO thread.
+        unit: short
+        mappings:
+          - type: value
+            options:
+              "0": {text: Stopped, color: red, index: 0}
+              "1": {text: Running, color: green, index: 1}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: mysql_slave_status_slave_io_running{instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: state-timeline
+        title: SQL thread state
+        description: Running (green) vs stopped (red) over time. A red band here is a replica that stopped applying changes.
+        unit: short
+        mappings:
+          - type: value
+            options:
+              "0": {text: Stopped, color: red, index: 0}
+              "1": {text: Running, color: green, index: 1}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: mysql_slave_status_slave_sql_running{instance=~"$instance"}
+            legend: "{{instance}}"
+
+  - title: Lag trend
+    panels:
+      - type: timeseries
+        title: Seconds behind master
+        description: Per-replica lag over time. Sustained climbs mean the replica cannot apply changes as fast as they arrive.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 30}
+        targets:
+          - expr: mysql_slave_status_seconds_behind_master{instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: table
+        title: Replica detail
+        description: Current lag per replica, most-behind first.
+        unit: s
+        transformations:
+          - id: organize
+            options:
+              excludeByName: {Time: true, __name__: true, job: true}
+        sortBy:
+          - {displayName: Value, desc: true}
+        targets:
+          - expr: mysql_slave_status_seconds_behind_master{instance=~"$instance"}
+            instant: true
+            format: table
+            legend: "{{instance}}"
+
+alerts:
+  - name: MySQLReplicationLagHigh
+    severity: warning
+    expr: mysql_slave_status_seconds_behind_master > 30
+    for: 5m
+    summary: "MySQL replica {{ $labels.instance }} lagging >30s behind master"
+    why: A replica 30s behind serves stale reads and would lose that window of writes on failover.
+    investigate: "Open MySQL / Replication; check whether the SQL thread is single-threaded and whether a long transaction is replaying."
+    runbook: "Enable parallel replication (slave_parallel_workers), relieve the write burst, or give the replica faster storage."
+    recovery: Clears when lag drops below 30s for 5m.
+    false_positives: A large batch write or schema change can cause transient catch-up lag.
+  - name: MySQLReplicationIOStopped
+    severity: critical
+    expr: mysql_slave_status_slave_io_running == 0
+    for: 1m
+    summary: "MySQL replica {{ $labels.instance }} IO thread stopped"
+    why: The replica is no longer pulling the binlog from the master, so it has stopped receiving changes entirely.
+    investigate: "Run SHOW SLAVE STATUS; check Last_IO_Error for network, auth or binlog-position problems."
+    runbook: "Fix connectivity/credentials, then START SLAVE IO_THREAD; re-point to a valid binlog position if it was purged."
+    recovery: Clears once the IO thread is running again.
+    false_positives: A brief stop during a planned master switch or maintenance window.
+  - name: MySQLReplicationSQLStopped
+    severity: critical
+    expr: mysql_slave_status_slave_sql_running == 0
+    for: 1m
+    summary: "MySQL replica {{ $labels.instance }} SQL thread stopped"
+    why: The replica has stopped applying the relay log — it is silently diverging from the master and is unsafe to read.
+    investigate: "Run SHOW SLAVE STATUS; read Last_SQL_Error (often a duplicate key or missing table)."
+    runbook: "Resolve the conflicting statement, then START SLAVE SQL_THREAD; skip the event only as a last resort."
+    recovery: Clears once the SQL thread is running again.
+    false_positives: A deliberate STOP SLAVE during a controlled maintenance operation.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The replica is not configured, or the slave-status collector is disabled in mysqld_exporter.
+    action: Confirm the server is a replica and enable the slave-status collector, then re-scrape.
+  - symptom: Lag reads 0 but the SQL thread is stopped
+    cause: seconds_behind_master is reported as 0/NULL when replication is not running.
+    action: Trust the SQL-thread state-timeline, not the lag number, when a thread is stopped.
+  - symptom: Thread-state panel shows only one replica
+    cause: Other replicas are not exporting slave status (wrong user privileges).
+    action: Grant REPLICATION CLIENT to the exporter user on every replica.
+
+performance: >-
+  Lag and thread-state panels read instantaneous gauges, so they are inexpensive
+  regardless of replica count. The state-timelines merge equal adjacent values, keeping
+  the rendered series compact even over long time ranges.
+
+customization: >-
+  Set the 10s/30s lag thresholds to your read-staleness SLA. For multi-source or
+  channel-based replication, add the channel label to the legends so each stream is
+  tracked independently.

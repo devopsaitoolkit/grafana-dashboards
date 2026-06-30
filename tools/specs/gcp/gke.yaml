@@ -1,0 +1,247 @@
+# GKE container and node usage from Cloud Monitoring via stackdriver_exporter.
+title: GCP / GKE Containers
+description: >-
+  Container CPU and memory usage by namespace and workload, node CPU pressure and
+  the top consumers in a GKE cluster, exported from Cloud Monitoring (Stackdriver).
+  Answers "which namespace or container is eating the cluster, and are the nodes
+  saturated?" rather than dumping raw container counters.
+datasource: prometheus
+tags: [gcp, gke, kubernetes, stackdriver, containers]
+seo_phrase: GCP GKE Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "Which namespace is consuming the most CPU and memory?"
+  - "Which individual containers are the top CPU/memory consumers?"
+  - "Are the nodes CPU-saturated?"
+  - "Is one workload starving the rest of the cluster?"
+  - "Did a deploy change the cluster's resource profile?"
+
+production_lessons: >-
+  On GKE the metric that matters is **CPU core usage over time**, exported as a
+  DELTA counter — so this dashboard rates it to cores rather than plotting the raw
+  delta, and aggregates by namespace and workload so you can attribute spend and
+  pressure to a team in one glance. The recurring incident is a single namespace or
+  a runaway container consuming cores and memory until nodes saturate and the
+  scheduler can't place pods; leading with per-namespace totals and a top-N of
+  containers turns "the cluster is slow" into "this workload is the cause" quickly.
+  Node CPU tells you whether to scale the node pool or just right-size a workload.
+
+data_sources:
+  - "`stackdriver_exporter` scraping `kubernetes.io` metrics for the GKE cluster
+    (`stackdriver_k8s_container_kubernetes_io_container_cpu_core_usage_time`,
+    `stackdriver_k8s_container_kubernetes_io_container_memory_used_bytes`,
+    `stackdriver_k8s_node_kubernetes_io_node_cpu_core_usage_time`)."
+  - "**Naming/label assumption:** container series carry `namespace_name`,
+    `pod_name`, `container_name` and `cluster_name`; node series carry `node_name`
+    and `cluster_name`. The `cpu_core_usage_time` metrics are DELTA seconds — wrap
+    in `rate()` to get cores. The memory metric is a gauge in bytes. Metric names
+    follow stackdriver_exporter's `k8s_*_kubernetes_io_*` convention and vary with
+    its prefix config."
+
+templating:
+  - name: cluster_name
+    label: Cluster
+    query: label_values(stackdriver_k8s_container_kubernetes_io_container_cpu_core_usage_time, cluster_name)
+    description: GKE cluster(s) to display.
+    multi: true
+    includeAll: true
+  - name: namespace_name
+    label: Namespace
+    query: label_values(stackdriver_k8s_container_kubernetes_io_container_cpu_core_usage_time{cluster_name=~"$cluster_name"}, namespace_name)
+    description: Namespace(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Cluster pressure — read these first
+    panels:
+      - type: stat
+        title: Top namespace CPU
+        description: Highest per-namespace CPU usage (cores) across the selection.
+        unit: short
+        decimals: 2
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 4}
+          - {color: red, value: 8}
+        targets:
+          - expr: >-
+              max(sum by (namespace_name) (rate(stackdriver_k8s_container_kubernetes_io_container_cpu_core_usage_time{cluster_name=~"$cluster_name", namespace_name=~"$namespace_name"}[5m]))) or vector(0)
+            instant: true
+            legend: top ns cpu
+      - type: stat
+        title: Top namespace memory
+        description: Highest per-namespace memory usage across the selection.
+        unit: bytes
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              max(sum by (namespace_name) (stackdriver_k8s_container_kubernetes_io_container_memory_used_bytes{cluster_name=~"$cluster_name", namespace_name=~"$namespace_name"})) or vector(0)
+            instant: true
+            legend: top ns mem
+      - type: stat
+        title: Total cluster CPU
+        description: Total container CPU usage (cores) across the selection.
+        unit: short
+        decimals: 2
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              sum(rate(stackdriver_k8s_container_kubernetes_io_container_cpu_core_usage_time{cluster_name=~"$cluster_name", namespace_name=~"$namespace_name"}[5m])) or vector(0)
+            instant: true
+            legend: total cores
+      - type: stat
+        title: Busiest node CPU
+        description: Highest per-node CPU usage (cores) — context for whether to scale the node pool.
+        unit: short
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 4}
+          - {color: red, value: 8}
+        targets:
+          - expr: >-
+              max(rate(stackdriver_k8s_node_kubernetes_io_node_cpu_core_usage_time{cluster_name=~"$cluster_name"}[5m])) or vector(0)
+            instant: true
+            legend: top node
+
+  - title: CPU by namespace & workload
+    panels:
+      - type: timeseries
+        title: CPU cores by namespace
+        description: Per-namespace CPU usage over time, stacked — attribute cluster CPU to a team or app.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: >-
+              sum by (namespace_name) (rate(stackdriver_k8s_container_kubernetes_io_container_cpu_core_usage_time{cluster_name=~"$cluster_name", namespace_name=~"$namespace_name"}[5m]))
+            legend: "{{namespace_name}}"
+      - type: bargauge
+        title: Top 10 containers by CPU
+        description: The biggest CPU consumers right now (namespace / container) — your right-sizing candidates.
+        unit: short
+        min: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 2}
+        targets:
+          - expr: >-
+              topk(10, sum by (namespace_name, container_name) (rate(stackdriver_k8s_container_kubernetes_io_container_cpu_core_usage_time{cluster_name=~"$cluster_name", namespace_name=~"$namespace_name"}[5m])))
+            instant: true
+            legend: "{{namespace_name}}/{{container_name}}"
+
+  - title: Memory by namespace & workload
+    panels:
+      - type: timeseries
+        title: Memory by namespace
+        description: Per-namespace memory usage over time, stacked — watch for the climb that precedes OOMKills.
+        unit: bytes
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: >-
+              sum by (namespace_name) (stackdriver_k8s_container_kubernetes_io_container_memory_used_bytes{cluster_name=~"$cluster_name", namespace_name=~"$namespace_name"})
+            legend: "{{namespace_name}}"
+      - type: bargauge
+        title: Top 10 containers by memory
+        description: The biggest memory consumers right now (namespace / container).
+        unit: bytes
+        min: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1073741824}
+          - {color: red, value: 2147483648}
+        targets:
+          - expr: >-
+              topk(10, sum by (namespace_name, container_name) (stackdriver_k8s_container_kubernetes_io_container_memory_used_bytes{cluster_name=~"$cluster_name", namespace_name=~"$namespace_name"}))
+            instant: true
+            legend: "{{namespace_name}}/{{container_name}}"
+
+  - title: Node utilisation
+    panels:
+      - type: timeseries
+        title: CPU cores by node
+        description: Per-node CPU usage over time — flat-topping nodes mean the pool needs to scale.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              sum by (node_name) (rate(stackdriver_k8s_node_kubernetes_io_node_cpu_core_usage_time{cluster_name=~"$cluster_name"}[5m]))
+            legend: "{{node_name}}"
+
+alerts:
+  - name: GkeNamespaceHighCPU
+    severity: warning
+    expr: >-
+      sum by (cluster_name, namespace_name) (rate(stackdriver_k8s_container_kubernetes_io_container_cpu_core_usage_time[5m])) > 8
+    for: 15m
+    summary: "GKE namespace {{ $labels.namespace_name }} using >8 CPU cores"
+    why: A namespace consuming an outsized share of cluster CPU can starve other workloads and force the node pool to scale (cost) or fail to schedule pods.
+    investigate: "Open GCP / GKE Containers; use the top-containers panel to find which workload in the namespace is responsible."
+    runbook: "Set/lower CPU limits on the offending workload, fix the hot code path, or give the namespace its own node pool and quota."
+    recovery: Clears when the namespace's CPU usage falls below 8 cores for 10m.
+    false_positives: Batch/CI namespaces meant to burst — raise the threshold or exclude them by namespace.
+  - name: GkeContainerHighMemory
+    severity: warning
+    expr: >-
+      sum by (cluster_name, namespace_name, container_name) (stackdriver_k8s_container_kubernetes_io_container_memory_used_bytes) > 2147483648
+    for: 10m
+    summary: "GKE container {{ $labels.container_name }} using >2GiB memory"
+    why: A container near or above its memory limit gets OOMKilled and restarts, dropping in-flight work; unbounded growth signals a leak.
+    investigate: "Check whether usage is plateauing (sized correctly) or climbing (leak); compare against the container's memory limit."
+    runbook: "Raise the memory limit if it is legitimately sized, or fix the leak; add a limit if the container has none."
+    recovery: Clears when the container's memory falls below 2GiB for 10m.
+    false_positives: Caches and JVMs that intentionally hold large heaps — set the threshold per workload.
+  - name: GkeNodeCPUSaturated
+    severity: warning
+    expr: >-
+      sum by (cluster_name, node_name) (rate(stackdriver_k8s_node_kubernetes_io_node_cpu_core_usage_time[5m])) > 8
+    for: 15m
+    summary: "GKE node {{ $labels.node_name }} using >8 CPU cores"
+    why: A saturated node can't accept new pods and throttles the ones it has — the scheduler then fails placements cluster-wide.
+    investigate: "Check which pods are bin-packed onto the node and whether the cluster autoscaler is adding nodes."
+    runbook: "Enable/expand the cluster autoscaler, spread workloads with anti-affinity, or move to larger machine types."
+    recovery: Clears when node CPU usage falls below 8 cores for 10m.
+    false_positives: Large machine types where 8 cores is well within capacity — set the threshold to the node's core count.
+
+troubleshooting:
+  - symptom: CPU panels read in tiny fractions or huge totals
+    cause: Plotting the raw DELTA counter instead of its rate.
+    action: Wrap `cpu_core_usage_time` in `rate(...[5m])`; the result is in cores.
+  - symptom: Memory panels "No data"
+    cause: The container memory metric isn't in the exporter's prefix list.
+    action: Add `kubernetes.io/container/memory/used_bytes` to the stackdriver_exporter config.
+  - symptom: Labels like namespace_name are missing
+    cause: The exporter drops or renames resource labels.
+    action: Enable resource-label export and confirm the label names in Explore, then update the queries.
+
+performance: >-
+  Cloud Monitoring GKE metrics are 1-minute granularity with a delay, so a 1m
+  refresh matches them and avoids extra Monitoring API cost. Every panel aggregates
+  with `sum by (namespace_name|container_name|node_name)` and top-N panels use
+  `topk` to bound cardinality on large clusters. Narrow the exporter's metric
+  prefixes to only the GKE families you need.
+
+customization: >-
+  Set the 8-core namespace/node thresholds to your actual node sizes and the 2GiB
+  memory threshold to your typical limits. Scope `$namespace_name` to a team's
+  namespaces, and add `pod_name` to the top-N legends if you need pod-level rather
+  than container-level attribution.

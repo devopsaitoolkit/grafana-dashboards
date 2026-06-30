@@ -1,0 +1,52 @@
+# Recording rules for the Kubernetes dashboards.
+# Precompute per-namespace / per-node aggregations that are costly to evaluate on
+# large clusters with high pod cardinality. Load via Prometheus `rule_files:`.
+groups:
+  - name: kubernetes.recording
+    interval: 30s
+    rules:
+      - record: namespace:container_cpu_usage:sum_rate5m
+        expr: >-
+          sum by (namespace) (
+            rate(container_cpu_usage_seconds_total{container!="", pod!=""}[5m])
+          )
+
+      - record: namespace:container_memory_working_set_bytes:sum
+        expr: >-
+          sum by (namespace) (
+            container_memory_working_set_bytes{container!="", pod!=""}
+          )
+
+      - record: namespace:kube_pod_container_resource_requests_cpu:sum
+        expr: >-
+          sum by (namespace) (
+            kube_pod_container_resource_requests{resource="cpu"}
+          )
+
+      - record: namespace:kube_pod_container_resource_requests_memory:sum
+        expr: >-
+          sum by (namespace) (
+            kube_pod_container_resource_requests{resource="memory"}
+          )
+
+      - record: node:kube_node_status_allocatable_cpu:sum
+        expr: sum by (node) (kube_node_status_allocatable{resource="cpu"})
+
+      - record: node:kube_node_status_allocatable_memory:sum
+        expr: sum by (node) (kube_node_status_allocatable{resource="memory"})
+
+      - record: cluster:node_cpu_requests_commitment:ratio
+        expr: >-
+          sum(kube_pod_container_resource_requests{resource="cpu"})
+          / sum(kube_node_status_allocatable{resource="cpu"})
+
+      - record: cluster:node_memory_requests_commitment:ratio
+        expr: >-
+          sum(kube_pod_container_resource_requests{resource="memory"})
+          / sum(kube_node_status_allocatable{resource="memory"})
+
+      - record: namespace:pod_restarts:increase1h
+        expr: >-
+          sum by (namespace) (
+            increase(kube_pod_container_status_restarts_total[1h])
+          )

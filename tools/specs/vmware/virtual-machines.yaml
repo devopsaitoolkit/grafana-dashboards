@@ -1,0 +1,241 @@
+# vSphere virtual machine inventory and consumption from the pryorda vmware_exporter.
+title: vSphere / Virtual Machines
+description: >-
+  Powered-on inventory, per-VM CPU and memory consumption, VM-to-host placement
+  and the noisiest guests for vSphere VMs scraped by the pryorda vmware_exporter.
+  Answers "how many VMs are running and which ones are eating the cluster?" rather
+  than listing every guest counter.
+datasource: prometheus
+tags: [vmware, vsphere, vm, hypervisor, capacity]
+seo_phrase: vSphere virtual machines Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "How many VMs are powered on versus off right now?"
+  - "Which VMs are consuming the most CPU (MHz) and memory?"
+  - "Which host carries the most VMs (placement balance)?"
+  - "Is a noisy VM starving its neighbours?"
+  - "Did the powered-on count drop unexpectedly?"
+
+production_lessons: >-
+  Cluster capacity problems usually trace back to a handful of **noisy VMs**, not
+  a uniform rise across the fleet — so this dashboard leads with the powered-on
+  count and a top-N of the heaviest CPU and memory consumers. Tracking powered-on
+  vs powered-off over time catches two real incidents cheaply: a mass power-off
+  (host failure or a bad orchestration run) shows up as a step down, and VM sprawl
+  shows up as a slow climb that erodes your HA headroom. Per-host VM counts expose
+  DRS imbalance before it concentrates risk on one host.
+
+data_sources:
+  - "`vmware_exporter` (pryorda) pointed at vCenter (`vmware_vm_cpu_usage_mhz`,
+    `vmware_vm_mem_usage_average`, `vmware_vm_power_state`, `vmware_vm_num_cpu`)."
+  - "Series carry `vm_name`, `host_name` and `cluster_name` labels. **State
+    mapping assumption:** `vmware_vm_power_state == 1` is treated as *poweredOn*
+    and `== 0` as *poweredOff*; adjust if your exporter encodes it differently.
+    `vmware_vm_mem_usage_average` is the active-memory percentage reported by the
+    `mem.usage.average` counter."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(vmware_vm_power_state, cluster_name)
+    description: vSphere cluster(s) to display.
+    multi: true
+    includeAll: true
+  - name: host
+    label: Host
+    query: label_values(vmware_vm_power_state{cluster_name=~"$cluster"}, host_name)
+    description: ESXi host(s) whose VMs to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Inventory — read these first
+    panels:
+      - type: stat
+        title: VMs powered on
+        description: Count of running VMs across the selection.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: count(vmware_vm_power_state{cluster_name=~"$cluster", host_name=~"$host"} == 1) or vector(0)
+            instant: true
+            legend: on
+      - type: stat
+        title: VMs powered off
+        description: Count of stopped VMs — a sudden jump can mean a host failure or a bad automation run.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+        targets:
+          - expr: count(vmware_vm_power_state{cluster_name=~"$cluster", host_name=~"$host"} == 0) or vector(0)
+            instant: true
+            legend: off
+      - type: stat
+        title: Top VM CPU
+        description: Highest single-VM CPU consumption in MHz across the selection.
+        unit: hertz
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 4000000000}
+          - {color: red, value: 8000000000}
+        targets:
+          - expr: max(vmware_vm_cpu_usage_mhz{cluster_name=~"$cluster", host_name=~"$host"}) * 1e6 or vector(0)
+            instant: true
+            legend: top cpu
+      - type: stat
+        title: Top VM memory
+        description: Highest single-VM active-memory usage as a percent.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: max(vmware_vm_mem_usage_average{cluster_name=~"$cluster", host_name=~"$host"}) or vector(0)
+            instant: true
+            legend: top mem
+
+  - title: Top consumers
+    panels:
+      - type: bargauge
+        title: Top 10 VMs by CPU (MHz)
+        description: The biggest CPU consumers right now — your candidates for right-sizing or migration.
+        unit: hertz
+        min: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 4000000000}
+          - {color: red, value: 8000000000}
+        targets:
+          - expr: topk(10, vmware_vm_cpu_usage_mhz{cluster_name=~"$cluster", host_name=~"$host"}) * 1e6
+            instant: true
+            legend: "{{vm_name}}"
+      - type: bargauge
+        title: Top 10 VMs by memory (%)
+        description: The biggest active-memory consumers — watch these when host memory pressure rises.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: topk(10, vmware_vm_mem_usage_average{cluster_name=~"$cluster", host_name=~"$host"})
+            instant: true
+            legend: "{{vm_name}}"
+
+  - title: Placement & trend
+    panels:
+      - type: timeseries
+        title: Powered on vs off
+        description: Running and stopped VM counts over time — a step change flags a host failure or orchestration error.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: count(vmware_vm_power_state{cluster_name=~"$cluster", host_name=~"$host"} == 1) or vector(0)
+            legend: powered on
+          - expr: count(vmware_vm_power_state{cluster_name=~"$cluster", host_name=~"$host"} == 0) or vector(0)
+            legend: powered off
+      - type: bargauge
+        title: VMs per host
+        description: Powered-on VM count per ESXi host — exposes DRS imbalance and concentration risk.
+        unit: short
+        min: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 30}
+          - {color: red, value: 45}
+        targets:
+          - expr: count by (host_name) (vmware_vm_power_state{cluster_name=~"$cluster", host_name=~"$host"} == 1)
+            instant: true
+            legend: "{{host_name}}"
+
+  - title: Noisy VM detail
+    panels:
+      - type: table
+        title: VMs by consumption
+        description: Per-VM CPU (MHz) sorted high to low, with host placement — the working list for right-sizing.
+        unit: short
+        sortBy:
+          - {displayName: Value, desc: true}
+        transformations:
+          - id: organize
+            options:
+              excludeByName: {Time: true, job: true, __name__: true, cluster_name: true}
+        targets:
+          - expr: vmware_vm_cpu_usage_mhz{cluster_name=~"$cluster", host_name=~"$host"}
+            instant: true
+            legend: "{{vm_name}}"
+
+alerts:
+  - name: VmwareVMHighMemoryUsage
+    severity: warning
+    expr: vmware_vm_mem_usage_average > 90
+    for: 15m
+    summary: "VM {{ $labels.vm_name }} active memory >90%"
+    why: A guest pinned near 100% active memory is likely swapping inside the OS, degrading its own performance and pressuring the host.
+    investigate: "Open vSphere / Virtual Machines; check the VM's host memory pressure and whether the guest is under-provisioned."
+    runbook: "Add vRAM to the VM (or fix the in-guest leak), set a reservation for a critical workload, or migrate it to a host with headroom."
+    recovery: Clears when the VM's active memory falls below 90% for 10m.
+    false_positives: Caching workloads (databases, JVMs) that intentionally use all assigned memory — exclude them by `vm_name`.
+  - name: VmwareNoPoweredOnVMs
+    severity: critical
+    expr: count by (cluster_name) (vmware_vm_power_state == 1) == 0
+    for: 5m
+    summary: "Cluster {{ $labels.cluster_name }} has zero powered-on VMs"
+    why: No running VMs in a production cluster means either a mass outage or that the exporter has lost visibility — both are emergencies.
+    investigate: "Confirm against vCenter directly; check the exporter's connection and vCenter health."
+    runbook: "If VMs really are down, trigger HA/restart and investigate the host failure; if it is an exporter blind spot, restart vmware_exporter."
+    recovery: Clears when at least one VM reports powered-on for 5m.
+    false_positives: Lab or DR clusters intentionally powered down — exclude them by `cluster_name`.
+  - name: VmwareHostVMDensityHigh
+    severity: warning
+    expr: max by (cluster_name) (count by (host_name, cluster_name) (vmware_vm_power_state == 1)) > 45
+    for: 30m
+    summary: "A host in {{ $labels.cluster_name }} runs >45 powered-on VMs"
+    why: Heavy concentration of VMs on one host breaks HA headroom — losing that host overwhelms the rest of the cluster.
+    investigate: "Open the VMs-per-host panel; check whether DRS is set to fully automated and is actually balancing."
+    runbook: "Enable/raise DRS aggressiveness, manually vMotion VMs to spread load, or add a host to the cluster."
+    recovery: Clears when no single host exceeds 45 powered-on VMs for 30m.
+    false_positives: Small VMs (VDI) where 45+ per host is by design — raise the threshold for those clusters.
+
+troubleshooting:
+  - symptom: Powered-on count is 0 but VMs are running
+    cause: Your exporter encodes power state differently (e.g. 1 = off).
+    action: Check the value mapping and flip the `== 1` / `== 0` comparisons to match.
+  - symptom: CPU bargauge shows huge raw numbers
+    cause: Reading MHz as Hz without scaling.
+    action: This spec multiplies by `1e6` and uses the `hertz` unit so Grafana shows MHz/GHz; keep that conversion.
+  - symptom: Table is empty
+    cause: Instant query returned nothing because no VM matches the host filter.
+    action: Reset `$host` to All; confirm `vmware_vm_cpu_usage_mhz` is scraped.
+
+performance: >-
+  vCenter samples VM counters on ~20s intervals, so a 1m refresh is sufficient and
+  avoids hammering vCenter. Top-N panels use `topk(10, …)` and counts use
+  `count by (host_name)` to bound series even on large inventories. Scope
+  `$cluster` on big estates to keep the per-VM table responsive.
+
+customization: >-
+  Tune the per-host density and memory thresholds to your VM sizes and HA policy.
+  Swap the CPU top-N to `vmware_vm_cpu_usage_mhz / vmware_vm_num_cpu` to rank by
+  per-vCPU pressure instead of absolute MHz. Add a `vm_name` regex variable to
+  focus on one application's guests.

@@ -1,0 +1,225 @@
+# Meta-monitoring: is vmagent forwarding scraped data, or buffering/dropping it?
+uid: victoria-metrics-vmagent
+title: VictoriaMetrics / vmagent
+description: >-
+  Forwarding health for vmagent: remote-write request and error rate, pending-data
+  backpressure, open connections and dropped rows. Answers "is the agent that
+  scrapes and ships my metrics actually delivering them?"
+datasource: prometheus
+tags: [victoriametrics, vmagent, remote-write, meta-monitoring]
+seo_phrase: vmagent Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is vmagent erroring on remote-write to any upstream?"
+  - "Is pending data buffering up (backpressure or a persistent queue filling)?"
+  - "Does vmagent have live connections to its remote-write targets?"
+  - "What is the remote-write request rate, and is it steady?"
+  - "Are rows being dropped before they ship?"
+
+production_lessons: >-
+  vmagent sits between your scrape targets and storage, so when it stalls the whole
+  pipeline goes dark while every component looks individually healthy. The two
+  signals that matter are remote-write errors (deliveries failing) and pending-data
+  bytes (the on-disk/in-memory buffer filling because the upstream is slow or down).
+  Connections confirm the agent can even reach its targets, and dropped rows reveal
+  data lost before it ever left the agent. A buffer that fills to its cap silently
+  drops the oldest data.
+
+data_sources:
+  - "`vmagent` exposing the `vmagent_remotewrite_requests_total`,
+    `vmagent_remotewrite_errors_total`, `vmagent_remotewrite_pending_data_bytes`,
+    `vmagent_remotewrite_conn`, `vm_rows_ignored_total` and `process_*` series."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(vmagent_remotewrite_requests_total, job)
+    description: Scrape job for your vmagent targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(vmagent_remotewrite_requests_total{job="$job"}, instance)
+    description: vmagent instance(s).
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Forwarding health — read these first
+    panels:
+      - type: stat
+        title: Remote-write errors per second
+        description: Failed remote-write requests across upstreams. Sustained errors mean data is buffering or being lost.
+        unit: ops
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.001}
+        targets:
+          - expr: sum(rate(vmagent_remotewrite_errors_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: errors/s
+      - type: stat
+        title: Pending data
+        description: Bytes buffered awaiting delivery. A rising figure is backpressure; at the buffer cap, oldest data is dropped.
+        unit: bytes
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 268435456}
+          - {color: red, value: 1073741824}
+        targets:
+          - expr: sum(vmagent_remotewrite_pending_data_bytes{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: pending
+      - type: stat
+        title: Open connections
+        description: Live connections to remote-write upstreams. Zero means the agent cannot reach any target.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: sum(vmagent_remotewrite_conn{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: conns
+      - type: stat
+        title: Request rate
+        description: Remote-write requests per second — should be non-zero whenever the agent is scraping data.
+        unit: reqps
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(vmagent_remotewrite_requests_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: req/s
+
+  - title: Remote write
+    panels:
+      - type: timeseries
+        title: Requests per second by upstream
+        description: Per-target remote-write request rate — confirms each upstream is receiving traffic.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (url) (rate(vmagent_remotewrite_requests_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{url}}"
+      - type: timeseries
+        title: Errors per second by upstream
+        description: Per-target failure rate — pinpoints which upstream is rejecting or unreachable.
+        unit: ops
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.001}
+        targets:
+          - expr: sum by (url) (rate(vmagent_remotewrite_errors_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{url}}"
+
+  - title: Backpressure
+    panels:
+      - type: timeseries
+        title: Pending data by upstream
+        description: Per-target buffer size — a steady climb means that upstream cannot keep up and the queue is filling.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (url) (vmagent_remotewrite_pending_data_bytes{job="$job", instance=~"$instance"})
+            legend: "{{url}}"
+      - type: timeseries
+        title: Open connections over time
+        description: Connection count per agent — flapping to zero marks reachability problems with an upstream.
+        unit: short
+        min: 0
+        legend: table
+        drawStyle: bars
+        fillOpacity: 40
+        targets:
+          - expr: sum by (instance) (vmagent_remotewrite_conn{job="$job", instance=~"$instance"})
+            legend: "{{instance}}"
+
+  - title: Drops & memory
+    panels:
+      - type: timeseries
+        title: Dropped rows per second
+        description: Rows ignored before shipping (relabel-dropped or malformed) — confirm these are intentional.
+        unit: wps
+        min: 0
+        legend: table
+        drawStyle: bars
+        fillOpacity: 50
+        targets:
+          - expr: sum by (instance) (rate(vm_rows_ignored_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Resident memory
+        description: Process RSS per agent — a buffer that is growing in memory shows up here before it spills to disk.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: process_resident_memory_bytes{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+
+alerts:
+  - name: VMAgentRemoteWriteErrors
+    severity: critical
+    expr: rate(vmagent_remotewrite_errors_total[5m]) > 0
+    for: 10m
+    summary: "vmagent {{ $labels.instance }} failing remote-write to {{ $labels.url }}"
+    why: Failed remote-write means scraped metrics are buffering and, once the buffer caps, being dropped — a pipeline-wide blind spot.
+    investigate: "Open VictoriaMetrics / vmagent, find the erroring upstream, and check its availability and auth."
+    runbook: "Fix the upstream (auth/TLS, capacity) or repoint vmagent; confirm the on-disk persistent queue has room."
+    recovery: Clears when no errors occur for 5m.
+    false_positives: A short upstream outage trips this; the persistent queue replays once it recovers.
+  - name: VMAgentBackpressure
+    severity: warning
+    expr: vmagent_remotewrite_pending_data_bytes > 1073741824
+    for: 15m
+    summary: "vmagent {{ $labels.instance }} buffering >1 GiB to {{ $labels.url }}"
+    why: A large pending buffer means the upstream cannot keep up; if it reaches the cap, the oldest data is discarded.
+    investigate: "Check the matching upstream's ingest rate and the agent's disk/memory headroom."
+    runbook: "Scale or speed up the upstream, raise -remoteWrite.maxDiskUsagePerURL, or shed low-value series via relabeling."
+    recovery: Clears when pending data drains below 1 GiB for 5m.
+    false_positives: Catch-up after an upstream outage temporarily inflates the buffer.
+  - name: VMAgentNoConnections
+    severity: critical
+    expr: sum by (instance, job) (vmagent_remotewrite_conn) == 0
+    for: 5m
+    summary: "vmagent {{ $labels.instance }} has no remote-write connections"
+    why: With zero connections the agent cannot ship anything, so all scraped data is held locally and will eventually be lost.
+    investigate: "Check network reachability to the configured -remoteWrite.url targets and DNS resolution from the agent."
+    runbook: "Restore connectivity / fix the URL or firewall; restart vmagent if the connection pool is wedged."
+    recovery: Clears when at least one connection is established for 5m.
+    false_positives: A single-upstream agent restarting briefly shows zero — covered by the 5m for.
+
+troubleshooting:
+  - symptom: Pending data climbing with no errors
+    cause: The upstream accepts writes but slowly, so the queue fills faster than it drains.
+    action: Compare request rate to upstream ingest capacity; scale the upstream.
+  - symptom: Dropped rows is high but expected
+    cause: Aggressive relabel_configs are intentionally discarding series.
+    action: Confirm the drop rules; no action if the drops are by design.
+  - symptom: Connections panel blank
+    cause: This vmagent version does not export the conn metric, or the job label differs.
+    action: Fall back to request-rate as a liveness signal on older builds.
+
+performance: >-
+  Request and error panels use 5m rates. Per-upstream panels aggregate by `url` to
+  keep one series per remote target. The no-connections alert sums per instance so
+  a multi-upstream agent does not false-fire when a single target blips.
+
+customization: >-
+  Set the 256 MiB / 1 GiB pending thresholds to your -remoteWrite.maxDiskUsagePerURL
+  budget. For agents with many upstreams, the per-url panels already separate them;
+  scope `$instance` to one agent when chasing a specific buffer.

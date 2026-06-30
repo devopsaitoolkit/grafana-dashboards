@@ -1,0 +1,236 @@
+title: cAdvisor / Container Detail
+description: >-
+  Deep dive on a single container scraped by cAdvisor: CPU usage against its CFS
+  throttling, memory working set against its limit, filesystem usage and network
+  throughput. Open this after the overview points you at the offender to confirm
+  whether it is throttled, leaking, or about to be OOM-killed.
+datasource: prometheus
+tags: [cadvisor, container, docker, single-container, saturation]
+seo_phrase: cAdvisor container detail Grafana dashboard
+refresh: 30s
+time_from: now-3h
+
+questions:
+  - "How close is this container to its memory limit?"
+  - "Is the container being CPU throttled, and how hard?"
+  - "Is its filesystem filling up?"
+  - "What is its network throughput and is it erroring?"
+
+production_lessons: >-
+  The two numbers that decide a container's fate are **memory-vs-limit** and
+  **throttle ratio**, so this board leads with both as percentages — raw bytes and raw
+  period counters bury the signal. A container at 95% of its memory limit is living on
+  borrowed time: the next allocation triggers an OOM kill and a restart, which is why
+  we pair the working-set line with the limit line so you can see the collision coming.
+  Watch throttling even when CPU "usage" looks modest: a tight CFS quota throttles a
+  bursty workload that averages well under its limit.
+
+data_sources:
+  - "`cAdvisor` on the host running the container. Uses `container_cpu_usage_seconds_total`,
+    `container_cpu_cfs_throttled_periods_total`, `container_cpu_cfs_periods_total`,
+    `container_memory_working_set_bytes`, `container_memory_rss`,
+    `container_spec_memory_limit_bytes`, `container_fs_usage_bytes`,
+    `container_fs_limit_bytes` and `container_network_*` for the selected `name`."
+
+templating:
+  - name: instance
+    label: Host
+    query: label_values(machine_cpu_cores, instance)
+    description: cAdvisor instance (Docker host) the container runs on.
+    multi: false
+    includeAll: false
+  - name: name
+    label: Container
+    query: label_values(container_last_seen{instance="$instance", name!=""}, name)
+    description: The single container to inspect.
+    multi: false
+    includeAll: false
+
+rows:
+  - title: Headline — limit & throttle pressure
+    panels:
+      - type: gauge
+        title: Memory vs limit
+        description: Working set as a percentage of the container's memory limit. 100% means OOM.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * container_memory_working_set_bytes{instance="$instance", name="$name"}
+              / (container_spec_memory_limit_bytes{instance="$instance", name="$name"} > 0)
+            instant: true
+            legend: mem-pct
+      - type: gauge
+        title: CPU throttle ratio
+        description: Fraction of recent CFS periods that were throttled.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 25}
+          - {color: red, value: 50}
+        targets:
+          - expr: >-
+              100 * sum(rate(container_cpu_cfs_throttled_periods_total{instance="$instance", name="$name"}[5m]))
+              / clamp_min(sum(rate(container_cpu_cfs_periods_total{instance="$instance", name="$name"}[5m])), 1)
+            instant: true
+            legend: throttle-pct
+      - type: stat
+        title: CPU cores used
+        description: CPU cores consumed over the last 5 minutes.
+        unit: short
+        decimals: 2
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(container_cpu_usage_seconds_total{instance="$instance", name="$name"}[5m]))
+            instant: true
+            legend: cores
+      - type: stat
+        title: Filesystem used
+        description: Container filesystem usage as a share of its limit.
+        unit: percent
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * sum(container_fs_usage_bytes{instance="$instance", name="$name"})
+              / clamp_min(sum(container_fs_limit_bytes{instance="$instance", name="$name"}), 1)
+            instant: true
+            legend: fs-pct
+
+  - title: CPU
+    panels:
+      - type: timeseries
+        title: CPU usage vs throttling
+        description: Cores used (left) against the throttled fraction — the two together explain queueing.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(container_cpu_usage_seconds_total{instance="$instance", name="$name"}[5m]))
+            legend: cores used
+          - expr: >-
+              sum(rate(container_cpu_cfs_throttled_periods_total{instance="$instance", name="$name"}[5m]))
+              / clamp_min(sum(rate(container_cpu_cfs_periods_total{instance="$instance", name="$name"}[5m])), 1)
+            legend: throttled fraction
+
+  - title: Memory
+    panels:
+      - type: timeseries
+        title: Working set vs RSS vs limit
+        description: Working set is what triggers OOM; the limit line is the wall it runs into.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: container_memory_working_set_bytes{instance="$instance", name="$name"}
+            legend: working set
+          - expr: container_memory_rss{instance="$instance", name="$name"}
+            legend: rss
+          - expr: container_spec_memory_limit_bytes{instance="$instance", name="$name"} > 0
+            legend: limit
+
+  - title: Filesystem & network
+    panels:
+      - type: timeseries
+        title: Filesystem usage vs limit
+        description: Disk consumed by the container against its filesystem limit.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(container_fs_usage_bytes{instance="$instance", name="$name"})
+            legend: used
+          - expr: sum(container_fs_limit_bytes{instance="$instance", name="$name"})
+            legend: limit
+      - type: timeseries
+        title: Network throughput
+        description: Receive and transmit bandwidth for this container.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(container_network_receive_bytes_total{instance="$instance", name="$name"}[5m]))
+            legend: rx
+          - expr: sum(rate(container_network_transmit_bytes_total{instance="$instance", name="$name"}[5m]))
+            legend: tx
+      - type: timeseries
+        title: Network errors
+        description: Receive errors for this container — non-zero means a stressed bridge or NIC.
+        unit: pps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(container_network_receive_errors_total{instance="$instance", name="$name"}[5m]))
+            legend: rx errors
+
+alerts:
+  - name: ContainerMemoryOOMRisk
+    severity: critical
+    expr: >-
+      container_memory_working_set_bytes{name!=""}
+      / (container_spec_memory_limit_bytes{name!=""} > 0) > 0.95
+    for: 5m
+    summary: "Container {{ $labels.name }} at {{ printf \"%.0f\" $value }}% of memory limit"
+    why: Above 95% of the limit the container is one allocation from an OOM kill, which restarts it and drops in-flight requests.
+    investigate: "Open cAdvisor / Container Detail for the container and check working set versus the limit line for a leak."
+    runbook: "Raise the memory limit or fix the leak; if it is already restarting, capture a heap profile before it dies again."
+    recovery: Clears when working set drops below 95% of the limit for 5m.
+    false_positives: Containers without a limit are excluded by the `> 0` guard.
+  - name: ContainerThrottledHard
+    severity: warning
+    expr: >-
+      sum by (name, instance) (rate(container_cpu_cfs_throttled_periods_total{name!=""}[5m]))
+      / clamp_min(sum by (name, instance) (rate(container_cpu_cfs_periods_total{name!=""}[5m])), 1) > 0.5
+    for: 10m
+    summary: "Container {{ $labels.name }} throttled {{ printf \"%.0f\" $value }}% of periods"
+    why: Throttling above 50% of periods means the CFS quota is the dominant limit on the workload — latency will be poor regardless of host headroom.
+    investigate: "Compare cores-used to the limit; a bursty workload often needs a higher quota, not more replicas."
+    runbook: "Increase the CPU quota or remove the limit if the host can absorb it."
+    recovery: Clears when throttling falls below 50% for 5m.
+    false_positives: Cold-start bursts; the 10m window filters them.
+  - name: ContainerFilesystemNearFull
+    severity: warning
+    expr: >-
+      sum by (name, instance) (container_fs_usage_bytes{name!=""})
+      / clamp_min(sum by (name, instance) (container_fs_limit_bytes{name!=""}), 1) > 0.9
+    for: 10m
+    summary: "Container {{ $labels.name }} filesystem {{ printf \"%.0f\" $value }}% full"
+    why: A full container filesystem causes write failures that crash the app or corrupt local state.
+    investigate: "Check what is writing inside the container — logs, temp files, an unbounded cache."
+    runbook: "Mount a volume for the growing path, add log rotation, or raise the storage limit."
+    recovery: Clears when usage drops below 90% for 5m.
+    false_positives: Containers writing large temp files transiently.
+
+troubleshooting:
+  - symptom: Memory-vs-limit panel shows "No data"
+    cause: The container has no memory limit, so the `> 0` guard drops the series.
+    action: Set a limit on the container, or read the absolute working-set panel instead.
+  - symptom: Throttle ratio is N/A
+    cause: No CFS periods elapsed in the window (the container is idle or has no CPU limit).
+    action: Throttling only applies when a CPU quota is set; this is expected for unlimited containers.
+  - symptom: Filesystem panels are empty
+    cause: The container uses a volume cAdvisor does not track, or fs metrics are disabled.
+    action: Confirm cAdvisor's disk collector is enabled and the storage driver is supported.
+
+performance: >-
+  Scoping to one `name` keeps every query to a handful of series, so this board is
+  cheap. Rates use a 5m window (≥4× a 15s scrape). The `clamp_min(..., 1)` guards avoid
+  divide-by-zero when a container is idle.
+
+customization: >-
+  Adjust the 80/95 memory and 25/50 throttle thresholds to your tolerances. Add
+  `container_memory_cache` to the memory panel to separate cache from working set. Use
+  the `$name` variable plus repeat to render a row per container in a small stack.

@@ -1,0 +1,246 @@
+# AWS RDS health from CloudWatch via the Prometheus cloudwatch_exporter.
+title: AWS / RDS (CloudWatch)
+description: >-
+  Free storage, connections, CPU, read/write latency, freeable memory and replica
+  lag for RDS instances exported from CloudWatch. Answers "is any database about to
+  run out of disk, max out connections or fall behind its replica?" rather than
+  charting raw CloudWatch counters.
+datasource: prometheus
+tags: [aws, rds, database, cloudwatch, capacity]
+seo_phrase: AWS RDS CloudWatch Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "Which database has the least free storage, and how fast is it shrinking?"
+  - "Is any instance near its connection limit?"
+  - "Are read/write latencies degrading?"
+  - "Is a read replica lagging behind the primary?"
+  - "Is freeable memory low enough to threaten the buffer cache?"
+
+production_lessons: >-
+  The single most common RDS incident is **running out of storage** — once free
+  space hits zero the instance goes into `storage-full` and stops accepting
+  writes, which is a hard outage. So this dashboard leads with the tightest free
+  storage and its trend, then connections (connection exhaustion is the next most
+  common page) and latency. Replica lag matters whenever you read from replicas:
+  rising lag means readers are serving stale data and a failover would lose
+  in-flight transactions. Because CloudWatch latency is reported in **seconds**,
+  the panels use `s` so 0.02 reads as 20 ms, not 20.
+
+data_sources:
+  - "`cloudwatch_exporter` scraping the `AWS/RDS` namespace
+    (`aws_rds_cpuutilization_average`, `aws_rds_free_storage_space_average`,
+    `aws_rds_database_connections_average`, `aws_rds_read_latency_average`,
+    `aws_rds_write_latency_average`, `aws_rds_freeable_memory_average`,
+    `aws_rds_replica_lag_average`)."
+  - "**Naming assumption:** the exporter turns the `DBInstanceIdentifier`
+    dimension into the label `dbinstance_identifier`; adjust if your config keeps
+    `dimension_DBInstanceIdentifier`. Latency metrics are in seconds; storage and
+    memory are in bytes; lag is in seconds."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(aws_rds_cpuutilization_average, job)
+    description: Prometheus scrape job for your cloudwatch_exporter.
+    multi: false
+    includeAll: false
+  - name: dbinstance_identifier
+    label: DB instance
+    query: label_values(aws_rds_cpuutilization_average{job="$job"}, dbinstance_identifier)
+    description: RDS instance(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Database health — read these first
+    panels:
+      - type: stat
+        title: Lowest free storage
+        description: Least free storage across the selected instances. At zero, RDS stops accepting writes.
+        unit: bytes
+        decimals: 1
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 5000000000}
+          - {color: green, value: 10000000000}
+        targets:
+          - expr: min(aws_rds_free_storage_space_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"}) or vector(0)
+            instant: true
+            legend: min free
+      - type: stat
+        title: Total connections
+        description: Sum of active database connections across the selection.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(aws_rds_database_connections_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"}) or vector(0)
+            instant: true
+            legend: connections
+      - type: stat
+        title: Max read latency
+        description: Highest read latency across the selection (seconds — shows as ms).
+        unit: s
+        decimals: 3
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.01}
+          - {color: red, value: 0.02}
+        targets:
+          - expr: max(aws_rds_read_latency_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"}) or vector(0)
+            instant: true
+            legend: max read
+      - type: stat
+        title: Max replica lag
+        description: Highest read-replica lag across the selection. Rising lag means stale reads and risky failover.
+        unit: s
+        decimals: 1
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10}
+          - {color: red, value: 30}
+        targets:
+          - expr: max(aws_rds_replica_lag_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"}) or vector(0)
+            instant: true
+            legend: max lag
+
+  - title: Storage & memory
+    panels:
+      - type: timeseries
+        title: Free storage per instance
+        description: Absolute free storage over time — the slope tells you how many days until full.
+        unit: bytes
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5000000000}
+        targets:
+          - expr: aws_rds_free_storage_space_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"}
+            legend: "{{dbinstance_identifier}}"
+      - type: timeseries
+        title: Freeable memory per instance
+        description: Memory available for the OS and buffer cache. A steady decline foreshadows swap and slow queries.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: aws_rds_freeable_memory_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"}
+            legend: "{{dbinstance_identifier}}"
+
+  - title: Connections & CPU
+    panels:
+      - type: timeseries
+        title: Database connections per instance
+        description: Active connections per instance. A flat ceiling means you are hitting max_connections.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: aws_rds_database_connections_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"}
+            legend: "{{dbinstance_identifier}}"
+      - type: timeseries
+        title: CPU utilisation per instance
+        description: Per-instance CPU. Sustained highs on a DB usually mean missing indexes or runaway queries.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: aws_rds_cpuutilization_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"}
+            legend: "{{dbinstance_identifier}}"
+
+  - title: Latency & replication
+    panels:
+      - type: timeseries
+        title: Read vs write latency
+        description: Mean read and write latency across the selection (seconds). Diverging write latency points at IO or commit pressure.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: avg(aws_rds_read_latency_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"})
+            legend: read
+          - expr: avg(aws_rds_write_latency_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"})
+            legend: write
+      - type: timeseries
+        title: Replica lag per instance
+        description: Read-replica lag over time. Persistent lag risks stale reads and data loss on failover.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 30}
+        targets:
+          - expr: aws_rds_replica_lag_average{job="$job", dbinstance_identifier=~"$dbinstance_identifier"}
+            legend: "{{dbinstance_identifier}}"
+
+alerts:
+  - name: RdsLowFreeStorage
+    severity: critical
+    expr: aws_rds_free_storage_space_average < 5000000000
+    for: 10m
+    summary: "RDS {{ $labels.dbinstance_identifier }} free storage <5GB"
+    why: When free storage hits zero RDS enters storage-full and rejects writes — a hard, customer-facing outage.
+    investigate: "Open AWS / RDS; read the free-storage slope to estimate time-to-full and check for runaway tables, logs or temp space."
+    runbook: "Enable/raise storage autoscaling or modify the instance to add storage now; reclaim space (purge logs, drop bloat) and check binlog/WAL retention."
+    recovery: Clears when free storage rises above 5GB for 10m.
+    false_positives: A large import temporarily consuming space — confirm the trend is sustained before treating it as an emergency.
+  - name: RdsHighReadLatency
+    severity: warning
+    expr: aws_rds_read_latency_average > 0.02
+    for: 10m
+    summary: "RDS {{ $labels.dbinstance_identifier }} read latency >20ms"
+    why: Read latency above ~20 ms usually means the working set no longer fits in memory or the EBS volume is throttling — query times balloon.
+    investigate: "Correlate with freeable memory and connections; check for a query plan regression or a burst of full scans."
+    runbook: "Add memory (scale the instance), add the missing index, switch to a higher-IOPS volume (gp3/io2), or offload reads to a replica."
+    recovery: Clears when read latency falls below 20 ms for 10m.
+    false_positives: Analytical/batch windows that legitimately scan large tables — scope by instance or widen the threshold.
+  - name: RdsReplicaLagHigh
+    severity: warning
+    expr: aws_rds_replica_lag_average > 30
+    for: 5m
+    summary: "RDS replica {{ $labels.dbinstance_identifier }} lagging >30s"
+    why: A lagging replica serves stale data and, on failover, loses transactions the primary already committed.
+    investigate: "Check the primary's write throughput and the replica's CPU/IO; long-running transactions on the primary block apply."
+    runbook: "Reduce write bursts, scale the replica up, or kill long transactions on the primary; if the replica can't keep up, resize it to match the primary."
+    recovery: Clears when replica lag falls below 30s for 5m.
+    false_positives: A large bulk load on the primary causes temporary lag that catches up on its own.
+
+troubleshooting:
+  - symptom: Latency panels read 20 instead of 20ms
+    cause: Using a `ms` unit on a metric that is already in seconds.
+    action: Keep the `s` unit as in this spec; CloudWatch RDS latency is in seconds.
+  - symptom: Free storage panel empty
+    cause: The AWS/RDS namespace or the `FreeStorageSpace` metric isn't scraped.
+    action: Add `FreeStorageSpace` to the exporter config and confirm `aws_rds_free_storage_space_average` appears in Explore.
+  - symptom: Replica lag missing for some instances
+    cause: Those instances are primaries, not replicas.
+    action: This is expected — `ReplicaLag` only exists on read replicas.
+
+performance: >-
+  CloudWatch RDS metrics are 1-minute granularity, so a 1m refresh matches the data
+  and avoids extra GetMetricData cost. Headline panels use `min/max/sum` to collapse
+  to a single value; per-instance panels are bounded by the
+  `dbinstance_identifier` label. Trim the scraped metric set in the exporter to
+  control API cost on large RDS estates.
+
+customization: >-
+  Set the free-storage floor to a fixed fraction of each instance's allocated
+  storage rather than an absolute 5GB if your databases vary widely in size. Tune
+  the 20 ms latency and 30 s lag thresholds to your SLOs, and scope
+  `$dbinstance_identifier` to separate production from staging databases.

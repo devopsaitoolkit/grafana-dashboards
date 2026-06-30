@@ -1,0 +1,248 @@
+# Per-hypervisor compute health. Leads with hosts whose allocation has run past the
+# overcommit line and with the build backlog they are carrying.
+title: OpenStack / Nova Compute Hosts
+description: >-
+  Per-hypervisor health for OpenStack Nova from openstack-exporter: vCPU, memory
+  and disk allocated vs available on each compute host, running instances and the
+  build/migrate queue. Answers "which compute nodes are over-committed or
+  struggling?" rather than reporting a single fleet average that hides the hot box.
+datasource: prometheus
+tags: [openstack, nova, compute, hypervisor, openstack-exporter]
+seo_phrase: OpenStack Nova compute Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which compute hosts are past their vCPU/memory overcommit line?"
+  - "How many instances is each hypervisor running?"
+  - "Which host is carrying the build/migrate backlog?"
+  - "Is memory the binding constraint before vCPU on any host?"
+  - "Are any hosts effectively empty and ready to drain or decommission?"
+
+production_lessons: >-
+  Nova schedules against *allocated* resources, not live usage, so a host pages you
+  for "no valid host" long before its CPUs look busy in node_exporter. This dashboard
+  therefore leads with **allocation ratio per host** (vcpus_used / vcpus) and treats
+  memory as a first-class constraint, because on most real clouds RAM — not vCPU — is
+  what fills up first. The trap we learned the hard way: averaging the fleet hides the
+  one hypervisor that is at 100% memory while the cloud-wide gauge reads a comfortable
+  60%, and that one host is exactly where new builds keep failing.
+
+data_sources:
+  - "`openstack-exporter` (github.com/openstack-exporter/openstack-exporter) scraping
+    the Nova API: `openstack_nova_vcpus` / `openstack_nova_vcpus_used`,
+    `openstack_nova_memory_mb` / `openstack_nova_memory_used_mb`,
+    `openstack_nova_local_storage_gb` / `..._used_gb`, `openstack_nova_running_vms`
+    and `openstack_nova_current_workload`, all labelled by `hostname` (and `aggregate`)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_nova_vcpus, job)
+    description: Prometheus scrape job for your openstack-exporter target.
+    multi: false
+    includeAll: false
+  - name: aggregate
+    label: Aggregate
+    query: label_values(openstack_nova_vcpus{job="$job"}, aggregate)
+    description: Host aggregate / availability zone to scope to; All for the whole fleet.
+    multi: false
+    includeAll: true
+  - name: hostname
+    label: Hypervisor
+    query: label_values(openstack_nova_vcpus{job="$job", aggregate=~"$aggregate"}, hostname)
+    description: Compute host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Compute pressure — read these first
+    panels:
+      - type: stat
+        title: Hosts over vCPU overcommit
+        description: >-
+          Compute hosts whose allocated vCPUs exceed 4× physical cores — past a
+          typical cpu_allocation_ratio safety line. Tune to your configured ratio.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: >-
+              count(
+                openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+                / openstack_nova_vcpus{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"} > 4
+              ) or vector(0)
+            instant: true
+            legend: hosts
+      - type: stat
+        title: Hosts over 90% memory
+        description: Compute hosts with more than 90% of memory allocated — the usual first wall.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: >-
+              count(
+                100 * openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+                / openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"} > 90
+              ) or vector(0)
+            instant: true
+            legend: hosts
+      - type: stat
+        title: Build/migrate backlog
+        description: Total current_workload across selected hosts — instances actively building, resizing or migrating.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10}
+          - {color: red, value: 30}
+        targets:
+          - expr: >-
+              sum(openstack_nova_current_workload{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}) or vector(0)
+            instant: true
+            legend: workload
+      - type: stat
+        title: Running instances
+        description: Total instances running on the selected compute hosts.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              sum(openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}) or vector(0)
+            instant: true
+            legend: vms
+
+  - title: Allocation per host
+    panels:
+      - type: bargauge
+        title: vCPU allocation ratio per host
+        description: Allocated vCPUs ÷ physical cores. Above your cpu_allocation_ratio means the scheduler will skip the host.
+        unit: percentunit
+        min: 0
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 2}
+          - {color: red, value: 4}
+        targets:
+          - expr: >-
+              openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+              / openstack_nova_vcpus{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            instant: true
+            legend: "{{hostname}}"
+      - type: bargauge
+        title: Memory allocated per host
+        description: Percent of host memory committed to instances. The first constraint on most clouds.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+              / openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            instant: true
+            legend: "{{hostname}}"
+      - type: bargauge
+        title: Local disk allocated per host
+        description: Percent of local ephemeral storage committed. Watch on hosts that do not boot-from-volume.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * openstack_nova_local_storage_used_gb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+              / openstack_nova_local_storage_gb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            instant: true
+            legend: "{{hostname}}"
+
+  - title: Instances & workload over time
+    panels:
+      - type: timeseries
+        title: Running instances per host
+        description: Instance count per hypervisor — spot the host filling up or suddenly draining.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            legend: "{{hostname}}"
+      - type: timeseries
+        title: Build/migrate workload per host
+        description: Per-host current_workload over time. A host pinned high points at a slow local disk or volume back-end.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: openstack_nova_current_workload{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"} > 0
+            legend: "{{hostname}}"
+
+alerts:
+  - name: NovaComputeMemoryNearlyFull
+    severity: warning
+    expr: >-
+      100 * openstack_nova_memory_used_mb / openstack_nova_memory_mb > 95
+    for: 15m
+    summary: "Hypervisor {{ $labels.hostname }} memory {{ $value | printf \"%.0f\" }}% allocated"
+    why: A host above 95% allocated memory will reject new builds with "no valid host" and leaves no room for live-migration targets during maintenance.
+    investigate: "Open Nova Compute Hosts, find the host in the memory bargauge; check its instance list and flavour mix on the capacity dashboard."
+    runbook: "Migrate a few instances off the host, or stop scheduling to it; longer term add RAM or rebalance flavours/aggregates."
+    recovery: Clears when allocated memory drops below 95% for 5m.
+    false_positives: Tightly packed batch hosts run intentionally hot — raise the threshold or scope by aggregate.
+  - name: NovaComputeVcpuOvercommitHigh
+    severity: warning
+    expr: openstack_nova_vcpus_used / openstack_nova_vcpus > 4
+    for: 20m
+    summary: "Hypervisor {{ $labels.hostname }} vCPU overcommit {{ $value | printf \"%.1f\" }}×"
+    why: vCPU allocation well past your cpu_allocation_ratio causes scheduler skips and noisy-neighbour steal for tenants on the host.
+    investigate: "Compare the per-host vCPU ratio bars; check steal on the host's node_exporter CPU dashboard."
+    runbook: "Migrate instances to less packed hosts or raise capacity; confirm the configured cpu_allocation_ratio matches this threshold."
+    recovery: Clears when the ratio falls back below 4× for 5m.
+    false_positives: A deliberately high overcommit tier — set the threshold to that tier's ratio.
+
+troubleshooting:
+  - symptom: Allocation ratio reads infinity or "No data"
+    cause: "`openstack_nova_vcpus` is zero or missing for the host (exporter could not read the hypervisor)."
+    action: "Confirm the host appears in `openstack hypervisor list`; check exporter permissions for the os-hypervisors API."
+  - symptom: A host shows high allocation but low actual CPU on node_exporter
+    cause: Allocation tracks committed flavours, not live usage; idle instances still reserve vCPU/RAM.
+    action: This is expected — schedule against allocation, capacity-plan against both.
+  - symptom: Disk panel empty
+    cause: Hosts boot-from-volume, so local_storage is near zero and not the constraint.
+    action: Use the placement / Cinder dashboards for volume-backed capacity instead.
+
+performance: >-
+  Every panel aggregates or selects `by (hostname)`, one series per compute host, so
+  this scales to large fleets cheaply. The over-commit and over-memory counts are
+  instant ratios across hosts — no rates needed because these are gauges. Keep the
+  exporter scrape at 30–60s; the underlying hypervisor-stats API call is not free.
+
+customization: >-
+  Set the vCPU threshold (the `> 4`) to your configured `cpu_allocation_ratio` and the
+  memory threshold to your `ram_allocation_ratio` headroom. Scope to a tier by selecting
+  its `aggregate`. Swap `local_storage` panels out entirely on boot-from-volume clouds.

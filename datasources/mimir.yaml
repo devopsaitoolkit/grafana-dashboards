@@ -1,0 +1,19 @@
+# Grafana datasource provisioning — Grafana Mimir.
+# Mimir is Prometheus-API compatible (multi-tenant). Use the `prometheus` type and
+# set the tenant via the X-Scope-OrgID header. Give it uid DS_PROMETHEUS to bind.
+apiVersion: 1
+
+datasources:
+  - name: Mimir
+    uid: DS_PROMETHEUS
+    type: prometheus
+    access: proxy
+    url: http://mimir:9009/prometheus
+    jsonData:
+      httpMethod: POST
+      prometheusType: Mimir
+      timeInterval: 15s
+      httpHeaderName1: X-Scope-OrgID
+    secureJsonData:
+      httpHeaderValue1: anonymous   # set your tenant id; keep real values out of git
+    editable: true

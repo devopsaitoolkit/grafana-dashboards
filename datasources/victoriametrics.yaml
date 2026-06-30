@@ -1,0 +1,19 @@
+# Grafana datasource provisioning — VictoriaMetrics.
+# VictoriaMetrics is Prometheus-API compatible, so it uses the `prometheus` type.
+# Bind these dashboards to it by giving it uid DS_PROMETHEUS (drop-in replacement).
+apiVersion: 1
+
+datasources:
+  - name: VictoriaMetrics
+    uid: DS_PROMETHEUS
+    type: prometheus
+    access: proxy
+    url: http://victoriametrics:8428
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      prometheusType: Prometheus
+      timeInterval: 15s
+      # VictoriaMetrics extends PromQL with MetricsQL — these dashboards stick to
+      # standard PromQL so they work on either backend.
+    editable: true

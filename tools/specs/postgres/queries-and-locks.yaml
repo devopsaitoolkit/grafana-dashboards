@@ -1,0 +1,251 @@
+# PostgreSQL query and lock activity. Surfaces the contention signals that turn a
+# busy server into a stuck one: idle-in-transaction backends holding locks,
+# deadlocks, and lock pressure by mode.
+uid: postgres-queries-and-locks
+title: PostgreSQL / Queries & Locks
+description: >-
+  Session and locking behaviour for PostgreSQL via postgres_exporter: transaction
+  throughput and rollback ratio, sessions by state (active vs idle-in-transaction),
+  locks held by mode, deadlocks and temp-file spill. Answers "what is blocking, and
+  who is holding the locks?".
+datasource: prometheus
+tags: [postgres, database, postgres-exporter, locks]
+seo_phrase: PostgreSQL locks Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many backends are stuck idle-in-transaction holding locks?"
+  - "Are deadlocks happening right now?"
+  - "Which lock modes are most contended?"
+  - "Is the rollback ratio climbing because of aborted work?"
+  - "Are queries spilling to temp files for want of work_mem?"
+
+production_lessons: >-
+  The single most damaging Postgres anti-pattern is a backend left **idle in
+  transaction**: it pins an open snapshot and holds row locks while doing nothing,
+  blocking VACUUM and serialising everyone behind it. This dashboard leads with that
+  count, the deadlock rate and lock pressure, because those three explain almost every
+  "the database is slow" page that is really a contention problem, not a capacity one.
+  Deadlocks are always an application bug (two transactions taking the same locks in
+  opposite order) — the rate tells you how often it bites, the locks-by-mode panel
+  tells you which objects are hot.
+
+data_sources:
+  - "`postgres_exporter` with `pg_stat_activity` and `pg_locks` collectors enabled
+    (the `pg_stat_activity_count`, `pg_locks_count`, `pg_stat_database_xact_*`,
+    `pg_stat_database_deadlocks` and `pg_stat_database_temp_bytes` series)."
+
+templating:
+  - name: instance
+    label: Instance
+    query: label_values(pg_up, instance)
+    description: PostgreSQL server(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+  - name: datname
+    label: Database
+    query: label_values(pg_stat_database_numbackends{instance=~"$instance"}, datname)
+    description: Database(s) for the transaction and deadlock panels.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Contention — read these first
+    panels:
+      - type: stat
+        title: Idle in transaction
+        description: Backends holding an open transaction while doing no work. These pin snapshots and block VACUUM.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 20}
+        targets:
+          - expr: sum(pg_stat_activity_count{instance=~"$instance", state="idle in transaction"}) or vector(0)
+            instant: true
+            legend: idle-in-txn
+      - type: stat
+        title: Deadlocks (5m rate)
+        description: Deadlocks resolved per second. Anything above zero is an application lock-ordering bug.
+        unit: ops
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.001}
+        targets:
+          - expr: sum(rate(pg_stat_database_deadlocks{instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: deadlocks/s
+      - type: stat
+        title: Locks held
+        description: Total lock objects across all modes — a proxy for overall lock pressure.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 500}
+          - {color: red, value: 2000}
+        targets:
+          - expr: sum(pg_locks_count{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: locks
+      - type: stat
+        title: Active backends
+        description: Backends currently executing a query.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 50}
+          - {color: red, value: 200}
+        targets:
+          - expr: sum(pg_stat_activity_count{instance=~"$instance", state="active"}) or vector(0)
+            instant: true
+            legend: active
+
+  - title: Sessions by state
+    panels:
+      - type: timeseries
+        title: Backends by state
+        description: How connections are spending their time. A growing idle-in-transaction band is the warning sign.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 40
+        legend: table
+        targets:
+          - expr: sum by (state) (pg_stat_activity_count{instance=~"$instance"})
+            legend: "{{state}}"
+      - type: piechart
+        title: Session state share
+        description: Current split of backends by state.
+        unit: short
+        pieType: donut
+        targets:
+          - expr: sum by (state) (pg_stat_activity_count{instance=~"$instance"})
+            instant: true
+            legend: "{{state}}"
+
+  - title: Transactions
+    panels:
+      - type: timeseries
+        title: Commits vs rollbacks
+        description: Transaction throughput. Rollbacks rising with deadlocks confirms a contention problem.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(pg_stat_database_xact_commit{instance=~"$instance", datname=~"$datname"}[5m]))
+            legend: commits/s
+          - expr: sum(rate(pg_stat_database_xact_rollback{instance=~"$instance", datname=~"$datname"}[5m]))
+            legend: rollbacks/s
+      - type: timeseries
+        title: Rollback ratio
+        description: Share of transactions that aborted. Persistent values above a few percent need investigation.
+        unit: percent
+        min: 0
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum(rate(pg_stat_database_xact_rollback{instance=~"$instance", datname=~"$datname"}[5m]))
+              / clamp_min(
+                  sum(rate(pg_stat_database_xact_commit{instance=~"$instance", datname=~"$datname"}[5m]))
+                  + sum(rate(pg_stat_database_xact_rollback{instance=~"$instance", datname=~"$datname"}[5m])),
+                  1)
+            legend: rollback %
+
+  - title: Locks and spill
+    panels:
+      - type: timeseries
+        title: Locks by mode
+        description: Lock objects grouped by mode. AccessExclusiveLock spikes mean DDL or VACUUM FULL is blocking readers.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 40
+        legend: table
+        targets:
+          - expr: sum by (mode) (pg_locks_count{instance=~"$instance"})
+            legend: "{{mode}}"
+      - type: bargauge
+        title: Locks by mode (now)
+        description: Current lock count per mode — which lock type dominates right now.
+        unit: short
+        orientation: horizontal
+        targets:
+          - expr: sum by (mode) (pg_locks_count{instance=~"$instance"}) > 0
+            instant: true
+            legend: "{{mode}}"
+      - type: timeseries
+        title: Temp bytes written
+        description: Bytes spilled to disk for sorts and hashes too large for work_mem. Correlate with slow analytics queries.
+        unit: Bps
+        min: 0
+        targets:
+          - expr: sum(rate(pg_stat_database_temp_bytes{instance=~"$instance", datname=~"$datname"}[5m]))
+            legend: temp bytes/s
+
+alerts:
+  - name: PostgresIdleInTransactionHigh
+    severity: warning
+    expr: sum by (instance) (pg_stat_activity_count{state="idle in transaction"}) > 10
+    for: 10m
+    summary: "PostgreSQL {{ $labels.instance }} has >10 idle-in-transaction backends"
+    why: Idle-in-transaction sessions pin snapshots, hold locks and block VACUUM, causing bloat and stalls.
+    investigate: "Find the offending sessions in pg_stat_activity and the application path that opened the transaction."
+    runbook: "Set idle_in_transaction_session_timeout; fix the app to commit/rollback promptly; terminate stuck backends."
+    recovery: Clears when the count falls below 10 for 5m.
+    false_positives: Some ORMs hold a transaction across a request; tune the threshold to your normal baseline.
+  - name: PostgresDeadlocksDetected
+    severity: warning
+    expr: sum by (instance) (rate(pg_stat_database_deadlocks[5m])) > 0
+    for: 5m
+    summary: "PostgreSQL {{ $labels.instance }} is hitting deadlocks"
+    why: Deadlocks mean transactions take locks in conflicting order; one is aborted every time, losing work.
+    investigate: "Check the postgres log for the deadlock detail showing both statements and the objects involved."
+    runbook: "Make the application acquire locks in a consistent order, or shrink the transaction scope."
+    recovery: Clears when no deadlocks occur for 5m.
+    false_positives: A one-off deadlock during a migration is usually benign; the 5m `for` window filters single events.
+  - name: PostgresHighRollbackRatio
+    severity: warning
+    expr: >-
+      100 * sum by (instance) (rate(pg_stat_database_xact_rollback[5m]))
+      / clamp_min(
+          sum by (instance) (rate(pg_stat_database_xact_commit[5m]))
+          + sum by (instance) (rate(pg_stat_database_xact_rollback[5m])), 1) > 5
+    for: 15m
+    summary: "PostgreSQL {{ $labels.instance }} rollback ratio above 5%"
+    why: A high rollback share signals application errors, failed constraints or serialisation conflicts wasting capacity.
+    investigate: "Correlate with deadlocks and application error logs; check for SERIALIZABLE retries."
+    runbook: "Fix the failing statements or add retry-with-backoff for serialisation failures."
+    recovery: Clears when the ratio drops below 5% for 5m.
+    false_positives: Batch jobs that use rollback for dry-runs inflate the ratio; scope by datname if needed.
+
+troubleshooting:
+  - symptom: Locks-by-mode panel is empty
+    cause: The pg_locks collector is not enabled in postgres_exporter.
+    action: Enable the locks collector (or the relevant queries file) and re-scrape.
+  - symptom: The idle-in-transaction state never appears
+    cause: pg_stat_activity_count only emits states that currently have backends.
+    action: This is expected — the band appears only when such backends exist.
+  - symptom: Deadlock stat flickers above zero then clears
+    cause: rate() smooths a single deadlock across the 5m window.
+    action: Use the deadlocks timeseries and the postgres log for exact counts and statements.
+
+performance: >-
+  All counters use a 5m rate window so a server restart does not produce a spike. The
+  by-state and by-mode aggregations are bounded by a small, fixed label set, so panel
+  cardinality is independent of connection count.
+
+customization: >-
+  Adjust the idle-in-transaction thresholds to your application's normal pattern, and
+  add a state-timeline for AccessExclusiveLock if DDL contention is a recurring theme.
+  Scope `$datname` to a single application database to remove noise from shared servers.

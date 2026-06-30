@@ -1,0 +1,257 @@
+title: Docker / Compose Stack
+description: >-
+  Per-project view of Docker Compose stacks: CPU, memory, network and restarts grouped
+  by the `com.docker.compose.project` label so you see resource use one stack at a time
+  instead of one container at a time. The board for a host running several Compose apps
+  where you need to know which *stack* — not which container — is the heavy one.
+datasource: prometheus
+tags: [docker, compose, stack, cadvisor, multi-tenant]
+seo_phrase: Docker Compose stack Grafana dashboard
+refresh: 30s
+time_from: now-3h
+
+questions:
+  - "Which Compose stack is consuming the most CPU and memory?"
+  - "How much network bandwidth does each stack push?"
+  - "Are any containers in a stack restarting?"
+  - "How many containers does each stack currently run?"
+
+production_lessons: >-
+  On a host running several Compose apps, per-container graphs are noise — you think in
+  stacks ("the analytics app is slow"), not in the dozen containers that make it up. So
+  this board groups every metric by the Compose project label and ranks stacks, which
+  instantly answers "which app do I scale or move?" The catch teams hit is that cAdvisor
+  must be configured to expose container labels; without that the
+  `container_label_com_docker_compose_project` label is empty and every stack collapses
+  into one. We filter that label `!=""` everywhere so a misconfigured exporter fails
+  loudly (empty board) rather than quietly lumping all stacks together.
+
+data_sources:
+  - "`cAdvisor` with container-label collection enabled, so the
+    `container_label_com_docker_compose_project` (and `..._service`) labels appear on
+    `container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`,
+    `container_network_*` and `container_start_time_seconds`. Enable label exposure with
+    cAdvisor's `--store_container_labels` (or a `--whitelisted_container_labels` list)."
+
+templating:
+  - name: instance
+    label: Host
+    query: label_values(machine_cpu_cores, instance)
+    description: cAdvisor instance (Docker host) to inspect.
+    multi: false
+    includeAll: false
+  - name: project
+    label: Stack
+    query: label_values(container_cpu_usage_seconds_total{container_label_com_docker_compose_project!=""}, container_label_com_docker_compose_project)
+    description: Compose project(s) to display. Select All to compare every stack.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Resource use by stack — read these first
+    panels:
+      - type: bargauge
+        title: CPU by stack (cores)
+        description: CPU cores used per Compose project over the last 5 minutes, ranked.
+        unit: short
+        decimals: 2
+        min: 0
+        orientation: horizontal
+        targets:
+          - expr: >-
+              sum by (container_label_com_docker_compose_project) (
+                rate(container_cpu_usage_seconds_total{instance="$instance", container_label_com_docker_compose_project=~"$project", name!=""}[5m]))
+            instant: true
+            legend: "{{container_label_com_docker_compose_project}}"
+      - type: bargauge
+        title: Memory by stack
+        description: Working-set memory per Compose project, ranked.
+        unit: bytes
+        min: 0
+        orientation: horizontal
+        targets:
+          - expr: >-
+              sum by (container_label_com_docker_compose_project) (
+                container_memory_working_set_bytes{instance="$instance", container_label_com_docker_compose_project=~"$project", name!=""})
+            instant: true
+            legend: "{{container_label_com_docker_compose_project}}"
+      - type: stat
+        title: Active stacks
+        description: Distinct Compose projects with running containers on this host.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              count(count by (container_label_com_docker_compose_project) (
+                container_last_seen{instance="$instance", container_label_com_docker_compose_project!="", name!=""})) or vector(0)
+            instant: true
+            legend: stacks
+      - type: stat
+        title: Containers in selection
+        description: Containers across the selected stacks.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              count(count by (name) (
+                container_last_seen{instance="$instance", container_label_com_docker_compose_project=~"$project", name!=""})) or vector(0)
+            instant: true
+            legend: containers
+
+  - title: Trends by stack
+    panels:
+      - type: timeseries
+        title: CPU over time by stack
+        description: Per-stack CPU cores — spot the app that started running hot.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 20
+        legend: table
+        targets:
+          - expr: >-
+              sum by (container_label_com_docker_compose_project) (
+                rate(container_cpu_usage_seconds_total{instance="$instance", container_label_com_docker_compose_project=~"$project", name!=""}[5m]))
+            legend: "{{container_label_com_docker_compose_project}}"
+      - type: timeseries
+        title: Memory over time by stack
+        description: Per-stack working-set memory — a steady climb is a leak somewhere in the stack.
+        unit: bytes
+        min: 0
+        stacking: normal
+        fillOpacity: 20
+        legend: table
+        targets:
+          - expr: >-
+              sum by (container_label_com_docker_compose_project) (
+                container_memory_working_set_bytes{instance="$instance", container_label_com_docker_compose_project=~"$project", name!=""})
+            legend: "{{container_label_com_docker_compose_project}}"
+
+  - title: Network & restarts by stack
+    panels:
+      - type: timeseries
+        title: Network receive by stack
+        description: Inbound bandwidth aggregated per Compose project.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              sum by (container_label_com_docker_compose_project) (
+                rate(container_network_receive_bytes_total{instance="$instance", container_label_com_docker_compose_project=~"$project", name!=""}[5m]))
+            legend: "{{container_label_com_docker_compose_project}}"
+      - type: timeseries
+        title: Network transmit by stack
+        description: Outbound bandwidth aggregated per Compose project.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              sum by (container_label_com_docker_compose_project) (
+                rate(container_network_transmit_bytes_total{instance="$instance", container_label_com_docker_compose_project=~"$project", name!=""}[5m]))
+            legend: "{{container_label_com_docker_compose_project}}"
+      - type: timeseries
+        title: Restarts by stack (15m)
+        description: Container start-time changes summed per stack — non-zero means something is flapping.
+        unit: short
+        min: 0
+        drawStyle: bars
+        fillOpacity: 50
+        legend: table
+        targets:
+          - expr: >-
+              sum by (container_label_com_docker_compose_project) (
+                changes(container_start_time_seconds{instance="$instance", container_label_com_docker_compose_project=~"$project", name!=""}[15m]))
+            legend: "{{container_label_com_docker_compose_project}}"
+
+  - title: Stack detail
+    panels:
+      - type: table
+        title: Per-stack resource summary
+        description: Sortable CPU and memory totals per Compose project for capacity planning.
+        unit: short
+        filterable: true
+        sortBy:
+          - {displayName: cores, desc: true}
+        targets:
+          - expr: >-
+              sum by (container_label_com_docker_compose_project) (
+                rate(container_cpu_usage_seconds_total{instance="$instance", container_label_com_docker_compose_project=~"$project", name!=""}[5m]))
+            instant: true
+            format: table
+            legend: "{{container_label_com_docker_compose_project}}"
+          - expr: >-
+              sum by (container_label_com_docker_compose_project) (
+                container_memory_working_set_bytes{instance="$instance", container_label_com_docker_compose_project=~"$project", name!=""})
+            instant: true
+            format: table
+            legend: "{{container_label_com_docker_compose_project}}"
+
+alerts:
+  - name: ComposeStackContainerRestart
+    severity: warning
+    expr: >-
+      sum by (container_label_com_docker_compose_project, instance) (
+        changes(container_start_time_seconds{container_label_com_docker_compose_project!="", name!=""}[15m])) > 3
+    for: 5m
+    summary: "Compose stack {{ $labels.container_label_com_docker_compose_project }} has {{ $value }} restarts in 15m"
+    why: Restarts concentrated in one stack point at a single failing app — a bad config, a dead dependency, or an OOM loop in one of its services.
+    investigate: "Open Docker / Compose Stack, scope to the project, and read the restarts panel to find which service in the stack is flapping."
+    runbook: "Inspect that service's logs, roll back its last change, and fix the dependency or resource limit causing the crash."
+    recovery: Clears when restarts stop for 15m.
+    false_positives: A deliberate `docker compose up --build` redeploy of the stack — silence during deploys.
+  - name: ComposeStackCPUHigh
+    severity: warning
+    expr: >-
+      sum by (container_label_com_docker_compose_project, instance) (
+        rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project!="", name!=""}[5m]))
+      / scalar(machine_cpu_cores) > 0.8
+    for: 10m
+    summary: "Compose stack {{ $labels.container_label_com_docker_compose_project }} using over 80% of host cores"
+    why: A single stack consuming most of the host's CPU starves every other stack on the same host, turning one app's problem into everyone's.
+    investigate: "Compare the stack's CPU trend to the host headroom and identify the hottest service."
+    runbook: "Add CPU limits to the stack's services, move the stack to its own host, or scale it out."
+    recovery: Clears when the stack's CPU share drops below 80% for 5m.
+    false_positives: A short batch job inside the stack; the 10m window filters bursts. On multi-host setups `scalar(machine_cpu_cores)` assumes one host — scope per instance.
+  - name: ComposeStackMemoryGrowth
+    severity: warning
+    expr: >-
+      sum by (container_label_com_docker_compose_project, instance) (
+        deriv(container_memory_working_set_bytes{container_label_com_docker_compose_project!="", name!=""}[1h])) > 1.0e6
+    for: 30m
+    summary: "Compose stack {{ $labels.container_label_com_docker_compose_project }} memory growing steadily"
+    why: A stack whose working set climbs by more than ~1MB/s for half an hour is leaking and will eventually OOM one of its containers.
+    investigate: "Open the per-stack memory trend; identify which service carries the slope."
+    runbook: "Set memory limits to bound the blast radius and restart the leaking service while you ship a fix."
+    recovery: Clears when the growth rate falls back to near zero.
+    false_positives: Legitimate warm-up (cache fill) early in a stack's life — the 30m window reduces but does not eliminate this.
+
+troubleshooting:
+  - symptom: Every panel is empty
+    cause: cAdvisor is not exposing container labels, so the Compose project label is absent.
+    action: Restart cAdvisor with `--store_container_labels` (or whitelist the compose labels) and re-check in Explore.
+  - symptom: All containers collapse into one unnamed stack
+    cause: The containers were not started by Docker Compose, so they carry no project label.
+    action: This board only covers Compose-managed containers; use the container overview for the rest.
+  - symptom: CPU-share alert misfires on a multi-host fleet
+    cause: "`scalar(machine_cpu_cores)` takes a single value, not per-host cores."
+    action: Replace it with a per-instance join, or scope the rule to one host.
+
+performance: >-
+  Grouping by the Compose project label keeps series count at one per stack regardless
+  of how many containers each stack runs, so this board scales well. Rates use a 5m
+  window (≥4× a 15s scrape); `changes()`/`deriv()` over longer windows are bounded by
+  the stack-level aggregation.
+
+customization: >-
+  Add `container_label_com_docker_compose_service` to any `by (...)` clause to drill from
+  stack down to service. Tune the 80% CPU-share and 1MB/s growth thresholds to your host
+  sizing. On multi-host fleets, add `instance` to the grouping and replace
+  `scalar(machine_cpu_cores)` with a per-instance core count.

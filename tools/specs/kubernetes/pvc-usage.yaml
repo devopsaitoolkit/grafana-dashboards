@@ -1,0 +1,258 @@
+# PVC capacity dashboard — actual filesystem usage inside bound volumes.
+# Leads with PVCs over 85% full and the count predicted to fill soon, because a full
+# volume turns into application write failures and crash loops.
+title: Kubernetes / PVC Capacity
+description: >-
+  Filesystem usage per PersistentVolumeClaim from kubelet volume stats, the PVCs
+  nearest to full, and a predict_linear projection of which will fill soon. Answers
+  "which volumes are about to run out of space?" before an application starts failing
+  writes, rather than after.
+datasource: prometheus
+tags: [kubernetes, storage, pvc, capacity]
+seo_phrase: Kubernetes PVC usage Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "Which PVCs are over 85% full right now?"
+  - "Are any PVCs predicted to fill within a few days at the current growth rate?"
+  - "What is the fullest PVC in the cluster?"
+  - "How much capacity is requested versus actually used?"
+  - "Are there pending PVCs blocking pods from starting?"
+
+production_lessons: >-
+  A full PersistentVolume is one of the nastiest failure modes in Kubernetes: the pod
+  doesn't crash cleanly, it starts failing writes, corrupting state or wedging the
+  application while the pod still reports Ready. Worse, you usually **can't just
+  resize** in a hurry if the storage class doesn't allow expansion. So this dashboard
+  is built to warn early — the lead row counts PVCs **over 85%** and the
+  **predict_linear** panel projects which volumes cross 100% within days at their
+  current fill rate, turning a 3am page into a planned ticket. Usage comes from
+  `kubelet_volume_stats_*` (the real filesystem), not the PVC's requested size, because
+  what matters is bytes used versus bytes available, not what was asked for.
+
+data_sources:
+  - "`kubelet` volume stats (the `kubelet_volume_stats_used_bytes`,
+    `kubelet_volume_stats_available_bytes` and `kubelet_volume_stats_capacity_bytes`
+    series) and `kube-state-metrics` for PVC phase and requested size."
+
+templating:
+  - name: namespace
+    label: Namespace
+    query: label_values(kubelet_volume_stats_capacity_bytes, namespace)
+    description: Namespace(s) to scope the PVCs to; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Capacity risk — read these first
+    panels:
+      - type: stat
+        title: PVCs over 85% full
+        description: Count of PVCs whose filesystem usage exceeds 85%. These are the ones to size up soon.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              count((kubelet_volume_stats_used_bytes{namespace=~"$namespace"} / kubelet_volume_stats_capacity_bytes{namespace=~"$namespace"}) > 0.85) or vector(0)
+            instant: true
+            legend: over 85%
+      - type: stat
+        title: PVCs over 95% full
+        description: Count of PVCs critically full. At this point write failures are imminent.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count((kubelet_volume_stats_used_bytes{namespace=~"$namespace"} / kubelet_volume_stats_capacity_bytes{namespace=~"$namespace"}) > 0.95) or vector(0)
+            instant: true
+            legend: over 95%
+      - type: stat
+        title: Fullest PVC
+        description: Highest filesystem usage percentage across the selected PVCs.
+        unit: percent
+        min: 0
+        max: 100
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              max(100 * kubelet_volume_stats_used_bytes{namespace=~"$namespace"} / kubelet_volume_stats_capacity_bytes{namespace=~"$namespace"}) or vector(0)
+            instant: true
+            legend: fullest
+      - type: stat
+        title: Pending PVCs
+        description: Claims that can't bind, so their pods can't start.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(kube_persistentvolumeclaim_status_phase{namespace=~"$namespace", phase="Pending"}) or vector(0)
+            instant: true
+            legend: pending
+      - type: stat
+        title: Total used capacity
+        description: Sum of bytes actually used across the selected PVCs.
+        unit: bytes
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(kubelet_volume_stats_used_bytes{namespace=~"$namespace"}) or vector(0)
+            instant: true
+            legend: used
+
+  - title: Usage by claim
+    panels:
+      - type: bargauge
+        title: Top PVCs by usage
+        description: The fullest PVCs by percentage. The ranked worklist for capacity planning.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              topk(15, 100 * kubelet_volume_stats_used_bytes{namespace=~"$namespace"} / kubelet_volume_stats_capacity_bytes{namespace=~"$namespace"})
+            instant: true
+            legend: "{{namespace}}/{{persistentvolumeclaim}}"
+      - type: timeseries
+        title: Usage percent over time
+        description: Per-PVC fill percentage trend. The slope is what predict_linear extrapolates.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 85}
+        targets:
+          - expr: >-
+              100 * kubelet_volume_stats_used_bytes{namespace=~"$namespace"} / kubelet_volume_stats_capacity_bytes{namespace=~"$namespace"}
+            legend: "{{namespace}}/{{persistentvolumeclaim}}"
+      - type: table
+        title: Available bytes per PVC
+        description: Free space remaining on each volume — the absolute headroom behind the percentages.
+        unit: bytes
+        sortBy:
+          - {displayName: Value, desc: false}
+        targets:
+          - expr: kubelet_volume_stats_available_bytes{namespace=~"$namespace"}
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{persistentvolumeclaim}}"
+
+  - title: Forecast and supply
+    panels:
+      - type: table
+        title: PVCs predicted to fill within 4 days
+        description: Volumes whose available bytes are projected to hit zero within 4 days at the last 6h growth rate.
+        unit: s
+        targets:
+          - expr: >-
+              (kubelet_volume_stats_available_bytes{namespace=~"$namespace"} / clamp_min(deriv(kubelet_volume_stats_available_bytes{namespace=~"$namespace"}[6h]), 1) * -1) > 0
+              and predict_linear(kubelet_volume_stats_available_bytes{namespace=~"$namespace"}[6h], 4 * 86400) < 0
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{persistentvolumeclaim}}"
+      - type: timeseries
+        title: Available bytes trend
+        description: Absolute free space over time per PVC. A steady downward slope is the early warning.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: kubelet_volume_stats_available_bytes{namespace=~"$namespace"}
+            legend: "{{namespace}}/{{persistentvolumeclaim}}"
+      - type: timeseries
+        title: Requested vs used capacity
+        description: Total PVC requested size versus bytes actually used — the gap is over-provisioned spend.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(kube_persistentvolumeclaim_resource_requests_storage_bytes{namespace=~"$namespace"})
+            legend: requested
+          - expr: sum(kubelet_volume_stats_used_bytes{namespace=~"$namespace"})
+            legend: used
+
+alerts:
+  - name: PVCNearFull
+    severity: warning
+    expr: >-
+      kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes > 0.85
+    for: 15m
+    summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is over 85% full"
+    why: A volume nearing full risks failing application writes; many storage classes can't be expanded instantly, so you need lead time.
+    investigate: "Open Kubernetes / PVC Capacity, check the available-bytes table and the usage trend to see how fast it's filling."
+    runbook: "Expand the PVC if the storage class allows `allowVolumeExpansion`; otherwise clean up data, rotate logs, or migrate to a larger volume."
+    recovery: Clears when usage drops below 85% for 5m.
+    false_positives: Volumes that intentionally run near full (e.g. fixed-size caches) — scope the alert away from them with a label selector.
+  - name: PVCCriticallyFull
+    severity: critical
+    expr: >-
+      kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes > 0.95
+    for: 5m
+    summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is over 95% full"
+    why: At this fill level write failures and data corruption are imminent, and the application may already be degrading silently.
+    investigate: "Check the available-bytes table for absolute headroom and confirm whether the volume can be expanded online."
+    runbook: "Free space immediately (truncate/rotate logs, clear temp data) and expand the volume; if expansion isn't supported, migrate to a larger PVC urgently."
+    recovery: Clears when usage drops below 95% for 5m.
+    false_positives: Almost none — a 95%-full volume is a real risk even if intentional.
+  - name: PVCWillFillSoon
+    severity: warning
+    expr: >-
+      predict_linear(kubelet_volume_stats_available_bytes[6h], 4 * 86400) < 0
+      and (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) > 0.7
+    for: 1h
+    summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} projected to fill within 4 days"
+    why: Catching a fill trend days ahead converts a 3am "disk full" page into a planned capacity ticket.
+    investigate: "Open the predicted-to-fill table and the available-bytes trend to confirm the slope is real and not a one-off spike."
+    runbook: "Plan and apply a volume expansion, or reduce the growth source (log rotation, retention policy) before the projection lands."
+    recovery: Clears when the projection no longer crosses zero within the window (growth slowed or capacity added).
+    false_positives: A short burst of writes in the 6h window can skew the projection; the 70% guard and 1h `for` reduce noise.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: kubelet volume stats aren't scraped, or no PVCs are mounted in scope.
+    action: "Confirm `kubelet_volume_stats_capacity_bytes` exists in Explore; these come from the kubelet, and only mounted PVCs report stats."
+  - symptom: A PVC is missing from the usage panels
+    cause: The volume isn't currently mounted by a running pod, so the kubelet emits no stats for it.
+    action: kubelet_volume_stats only covers attached/mounted volumes; use the Persistent Volumes dashboard for unbound inventory.
+  - symptom: predict_linear table is empty
+    cause: Volumes are stable or shrinking, so nothing is projected to hit zero.
+    action: This is the healthy case; widen the lookback or shorten the horizon to stress-test the projection.
+
+performance: >-
+  Usage ratios are computed from gauges, so a 1m refresh is comfortable. The
+  predict_linear panels read a 6h range per series and are the heaviest queries here;
+  on clusters with thousands of PVCs, scope `$namespace` or back the projection with a
+  recording rule. All per-PVC panels carry the `namespace`/`persistentvolumeclaim`
+  labels so series stay identifiable.
+
+customization: >-
+  Tune the 85%/95% fill thresholds and the 4-day / 70% projection guards to your
+  storage class's expansion latency and growth profile. Scope `$namespace` to a team
+  to give them their own capacity view, and lengthen the predict_linear lookback for
+  smoother, slower-moving volumes.

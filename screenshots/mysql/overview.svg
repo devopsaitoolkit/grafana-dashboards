@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1404" height="1152" viewBox="0 0 1404 1152" font-family="Inter, Roboto, Arial, sans-serif">
+<rect width="1404" height="1152" fill="#0b0c0e"/>
+<text x="16" y="30" fill="#d8d9da" font-size="16" font-weight="600">MySQL / Overview</text>
+<text x="16" y="48" fill="#8e8e8e" font-size="11">Schematic layout · datasource: prometheus · uid: mysql-overview</text>
+<rect x="16" y="56" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="75" fill="#d8d9da" font-size="12" font-weight="600">▾ Health — read these first</text>
+<rect x="18" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="88" width="260" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="106" fill="#d8d9da" font-size="11" font-weight="500">MySQL up</text>
+<text x="26" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="148" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="282" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="282" y="88" width="260" height="3" fill="#73bf69" rx="2"/>
+<text x="290" y="106" fill="#d8d9da" font-size="11" font-weight="500">Connection saturation</text>
+<text x="290" y="120" fill="#8e8e8e" font-size="9">gauge · percent</text>
+<text x="412" y="222" fill="#73bf69" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="546" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="88" width="260" height="3" fill="#3274d9" rx="2"/>
+<text x="554" y="106" fill="#d8d9da" font-size="11" font-weight="500">Slow queries</text>
+<text x="554" y="120" fill="#8e8e8e" font-size="9">stat · ops</text>
+<text x="676" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="810" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="810" y="88" width="260" height="3" fill="#73bf69" rx="2"/>
+<text x="818" y="106" fill="#d8d9da" font-size="11" font-weight="500">InnoDB buffer pool hit ratio</text>
+<text x="818" y="120" fill="#8e8e8e" font-size="9">gauge · percent</text>
+<text x="940" y="222" fill="#73bf69" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="16" y="326" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="345" fill="#d8d9da" font-size="12" font-weight="600">▾ Throughput</text>
+<rect x="18" y="358" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="358" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="376" fill="#d8d9da" font-size="11" font-weight="500">Queries per second</text>
+<text x="26" y="390" fill="#8e8e8e" font-size="9">timeseries · ops</text>
+<polyline points="28,488 83,474 137,488 192,474 247,488 301,474 356,488" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="370" y="358" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="370" y="358" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="378" y="376" fill="#d8d9da" font-size="11" font-weight="500">Command mix</text>
+<text x="378" y="390" fill="#8e8e8e" font-size="9">timeseries · ops</text>
+<polyline points="380,488 435,474 489,488 544,474 599,488 653,474 708,488" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="722" y="358" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="722" y="358" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="730" y="376" fill="#d8d9da" font-size="11" font-weight="500">Slow query rate</text>
+<text x="730" y="390" fill="#8e8e8e" font-size="9">timeseries · ops</text>
+<polyline points="732,488 787,474 841,488 896,474 951,488 1005,474 1060,488" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="16" y="596" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="615" fill="#d8d9da" font-size="12" font-weight="600">▾ Connections</text>
+<rect x="18" y="628" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="628" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="646" fill="#d8d9da" font-size="11" font-weight="500">Threads connected vs running</text>
+<text x="26" y="660" fill="#8e8e8e" font-size="9">timeseries · short</text>
+<polyline points="28,758 83,744 137,758 192,744 247,758 301,744 356,758" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="370" y="628" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="370" y="628" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="378" y="646" fill="#d8d9da" font-size="11" font-weight="500">Connected vs max, with peak</text>
+<text x="378" y="660" fill="#8e8e8e" font-size="9">timeseries · short</text>
+<polyline points="380,758 435,744 489,758 544,744 599,758 653,744 708,758" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="722" y="628" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="722" y="628" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="730" y="646" fill="#d8d9da" font-size="11" font-weight="500">Aborted connects</text>
+<text x="730" y="660" fill="#8e8e8e" font-size="9">timeseries · ops</text>
+<polyline points="732,758 787,744 841,758 896,744 951,758 1005,744 1060,758" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="16" y="866" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="885" fill="#d8d9da" font-size="12" font-weight="600">▾ Engine</text>
+<rect x="18" y="898" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="898" width="524" height="3" fill="#73bf69" rx="2"/>
+<text x="26" y="916" fill="#d8d9da" font-size="11" font-weight="500">Buffer pool hit ratio over time window</text>
+<text x="26" y="930" fill="#8e8e8e" font-size="9">gauge · percent</text>
+<text x="280" y="1032" fill="#73bf69" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="546" y="898" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="898" width="524" height="3" fill="#3274d9" rx="2"/>
+<text x="554" y="916" fill="#d8d9da" font-size="11" font-weight="500">Uptime</text>
+<text x="554" y="930" fill="#8e8e8e" font-size="9">stat · s</text>
+<text x="808" y="1032" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="1088" y="56" width="284" height="1080" fill="#181b1f" stroke="#2c3235" rx="4"/>
+<text x="1100" y="78" fill="#d8d9da" font-size="12" font-weight="700">What to look for</text>
+<circle cx="1106" cy="94" r="4" fill="#3274d9"/>
+<text x="1118" y="98" fill="#8e8e8e" font-size="10">Is MySQL up and serving queries right</text>
+<text x="1118" y="111" fill="#8e8e8e" font-size="10">now?</text>
+<circle cx="1106" cy="128" r="4" fill="#3274d9"/>
+<text x="1118" y="132" fill="#8e8e8e" font-size="10">How close are we to max_connections</text>
+<text x="1118" y="145" fill="#8e8e8e" font-size="10">(thread saturation)?</text>
+<circle cx="1106" cy="162" r="4" fill="#3274d9"/>
+<text x="1118" y="166" fill="#8e8e8e" font-size="10">Is the slow-query rate climbing?</text>
+<circle cx="1106" cy="183" r="4" fill="#3274d9"/>
+<text x="1118" y="187" fill="#8e8e8e" font-size="10">What is the read/write command mix?</text>
+<circle cx="1106" cy="204" r="4" fill="#73bf69"/>
+<text x="1118" y="208" fill="#8e8e8e" font-size="10">Green: within expected range</text>
+<circle cx="1106" cy="225" r="4" fill="#f2cc0c"/>
+<text x="1118" y="229" fill="#8e8e8e" font-size="10">Yellow: investigate — approaching a</text>
+<text x="1118" y="242" fill="#8e8e8e" font-size="10">limit</text>
+<circle cx="1106" cy="259" r="4" fill="#e02f44"/>
+<text x="1118" y="263" fill="#8e8e8e" font-size="10">Red: act now — threshold breached</text>
+</svg>

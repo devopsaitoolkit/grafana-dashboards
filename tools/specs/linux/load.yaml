@@ -1,0 +1,224 @@
+# Load average and run-queue pressure for Linux hosts scraped by node_exporter.
+uid: linux-load
+title: Linux / Load Average
+description: >-
+  Load average interpreted against core count for Linux hosts scraped by
+  node_exporter: normalized load (load ÷ cores), runnable vs blocked processes, and
+  the 1/5/15-minute trend. Answers "is this host actually overloaded for its size?"
+  rather than showing a raw load number with no context.
+datasource: prometheus
+tags: [linux, load, scheduler, node-exporter, saturation]
+seo_phrase: Node Exporter load average Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which hosts are overloaded relative to their core count (load ÷ cores > 1)?"
+  - "Is the backlog growing (load1 > load5 > load15) or draining?"
+  - "Are processes runnable (CPU-bound) or blocked (waiting on IO)?"
+  - "Is high load CPU contention or uninterruptible-sleep disk wait in disguise?"
+
+production_lessons: >-
+  "Load average 16" means nothing until you know the core count — it is a disaster on a
+  4-core box and idle on a 64-core box. So this dashboard's headline is **normalized load**
+  (load1 ÷ cores), where 1.0 is the saturation line regardless of machine size. The second
+  trap is reading load as a pure CPU metric: Linux counts processes in **uninterruptible
+  sleep** (D state, usually disk IO) toward load, so a host can show load 30 with idle CPUs
+  because everything is blocked on a slow disk or NFS mount. The runnable-vs-blocked split
+  here is what tells you whether to chase CPU or storage. Compare load1/load5/load15 to see
+  if the spike is arriving or receding.
+
+data_sources:
+  - "`node_exporter` `loadavg` collector (`node_load1`, `node_load5`, `node_load15`)."
+  - "`node_exporter` `stat`/`processes` collectors (`node_procs_running`,
+    `node_procs_blocked`) and `node_cpu_seconds_total` for the core count."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job for your node_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(node_uname_info{job="$job"}, instance)
+    description: Host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Overload — read these first
+    panels:
+      - type: gauge
+        title: Highest normalized load
+        description: Max of load1 ÷ core count across hosts. 1.0 is full saturation; above 1.0 means a scheduling backlog.
+        unit: short
+        decimals: 2
+        min: 0
+        max: 2
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 2}
+        targets:
+          - expr: >-
+              max(
+                node_load1{job="$job", instance=~"$instance"}
+                / count without (cpu, mode) (node_cpu_seconds_total{job="$job", instance=~"$instance", mode="idle"})
+              ) or vector(0)
+            instant: true
+            legend: max load/cores
+      - type: stat
+        title: Hosts overloaded
+        description: Count of hosts whose 1m load exceeds their core count.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(
+                node_load1{job="$job", instance=~"$instance"}
+                > count without (cpu, mode) (node_cpu_seconds_total{job="$job", instance=~"$instance", mode="idle"})
+              ) or vector(0)
+            instant: true
+            legend: overloaded
+      - type: stat
+        title: Blocked processes
+        description: Total processes in uninterruptible sleep (usually disk/NFS IO) across the fleet.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 20}
+        targets:
+          - expr: sum(node_procs_blocked{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: blocked
+      - type: stat
+        title: Runnable processes
+        description: Total processes ready to run (competing for CPU) across the fleet.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(node_procs_running{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: runnable
+
+  - title: Normalized load
+    panels:
+      - type: timeseries
+        title: Load ÷ cores per host
+        description: Per-host normalized load. The dashed line at 1.0 is the saturation threshold for any machine size.
+        unit: short
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              node_load1{job="$job", instance=~"$instance"}
+              / count without (cpu, mode) (node_cpu_seconds_total{job="$job", instance=~"$instance", mode="idle"})
+            legend: "{{instance}}"
+      - type: bargauge
+        title: Top hosts by normalized load
+        description: Ranked load1 ÷ cores — the most overloaded hosts first.
+        unit: short
+        decimals: 2
+        min: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 2}
+        targets:
+          - expr: >-
+              topk(10,
+                node_load1{job="$job", instance=~"$instance"}
+                / count without (cpu, mode) (node_cpu_seconds_total{job="$job", instance=~"$instance", mode="idle"}))
+            instant: true
+            legend: "{{instance}}"
+
+  - title: Trend and process states
+    panels:
+      - type: timeseries
+        title: Load 1/5/15 vs cores (fleet)
+        description: Averaged load averages with the core line. load1 above load15 means the backlog is growing.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: avg(node_load1{job="$job", instance=~"$instance"})
+            legend: load1
+          - expr: avg(node_load5{job="$job", instance=~"$instance"})
+            legend: load5
+          - expr: avg(node_load15{job="$job", instance=~"$instance"})
+            legend: load15
+          - expr: avg(count without (cpu, mode) (node_cpu_seconds_total{job="$job", instance=~"$instance", mode="idle"}))
+            legend: cores
+      - type: timeseries
+        title: Runnable vs blocked processes
+        description: Runnable (CPU-bound) vs blocked (IO-bound) process counts. The split decides whether to chase CPU or storage.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(node_procs_running{job="$job", instance=~"$instance"})
+            legend: runnable
+          - expr: sum(node_procs_blocked{job="$job", instance=~"$instance"})
+            legend: blocked
+
+alerts:
+  - name: HostLoadExceedsCores
+    severity: warning
+    expr: >-
+      node_load1 / count without (cpu, mode) (node_cpu_seconds_total{mode="idle"}) > 1.5
+    for: 15m
+    summary: "Host {{ $labels.instance }} normalized load > 1.5 for 15m"
+    why: Sustained load above 1.5× cores means processes are spending significant time waiting for a CPU or IO slot, adding queueing latency to everything.
+    investigate: "Open Linux / Load Average and check the runnable-vs-blocked split: runnable points at CPU, blocked points at storage/NFS."
+    runbook: "If runnable-bound, find and rightsize the hot process or scale out; if blocked-bound, fix the slow storage path (see Linux / Disk IO)."
+    recovery: Clears when normalized load falls below 1.5 for 5m.
+    false_positives: Batch/CI hosts intentionally run hot — scope the rule by role or raise the multiplier for them.
+  - name: HostBlockedProcessesHigh
+    severity: warning
+    expr: node_procs_blocked > 10
+    for: 10m
+    summary: "Host {{ $labels.instance }} has > 10 blocked processes for 10m"
+    why: Many processes stuck in uninterruptible sleep inflate load while CPUs sit idle — the bottleneck is storage or a stuck mount, not compute.
+    investigate: "Identify the D-state processes (ps -eo state,pid,cmd | grep '^D') and the device/mount they wait on; correlate with disk latency."
+    runbook: "Resolve the slow IO path — failing disk, throttled cloud volume, or hung NFS server; a hung mount may require recovering the server or a lazy unmount."
+    recovery: Clears when blocked processes drop below 10 for 5m.
+    false_positives: Brief spikes during heavy IO bursts or backups; sustained counts indicate a real stall.
+
+troubleshooting:
+  - symptom: cores line is flat at 1
+    cause: node_cpu_seconds_total collapsed by a recording rule that dropped the cpu label.
+    action: Point the dashboard at raw node_exporter series so the per-CPU count is intact.
+  - symptom: High load but CPU dashboard shows idle
+    cause: Load is dominated by blocked (D-state) processes waiting on IO, which count toward load but not CPU.
+    action: Read the runnable-vs-blocked panel; if blocked is high, investigate storage, not CPU.
+  - symptom: Normalized load looks too low on hyperthreaded hosts
+    cause: The core count includes logical (HT) CPUs, so the saturation point is optimistic.
+    action: Treat 0.7–0.8 normalized as the practical ceiling on hyperthreaded machines.
+
+performance: >-
+  Load and process gauges are instant reads of cheap counters, so this dashboard is light
+  even on large fleets. The core count is computed once per panel with
+  `count without (cpu, mode)(node_cpu_seconds_total{mode="idle"})`; on fleets above ~500
+  hosts, materialise that as a recording rule and reference it to cut per-render work.
+
+customization: >-
+  Tune the 1.5× normalized-load and 10-blocked thresholds to your tier — latency-sensitive
+  services should alert closer to 1.0. On hyperthreaded fleets, lower the saturation line to
+  ~0.8. Scope `$instance` by role to separate batch hosts from request-serving ones.

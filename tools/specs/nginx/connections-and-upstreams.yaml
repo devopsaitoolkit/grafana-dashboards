@@ -1,0 +1,254 @@
+# NGINX connection processing and upstream health from stub_status + VTS.
+title: NGINX / Connections & Upstreams
+description: >-
+  Active connection states, accept-vs-handle (dropped) connections and
+  per-upstream health for NGINX. Answers "is NGINX itself refusing or queuing
+  connections, and are the backends behind it healthy?" rather than only graphing
+  the active-connection gauge.
+datasource: prometheus
+tags: [nginx, web, connections, upstreams, saturation]
+seo_phrase: NGINX connections and upstreams Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many connections are active, and how many are just waiting (keep-alive)?"
+  - "Is NGINX dropping connections (accepted minus handled)?"
+  - "Are reads or writes piling up, hinting at slow clients or slow upstreams?"
+  - "Which upstream is unhealthy or slow right now?"
+  - "Is the exporter — and therefore NGINX — up?"
+
+production_lessons: >-
+  When NGINX "feels slow" the cause is usually one of two things the active-
+  connection number can't show you: connections being **dropped** before they are
+  served (worker_connections or file-descriptor exhaustion), or a **waiting**
+  pile-up from slow upstreams holding workers open. This dashboard leads with
+  dropped connections and the active-vs-waiting split so you can tell a saturation
+  problem from a backend problem in seconds, then drills into per-upstream health.
+  `accepted` and `handled` are counters — if their rates diverge, NGINX is hitting
+  a connection limit and silently dropping clients.
+
+data_sources:
+  - "`nginx-prometheus-exporter` against stub_status (`nginx_connections_active`,
+    `nginx_connections_reading`, `nginx_connections_writing`,
+    `nginx_connections_waiting`, `nginx_connections_accepted`,
+    `nginx_connections_handled`, `nginx_up`)."
+  - "Per-upstream panels need the **VTS** module exporter
+    (`nginx_vts_upstream_responses_total{code}`,
+    `nginx_vts_upstream_response_seconds`). Without VTS the upstream row is empty
+    but the connection rows still work on plain stub_status."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(nginx_up, job)
+    description: Prometheus scrape job for your NGINX exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(nginx_up{job="$job"}, instance)
+    description: NGINX host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Connection health — read these first
+    panels:
+      - type: stat
+        title: Active connections
+        description: Current open connections across the selected NGINX hosts.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(nginx_connections_active{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: active
+      - type: stat
+        title: Connections dropped /s
+        description: Accepted minus handled — connections NGINX refused. Should be flat zero.
+        unit: cps
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.001}
+        targets:
+          - expr: >-
+              sum(
+                rate(nginx_connections_accepted{job="$job", instance=~"$instance"}[5m])
+                - rate(nginx_connections_handled{job="$job", instance=~"$instance"}[5m])
+              ) or vector(0)
+            instant: true
+            legend: dropped
+      - type: stat
+        title: Slow upstreams
+        description: Count of upstreams whose response time exceeds 1s right now.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: count(nginx_vts_upstream_response_seconds{job="$job"} > 1) or vector(0)
+            instant: true
+            legend: slow
+      - type: stat
+        title: Exporters down
+        description: NGINX targets reporting nginx_up == 0 (exporter or NGINX unreachable).
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(nginx_up{job="$job", instance=~"$instance"} == 0) or vector(0)
+            instant: true
+            legend: down
+
+  - title: Connection states
+    panels:
+      - type: timeseries
+        title: Connection states
+        description: Active connections split into reading, writing and waiting (idle keep-alive).
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum(nginx_connections_reading{job="$job", instance=~"$instance"})
+            legend: reading
+          - expr: sum(nginx_connections_writing{job="$job", instance=~"$instance"})
+            legend: writing
+          - expr: sum(nginx_connections_waiting{job="$job", instance=~"$instance"})
+            legend: waiting
+      - type: timeseries
+        title: Accepted vs handled
+        description: When the handled rate falls below accepted, NGINX is dropping connections at a limit.
+        unit: cps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(nginx_connections_accepted{job="$job", instance=~"$instance"}[5m]))
+            legend: accepted
+          - expr: sum(rate(nginx_connections_handled{job="$job", instance=~"$instance"}[5m]))
+            legend: handled
+
+  - title: Upstream health
+    panels:
+      - type: timeseries
+        title: Upstream response time
+        description: Per-upstream response time from VTS — spot the backend pulling away from its peers.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: max by (upstream) (nginx_vts_upstream_response_seconds{job="$job"})
+            legend: "{{upstream}}"
+      - type: bargauge
+        title: Upstream 5xx ratio (top 10)
+        description: Share of each upstream's responses that are server errors — ranks the failing backends.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              topk(10,
+                100 *
+                sum by (upstream) (rate(nginx_vts_upstream_responses_total{job="$job", code="5xx"}[5m]))
+                /
+                clamp_min(sum by (upstream) (rate(nginx_vts_upstream_responses_total{job="$job"}[5m])), 1)
+              )
+            instant: true
+            legend: "{{upstream}}"
+
+  - title: Per-host detail
+    panels:
+      - type: timeseries
+        title: Waiting connections per host
+        description: Idle keep-alive connections per host — a steady climb can exhaust worker_connections.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: nginx_connections_waiting{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+
+alerts:
+  - name: NginxConnectionsDropped
+    severity: critical
+    expr: >-
+      sum by (job, instance) (
+        rate(nginx_connections_accepted[5m]) - rate(nginx_connections_handled[5m])
+      ) > 0
+    for: 5m
+    summary: "NGINX {{ $labels.instance }} is dropping connections"
+    why: Dropped connections mean clients are refused before being served — a hard capacity limit, usually worker_connections or file descriptors.
+    investigate: "Open NGINX / Connections & Upstreams, check active vs waiting; inspect `worker_connections`, `worker_rlimit_nofile` and the OS fd limit."
+    runbook: "Raise `worker_connections` and `worker_rlimit_nofile`, increase the systemd `LimitNOFILE`, and reload NGINX; if upstreams are slow, fix them so workers free up."
+    recovery: Clears when accepted and handled rates match again for 5m.
+    false_positives: Counter resets during a reload can momentarily skew the rate; the 5m `for` filters most of these.
+  - name: NginxExporterDown
+    severity: critical
+    expr: nginx_up == 0
+    for: 5m
+    summary: "NGINX target {{ $labels.instance }} is down (nginx_up == 0)"
+    why: The exporter can't reach stub_status — NGINX is down, unreachable, or stub_status is misconfigured. You are blind to the proxy.
+    investigate: "Check the NGINX service and the `/stub_status` location; confirm the exporter container/process is running."
+    runbook: "Restart NGINX or the exporter; verify the `stub_status` location is allowed from the exporter's source IP."
+    recovery: Clears when nginx_up returns to 1.
+    false_positives: Brief blips during a planned restart — the 5m `for` covers normal reloads.
+  - name: NginxUpstreamErrorRatio
+    severity: warning
+    expr: >-
+      100 *
+      sum by (job, upstream) (rate(nginx_vts_upstream_responses_total{code="5xx"}[5m]))
+      /
+      clamp_min(sum by (job, upstream) (rate(nginx_vts_upstream_responses_total[5m])), 1)
+      > 5
+    for: 10m
+    summary: "NGINX upstream {{ $labels.upstream }} returning >5% 5xx"
+    why: A backend behind NGINX is failing a meaningful share of requests, which surfaces to users as errors or retries.
+    investigate: "Compare the failing upstream's members; check the backend service's own health and recent deploys."
+    runbook: "Drain or restart the unhealthy member, roll back the backend deploy, or add capacity."
+    recovery: Clears when the upstream 5xx ratio falls below 5% for 5m.
+    false_positives: Backends where some 5xx is expected under load testing — scope by upstream name.
+
+troubleshooting:
+  - symptom: Dropped connections panel is red but NGINX looks fine
+    cause: A counter reset during reload produced a one-off negative-then-positive rate.
+    action: Widen the panel range; if it self-clears within minutes it was a reload artifact.
+  - symptom: Waiting climbs without bound
+    cause: Slow upstreams holding workers, or keep-alive timeouts too long.
+    action: Check upstream response time; tune `keepalive_timeout` and upstream `keepalive`.
+  - symptom: Upstream panels empty
+    cause: stub_status only — no per-upstream stats.
+    action: Install the VTS module exporter for the upstream rows.
+
+performance: >-
+  Connection gauges are read instantly; rates use a 5m window so accepted/handled
+  counters survive reloads. Series are bounded with `sum by (instance|upstream)`.
+  On large proxy fleets, pre-compute the per-upstream error ratio with a recording
+  rule to keep the bargauge cheap.
+
+customization: >-
+  Set the dropped-connection threshold to exactly 0 in your environment — any
+  sustained drop is actionable. Scope `$instance` to an edge tier to separate
+  public proxies from internal ones, and adjust the 1s slow-upstream threshold to
+  match your latency budget.

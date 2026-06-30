@@ -1,0 +1,240 @@
+# Kubernetes scheduler dashboard.
+# Leads with the two signals an on-call engineer needs about scheduling: how many
+# pods are stuck pending, and how fast the scheduler is placing the ones it can.
+title: Kubernetes / Scheduler
+description: >-
+  Pending pods, scheduling attempt latency (p99), unschedulable rate and scheduling
+  outcomes for the kube-scheduler. Answers "are pods getting placed, and if not is it
+  because the scheduler is slow or because nothing fits?" rather than dumping raw
+  attempt counters.
+datasource: prometheus
+tags: [kubernetes, control-plane, scheduler, scheduling]
+seo_phrase: Kubernetes scheduler Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many pods are pending in the scheduler queue right now?"
+  - "Is the scheduler keeping up (attempt p99 latency)?"
+  - "Are placement failures from unschedulable pods or scheduler errors?"
+  - "What is the end-to-end time from pod creation to scheduled?"
+  - "Is the scheduling throughput high enough for the current churn?"
+
+production_lessons: >-
+  When pods sit in Pending the first question is always **"is it the scheduler or is
+  it capacity?"** — and the answer changes who you wake up. This dashboard separates
+  the two: `result="unschedulable"` means **nothing fits** (a capacity/affinity/taint
+  problem for the cluster-autoscaler or platform team), while `result="error"` and a
+  high attempt latency mean the **scheduler itself** is struggling. The lead row puts
+  pending-pods next to the unschedulable rate so you can tell in five seconds whether
+  to scale nodes or to investigate the scheduler. A slow scheduler is usually a slow
+  API server underneath, so cross-check the API server dashboard before blaming the
+  scheduler.
+
+data_sources:
+  - "`kube-scheduler` metrics endpoint (the `scheduler_pending_pods`,
+    `scheduler_scheduling_attempt_duration_seconds_bucket`,
+    `scheduler_schedule_attempts_total` and
+    `scheduler_pod_scheduling_duration_seconds_bucket` series)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(scheduler_schedule_attempts_total, job)
+    description: Prometheus scrape job for the kube-scheduler targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(scheduler_schedule_attempts_total{job="$job"}, instance)
+    description: Scheduler instance(s); the leader serves traffic in an HA setup.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Scheduling health — read these first
+    panels:
+      - type: stat
+        title: Pending pods
+        description: Pods currently waiting in the scheduler queue (active + backoff + unschedulable).
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10}
+          - {color: red, value: 50}
+        targets:
+          - expr: sum(scheduler_pending_pods{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: pending
+      - type: stat
+        title: Unschedulable rate
+        description: Rate of attempts that found no suitable node. Sustained values mean a capacity, taint or affinity problem.
+        unit: ops
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.1}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(rate(scheduler_schedule_attempts_total{job="$job", instance=~"$instance", result="unschedulable"}[5m])) or vector(0)
+            instant: true
+            legend: unschedulable
+      - type: stat
+        title: Attempt p99 latency
+        description: 99th percentile time for a single scheduling attempt. Rising values mean the scheduler is the bottleneck.
+        unit: s
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.1}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(scheduler_scheduling_attempt_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            instant: true
+            legend: attempt p99
+      - type: stat
+        title: Scheduler error rate
+        description: Rate of attempts that errored (not unschedulable — an actual scheduler/API failure).
+        unit: ops
+        min: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.01}
+          - {color: red, value: 0.1}
+        targets:
+          - expr: sum(rate(scheduler_schedule_attempts_total{job="$job", instance=~"$instance", result="error"}[5m])) or vector(0)
+            instant: true
+            legend: errors
+
+  - title: Latency
+    panels:
+      - type: timeseries
+        title: Scheduling attempt latency
+        description: p50/p99 of a single scheduling cycle (filter + score). The scheduler's own speed.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(scheduler_scheduling_attempt_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: p99
+          - expr: >-
+              histogram_quantile(0.50, sum by (le) (rate(scheduler_scheduling_attempt_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: p50
+      - type: timeseries
+        title: End-to-end pod scheduling latency
+        description: p99 time from a pod entering the queue to being scheduled — what users actually feel as "stuck Pending".
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(scheduler_pod_scheduling_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: e2e p99
+      - type: heatmap
+        title: Attempt latency distribution
+        description: Full distribution of attempt durations — catch a slow tail before it lifts the p99.
+        unit: s
+        targets:
+          - expr: sum by (le) (rate(scheduler_scheduling_attempt_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m]))
+            format: heatmap
+            legend: "{{le}}"
+
+  - title: Throughput and outcomes
+    panels:
+      - type: timeseries
+        title: Schedule attempts by result
+        description: Scheduled vs unschedulable vs error. The shape of this stack is the scheduler's story.
+        unit: ops
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum by (result) (rate(scheduler_schedule_attempts_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{result}}"
+      - type: timeseries
+        title: Pending pods by queue
+        description: Where pending pods sit — active (ready to try), backoff (recently failed), or unschedulable.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum by (queue) (scheduler_pending_pods{job="$job", instance=~"$instance"})
+            legend: "{{queue}}"
+      - type: stat
+        title: Scheduling throughput
+        description: Successfully scheduled pods per second. Compare against your pod churn to size headroom.
+        unit: ops
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(scheduler_schedule_attempts_total{job="$job", instance=~"$instance", result="scheduled"}[5m])) or vector(0)
+            instant: true
+            legend: scheduled/s
+
+alerts:
+  - name: SchedulerPendingPodsHigh
+    severity: warning
+    expr: sum by (job) (scheduler_pending_pods) > 50
+    for: 15m
+    summary: "More than 50 pods pending in the scheduler queue on {{ $labels.job }}"
+    why: A sustained backlog means workloads aren't starting — usually no capacity fits, sometimes the scheduler is stalled.
+    investigate: "Open Kubernetes / Scheduler and check pending-pods-by-queue and the unschedulable rate to tell capacity from scheduler trouble."
+    runbook: "If pods are unschedulable, scale nodes / fix taints/affinity (or check the cluster-autoscaler); if the scheduler is slow or erroring, inspect its logs and API server health."
+    recovery: Clears when pending pods drop below 50 for 5m.
+    false_positives: A large batch/Job submission briefly inflates pending before nodes scale up.
+  - name: SchedulerHighAttemptLatency
+    severity: warning
+    expr: >-
+      histogram_quantile(0.99, sum by (le, job) (rate(scheduler_scheduling_attempt_duration_seconds_bucket[5m]))) > 1
+    for: 10m
+    summary: "Scheduler attempt p99 latency above 1s on {{ $labels.job }}"
+    why: A slow scheduling cycle throttles placement throughput and delays every new pod, independent of capacity.
+    investigate: "Compare attempt latency against API server read p99 — a slow scheduler is usually waiting on a slow API server/etcd."
+    runbook: "Check scheduler CPU and API server latency; reduce scheduling load (fewer custom plugins/large pod specs) or scale control-plane resources."
+    recovery: Clears when attempt p99 falls below 1s for 5m.
+    false_positives: A burst of pods with complex affinity rules can transiently raise p99.
+  - name: SchedulerErrors
+    severity: warning
+    expr: sum by (job) (rate(scheduler_schedule_attempts_total{result="error"}[5m])) > 0.1
+    for: 10m
+    summary: "kube-scheduler is returning scheduling errors on {{ $labels.job }}"
+    why: Errors (distinct from unschedulable) mean the scheduler failed to complete a cycle — often an API/binding failure, not a capacity issue.
+    investigate: "Open the attempts-by-result panel to confirm the error rate and read scheduler logs for the failing plugin or binding error."
+    runbook: "Inspect scheduler logs for bind/preemption failures and API server errors; roll back any recent scheduler config/plugin change."
+    recovery: Clears when the error rate stays below 0.1/s for 5m.
+    false_positives: Transient binding conflicts during heavy preemption are usually retried successfully.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: Wrong `$job`, or only the leader exposes useful metrics in an HA setup.
+    action: "Check `up{job=\"$job\"}`; the active leader serves scheduling, so scope `$instance` to it if followers report zeros."
+  - symptom: Pending pods stays high but unschedulable rate is zero
+    cause: Pods are in backoff after repeated failures rather than truly unschedulable.
+    action: Use the pending-pods-by-queue panel to see the backoff queue, then check the pods' events for the failing predicate.
+  - symptom: e2e scheduling latency dwarfs attempt latency
+    cause: Pods spend most of their time waiting in the queue, not in the scheduling cycle.
+    action: This points at capacity/backoff, not scheduler speed — investigate node availability and autoscaling.
+
+performance: >-
+  All rates use a 5m window (>=4x a 30s scrape). Quantiles aggregate the histogram
+  with `sum by (le)` before `histogram_quantile`. The attempt-latency heatmap is the
+  heaviest panel; narrow the range on very high-churn clusters or pre-aggregate the
+  bucket with a recording rule.
+
+customization: >-
+  Tune the 10/50 pending and 0.1s/1s latency thresholds to your cluster size and SLO.
+  In an HA control plane, scope `$instance` to the current leader to avoid follower
+  zeros. Add a `$result` variable if you want to drill the outcomes row to a single
+  scheduling result.

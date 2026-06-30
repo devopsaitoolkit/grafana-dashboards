@@ -1,0 +1,232 @@
+# Meta-monitoring: is the Mimir/Cortex metrics backend ingesting and serving cleanly?
+uid: mimir-overview
+title: Mimir / Overview
+description: >-
+  Top-level health of a Mimir (or Cortex) cluster: distributor ingestion, ingester
+  in-memory series, request latency and error ratio by route, and tenant count.
+  Answers "is the long-term metrics backend healthy across the write and read path?"
+datasource: prometheus
+tags: [mimir, cortex, tsdb, meta-monitoring]
+seo_phrase: Grafana Mimir Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "What is the sample ingestion rate into the distributors?"
+  - "How many series are the ingesters holding in memory?"
+  - "What fraction of requests are returning 5xx?"
+  - "Where is request latency highest across routes?"
+  - "How many tenants are active?"
+
+production_lessons: >-
+  Mimir is a lot of microservices, and the failure that pages you is almost always
+  on the ingesters or in the request error ratio, not in any single component's CPU.
+  We lead with ingestion rate, ingester memory series and the 5xx ratio because
+  those three answer "are we accepting data and serving it?" in one glance. Ingester
+  memory series is the capacity number that drives replays and OOMs; the 5xx ratio
+  is the SLO; latency by route then tells you which path (push vs query) is hurting.
+
+data_sources:
+  - "`mimir` / `cortex` components exposing the `cortex_distributor_*`,
+    `cortex_ingester_*`, `cortex_request_duration_seconds_*` and
+    `cortex_query_frontend_*` series."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(cortex_ingester_memory_series, cluster)
+    description: Mimir/Cortex cluster label, if your deployment sets one.
+    multi: false
+    includeAll: true
+  - name: job
+    label: Job
+    query: label_values(cortex_request_duration_seconds_count, job)
+    description: Component job (distributor, ingester, query-frontend, ...).
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Backend health — read these first
+    panels:
+      - type: stat
+        title: Samples received per second
+        description: Samples accepted by the distributors — the cluster's effective write throughput.
+        unit: wps
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(cortex_distributor_received_samples_total[5m])) or vector(0)
+            instant: true
+            legend: samples/s
+      - type: stat
+        title: Ingester memory series
+        description: Active series held across all ingesters — the primary capacity and replay-cost driver.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10000000}
+          - {color: red, value: 25000000}
+        targets:
+          - expr: sum(cortex_ingester_memory_series) or vector(0)
+            instant: true
+            legend: series
+      - type: stat
+        title: 5xx error ratio
+        description: Share of all requests returning 5xx — the cluster-wide reliability SLO.
+        unit: percent
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum(rate(cortex_request_duration_seconds_count{status_code=~"5.."}[5m]))
+              / clamp_min(sum(rate(cortex_request_duration_seconds_count[5m])), 1)
+            instant: true
+            legend: 5xx%
+      - type: stat
+        title: Active tenants
+        description: Tenants with series in the ingesters — sudden growth can explain a capacity jump.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: max(cortex_ingester_memory_users) or vector(0)
+            instant: true
+            legend: tenants
+
+  - title: Ingestion
+    panels:
+      - type: timeseries
+        title: Distributor received vs ingester ingested
+        description: Samples in at the distributor versus written by ingesters — a persistent gap flags rejected or de-duplicated samples.
+        unit: wps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(cortex_distributor_received_samples_total[5m]))
+            legend: distributor received
+          - expr: sum(rate(cortex_ingester_ingested_samples_total[5m]))
+            legend: ingester ingested
+      - type: timeseries
+        title: Samples in vs received
+        description: Pre-dedup samples_in versus accepted received — the gap is HA-replica de-duplication doing its job.
+        unit: wps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(cortex_distributor_samples_in_total[5m]))
+            legend: samples in
+          - expr: sum(rate(cortex_distributor_received_samples_total[5m]))
+            legend: received
+
+  - title: Latency & errors
+    panels:
+      - type: timeseries
+        title: Request latency p99 by route
+        description: 99th-percentile request duration per route — isolates which API path is slow.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: histogram_quantile(0.99, sum by (le, route) (rate(cortex_request_duration_seconds_bucket{job=~"$job"}[5m])))
+            legend: "{{route}}"
+      - type: timeseries
+        title: 5xx ratio by route
+        description: Error share per route — separates a single broken endpoint from a cluster-wide problem.
+        unit: percent
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum by (route) (rate(cortex_request_duration_seconds_count{job=~"$job", status_code=~"5.."}[5m]))
+              / clamp_min(sum by (route) (rate(cortex_request_duration_seconds_count{job=~"$job"}[5m])), 1)
+            legend: "{{route}}"
+
+  - title: Ingester capacity
+    panels:
+      - type: timeseries
+        title: Ingester memory series by instance
+        description: Per-ingester series count — an outlier means uneven sharding and an OOM risk on that pod.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (cortex_ingester_memory_series)
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Tenants per ingester
+        description: Tenant count over time — onboarding spikes here precede capacity pressure.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (cortex_ingester_memory_users)
+            legend: "{{instance}}"
+
+alerts:
+  - name: MimirHighErrorRatio
+    severity: critical
+    expr: >-
+      100 * sum(rate(cortex_request_duration_seconds_count{status_code=~"5.."}[5m]))
+      / clamp_min(sum(rate(cortex_request_duration_seconds_count[5m])), 1) > 5
+    for: 10m
+    summary: "Mimir cluster 5xx ratio above 5%"
+    why: A high server-error ratio means writes are being rejected or queries are failing across the backend.
+    investigate: "Open Mimir / Overview, use 5xx ratio by route to find the failing path, then drill into that component's logs."
+    runbook: "Scale the saturated component (ingesters for writes, queriers for reads); check object storage availability."
+    recovery: Clears when the 5xx ratio drops below 5% for 5m.
+    false_positives: A brief restart or rollout can spike errors transiently — the 10m for absorbs it.
+  - name: MimirIngesterSeriesHigh
+    severity: warning
+    expr: sum(cortex_ingester_memory_series) > 25000000
+    for: 30m
+    summary: "Mimir ingesters above 25M in-memory series"
+    why: High in-memory series drive ingester memory and make replays slow; unchecked growth ends in OOM kills.
+    investigate: "Check per-ingester series for a hot shard and per-tenant series for a cardinality offender."
+    runbook: "Scale out ingesters, enforce per-tenant series limits, or have the offending tenant reduce label cardinality."
+    recovery: Clears when in-memory series drop below 25M for 5m.
+    false_positives: Large, well-provisioned clusters — tune the threshold to your ingester memory.
+  - name: MimirRequestLatencyHigh
+    severity: warning
+    expr: >-
+      histogram_quantile(0.99, sum by (le, route) (rate(cortex_request_duration_seconds_bucket[5m]))) > 2
+    for: 10m
+    summary: "Mimir route {{ $labels.route }} p99 latency above 2s"
+    why: Sustained high latency on a route degrades writes or queries and can cascade into timeouts upstream.
+    investigate: "Identify the route, then check the owning component's CPU, GC and object-storage latency."
+    runbook: "Scale the component, tune query limits, or add caching for read-path routes."
+    recovery: Clears when p99 falls below 2s for 5m.
+    false_positives: Heavy ad-hoc queries can spike read-path latency briefly.
+
+troubleshooting:
+  - symptom: Error-ratio panels show NaN
+    cause: No requests in the window, so the denominator is zero.
+    action: The clamp_min guard prevents the alert from firing; widen the time range to populate the panel.
+  - symptom: Distributor received far exceeds ingester ingested
+    cause: Ingesters are rejecting samples (limits, out-of-order) or are unhealthy.
+    action: Check ingester logs and per-tenant limits; look for out-of-order or sample-limit errors.
+  - symptom: Latency p99 spiky on read routes
+    cause: Expensive queries hitting the store-gateway / object storage.
+    action: Enable query-frontend caching and inspect slow-query logs.
+
+performance: >-
+  All latency panels read native `cortex_request_duration_seconds_bucket` histograms
+  aggregated by `le` plus one grouping label, which bounds series. Error ratios use
+  `clamp_min(..., 1)` on the denominator so empty windows never divide by zero.
+
+customization: >-
+  Tune the 25M ingester-series and 5% error thresholds to your provisioning and SLO.
+  Use `$job` to scope to a single component, and `$cluster` if your labels carry one.
+  Lower the latency alert threshold for latency-sensitive read paths.

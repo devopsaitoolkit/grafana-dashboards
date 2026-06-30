@@ -1,0 +1,266 @@
+# NGINX traffic, errors and upstream latency from the VTS exporter.
+title: NGINX / Requests & Latency
+description: >-
+  Request rate, HTTP status-code mix, 5xx error ratio and upstream response
+  time for NGINX scraped via the VTS exporter. Answers "are we serving errors or
+  serving them slowly, and which upstream is to blame?" rather than just drawing
+  a connection counter.
+datasource: prometheus
+tags: [nginx, web, vts, errors, latency]
+seo_phrase: NGINX requests and latency Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "What is the request rate right now and is it trending up?"
+  - "What share of responses are 5xx, and on which virtual host?"
+  - "How slow is the 95th-percentile upstream response time?"
+  - "Which upstream is returning the most 5xx?"
+  - "Are 4xx spikes a client problem or a broken release?"
+
+production_lessons: >-
+  A flat request-rate graph tells you nothing about whether users are happy. The
+  signal that pages you is the **5xx ratio** and the **tail latency** of the
+  upstreams behind NGINX, so this dashboard leads with both. The most common
+  incident pattern is a single upstream going slow or unhealthy while overall
+  request rate looks normal — averages hide it, which is why we surface the p95
+  of upstream response time and break errors down by `code` and `upstream`. The
+  stub_status exporter cannot see status codes or upstreams; this dashboard
+  assumes the VTS module exporter, and degrades gracefully to a total rate if you
+  only run stub_status.
+
+data_sources:
+  - "`nginx-prometheus-exporter` with the **VTS** module enabled (the
+    `nginx_vts_server_requests_total{code}`, `nginx_vts_upstream_responses_total`
+    and `nginx_vts_upstream_response_seconds` series). Plain stub_status only
+    exposes `nginx_http_requests_total` / `nginx_up` and cannot break down by
+    status code or upstream — install the VTS module for this dashboard."
+  - "VTS exposes a synthetic `code=\"total\"` series; the per-class codes are
+    `1xx`/`2xx`/`3xx`/`4xx`/`5xx`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(nginx_vts_server_requests_total, job)
+    description: Prometheus scrape job for your NGINX VTS exporter targets.
+    multi: false
+    includeAll: false
+  - name: host
+    label: Virtual host
+    query: label_values(nginx_vts_server_requests_total{job="$job"}, host)
+    description: NGINX server-block host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Service health — read these first
+    panels:
+      - type: stat
+        title: Request rate
+        description: Total requests per second across the selected virtual hosts.
+        unit: reqps
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              sum(rate(nginx_vts_server_requests_total{job="$job", host=~"$host", code="total"}[5m])) or vector(0)
+            instant: true
+            legend: requests
+      - type: stat
+        title: 5xx error ratio
+        description: Share of responses that are server errors. The number that decides whether to page.
+        unit: percent
+        min: 0
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 *
+              sum(rate(nginx_vts_server_requests_total{job="$job", host=~"$host", code="5xx"}[5m]))
+              /
+              clamp_min(sum(rate(nginx_vts_server_requests_total{job="$job", host=~"$host", code="total"}[5m])), 1)
+              or vector(0)
+            instant: true
+            legend: 5xx ratio
+      - type: stat
+        title: Upstream response p95
+        description: 95th percentile of sampled upstream response time. VTS reports an average, so we take the tail with quantile_over_time.
+        unit: s
+        decimals: 3
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.3}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              max(quantile_over_time(0.95, nginx_vts_upstream_response_seconds{job="$job"}[5m])) or vector(0)
+            instant: true
+            legend: p95
+      - type: stat
+        title: 4xx error ratio
+        description: Share of client-error responses — a spike often means a broken release or a bad client, not a server fault.
+        unit: percent
+        min: 0
+        decimals: 2
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 20}
+        targets:
+          - expr: >-
+              100 *
+              sum(rate(nginx_vts_server_requests_total{job="$job", host=~"$host", code="4xx"}[5m]))
+              /
+              clamp_min(sum(rate(nginx_vts_server_requests_total{job="$job", host=~"$host", code="total"}[5m])), 1)
+              or vector(0)
+            instant: true
+            legend: 4xx ratio
+
+  - title: Status code breakdown
+    panels:
+      - type: timeseries
+        title: Requests by status class
+        description: Request rate split by HTTP status class. A growing red band is a server-side regression.
+        unit: reqps
+        min: 0
+        stacking: normal
+        fillOpacity: 40
+        legend: table
+        targets:
+          - expr: >-
+              sum by (code) (rate(nginx_vts_server_requests_total{job="$job", host=~"$host", code=~"[1-5]xx"}[5m]))
+            legend: "{{code}}"
+      - type: timeseries
+        title: 5xx rate by virtual host
+        description: Per-host server-error rate — isolates which server block is failing.
+        unit: reqps
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              sum by (host) (rate(nginx_vts_server_requests_total{job="$job", host=~"$host", code="5xx"}[5m]))
+            legend: "{{host}}"
+
+  - title: Upstreams — where the latency lives
+    panels:
+      - type: timeseries
+        title: Upstream response time
+        description: Per-upstream response time reported by VTS. Watch for one backend pulling away from the pack.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              max by (upstream) (nginx_vts_upstream_response_seconds{job="$job"})
+            legend: "{{upstream}}"
+      - type: bargauge
+        title: Upstream 5xx ratio (top 10)
+        description: Share of each upstream's responses that are 5xx — ranks the unhealthy backends.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              topk(10,
+                100 *
+                sum by (upstream) (rate(nginx_vts_upstream_responses_total{job="$job", code="5xx"}[5m]))
+                /
+                clamp_min(sum by (upstream) (rate(nginx_vts_upstream_responses_total{job="$job"}[5m])), 1)
+              )
+            instant: true
+            legend: "{{upstream}}"
+
+  - title: Traffic trend
+    panels:
+      - type: timeseries
+        title: Request rate by virtual host
+        description: Per-host throughput — capacity-planning and noisy-neighbour context for the headline rate.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              sum by (host) (rate(nginx_vts_server_requests_total{job="$job", host=~"$host", code="total"}[5m]))
+            legend: "{{host}}"
+
+alerts:
+  - name: NginxHigh5xxRatio
+    severity: critical
+    expr: >-
+      100 *
+      sum by (job, host) (rate(nginx_vts_server_requests_total{code="5xx"}[5m]))
+      /
+      clamp_min(sum by (job, host) (rate(nginx_vts_server_requests_total{code="total"}[5m])), 1)
+      > 5
+    for: 5m
+    summary: "NGINX host {{ $labels.host }} serving >5% 5xx"
+    why: A sustained server-error ratio means users are getting failures — this is a customer-facing outage signal.
+    investigate: "Open NGINX / Requests & Latency, scope to the host, then check the upstream 5xx ratio and response-time panels to find the failing backend."
+    runbook: "Identify the failing upstream; check the backend's own health/logs, roll back the most recent deploy, or drain the unhealthy member."
+    recovery: Clears when the 5xx ratio falls below 5% for 5m.
+    false_positives: Synthetic load tests that intentionally hit error paths — scope the rule by host or raise the threshold.
+  - name: NginxUpstreamSlow
+    severity: warning
+    expr: max by (job, upstream) (quantile_over_time(0.95, nginx_vts_upstream_response_seconds[5m])) > 1
+    for: 10m
+    summary: "NGINX upstream {{ $labels.upstream }} p95 response > 1s"
+    why: Slow upstream responses inflate user-facing latency even when error rate looks fine.
+    investigate: "Compare the slow upstream against its peers; check the backend service's own latency and saturation dashboards."
+    runbook: "Scale or restart the slow backend, add capacity, or check for a downstream dependency (DB/cache) that is the real bottleneck."
+    recovery: Clears when upstream p95 drops below 1s for 5m.
+    false_positives: Endpoints that are legitimately slow (reports, exports) — give them a dedicated upstream and threshold.
+  - name: NginxHigh4xxRatio
+    severity: warning
+    expr: >-
+      100 *
+      sum by (job, host) (rate(nginx_vts_server_requests_total{code="4xx"}[5m]))
+      /
+      clamp_min(sum by (job, host) (rate(nginx_vts_server_requests_total{code="total"}[5m])), 1)
+      > 20
+    for: 10m
+    summary: "NGINX host {{ $labels.host }} serving >20% 4xx"
+    why: A jump in client errors often signals a broken release (wrong routes), an auth outage, or an abusive client.
+    investigate: "Break 4xx down by URI in your access logs; correlate the spike with the last deploy time."
+    runbook: "If it followed a deploy, roll back; if it is a single client/IP, rate-limit or block it."
+    recovery: Clears when the 4xx ratio falls below 20% for 5m.
+    false_positives: APIs where 401/404 are part of normal flow (probes, cache validation) run a higher baseline.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: VTS module not enabled, or wrong `$job`.
+    action: "Confirm `nginx_vts_server_requests_total` exists in Explore; if only `nginx_http_requests_total` is present, install the VTS module."
+  - symptom: 5xx ratio is empty but traffic is flowing
+    cause: The `code="total"` series is missing from your VTS build.
+    action: Replace the denominator with `sum(rate(...{code=~"[1-5]xx"}[5m]))` to sum the per-class counters instead.
+  - symptom: Upstream panels are blank
+    cause: No upstream blocks defined, or upstream stats disabled in the VTS config.
+    action: Enable `vhost_traffic_status_zone` on the upstream blocks and reload NGINX.
+
+performance: >-
+  All rates use a 5m window (≥4× a typical 15s scrape) so counters survive a
+  reload. Aggregations use `sum/max by (host|upstream)` to keep series bounded.
+  The p95 uses `quantile_over_time` over the gauge VTS exports; on very large
+  fleets pre-aggregate the upstream series with a recording rule.
+
+customization: >-
+  Tune the 5%/20% error thresholds to your SLOs. To track a single application,
+  scope `$host` to its server-block names. If you run a true histogram exporter,
+  swap the `quantile_over_time` p95 for `histogram_quantile(0.95, ...)` on the
+  bucket series for a more accurate tail.

@@ -1,0 +1,290 @@
+title: Node Exporter / Host USE Method
+description: >-
+  Brendan Gregg's USE method (Utilisation, Saturation, Errors) for a single Linux
+  host across CPU, memory, disk and network. The canonical one-host deep dive: pick
+  an instance and read down the three columns to find which resource is exhausted and
+  whether it is saturating or erroring.
+datasource: prometheus
+tags: [linux, node-exporter, use-method, saturation, single-host]
+seo_phrase: Linux USE method Grafana dashboard
+refresh: 30s
+time_from: now-3h
+
+questions:
+  - "Which resource on this host is the most utilised right now?"
+  - "Is any resource saturated — run queue deep, memory exhausted, disk full?"
+  - "Are the NICs reporting errors or drops?"
+  - "Is the host healthy enough to take more load, or is it the bottleneck?"
+
+production_lessons: >-
+  Utilisation alone lies: a host at 60% CPU with a run queue twice the core count is
+  already dropping latency, while a host at 95% CPU with an empty run queue is just
+  busy and fine. The USE method exists because **saturation and errors page you, not
+  utilisation** — so this dashboard always shows the saturation signal next to the
+  utilisation it explains. The single most common "mystery slowness" root cause we
+  catch here is silent NIC errors/drops climbing while every utilisation gauge looks
+  green.
+
+data_sources:
+  - "`node_exporter` on the selected host. Utilisation/saturation use
+    `node_cpu_seconds_total`, `node_memory_*`, `node_filesystem_*`, `node_load1` and
+    `node_network_*_bytes_total`."
+  - "Errors use the standard node_exporter NIC counters `node_network_receive_errs_total`,
+    `node_network_transmit_errs_total` and `node_network_receive_drop_total`, plus the
+    `node_filesystem_readonly` flag (all shipped by default)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job for your node_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Host
+    query: label_values(node_uname_info{job="$job"}, instance)
+    description: The single host to inspect.
+    multi: false
+    includeAll: false
+
+rows:
+  - title: USE at a glance
+    panels:
+      - type: gauge
+        title: CPU utilisation
+        description: Non-idle CPU across all cores on this host.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * (1 - avg(rate(node_cpu_seconds_total{job="$job", instance="$instance", mode="idle"}[5m])))
+            instant: true
+            legend: cpu
+      - type: gauge
+        title: Memory utilisation
+        description: Used memory as a share of total (MemAvailable accounts for cache).
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * (1 - node_memory_MemAvailable_bytes{job="$job", instance="$instance"} / node_memory_MemTotal_bytes{job="$job", instance="$instance"})
+            instant: true
+            legend: mem
+      - type: gauge
+        title: Disk utilisation (worst mount)
+        description: Fullest real filesystem on the host.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              max(100 * (1 - node_filesystem_avail_bytes{job="$job", instance="$instance", fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}
+              / node_filesystem_size_bytes{job="$job", instance="$instance", fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}))
+            instant: true
+            legend: disk
+      - type: stat
+        title: Load saturation (load1 / cores)
+        description: Run-queue depth relative to cores. Above 1 means tasks are waiting.
+        unit: short
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 2}
+        targets:
+          - expr: >-
+              node_load1{job="$job", instance="$instance"}
+              / count without (cpu, mode) (node_cpu_seconds_total{job="$job", instance="$instance", mode="idle"})
+            instant: true
+            legend: sat
+
+  - title: Utilisation
+    panels:
+      - type: timeseries
+        title: CPU by mode
+        description: How the CPU time is spent — user, system, iowait, steal.
+        unit: percent
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: >-
+              100 * avg by (mode) (rate(node_cpu_seconds_total{job="$job", instance="$instance", mode!="idle"}[5m]))
+            legend: "{{mode}}"
+      - type: timeseries
+        title: Memory used vs total
+        description: Working memory against installed RAM.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: node_memory_MemTotal_bytes{job="$job", instance="$instance"} - node_memory_MemAvailable_bytes{job="$job", instance="$instance"}
+            legend: used
+          - expr: node_memory_MemTotal_bytes{job="$job", instance="$instance"}
+            legend: total
+      - type: timeseries
+        title: Filesystem used by mount
+        description: Per-mount fill level; spot the volume filling fastest.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        targets:
+          - expr: >-
+              100 * (1 - node_filesystem_avail_bytes{job="$job", instance="$instance", fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}
+              / node_filesystem_size_bytes{job="$job", instance="$instance", fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"})
+            legend: "{{mountpoint}}"
+      - type: timeseries
+        title: Network throughput
+        description: Per-interface receive and transmit bandwidth.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_network_receive_bytes_total{job="$job", instance="$instance", device!~"lo"}[5m])
+            legend: "{{device}} rx"
+          - expr: rate(node_network_transmit_bytes_total{job="$job", instance="$instance", device!~"lo"}[5m])
+            legend: "{{device}} tx"
+
+  - title: Saturation
+    panels:
+      - type: timeseries
+        title: Load average vs cores
+        description: 1m load against the core count. Sustained excess is a backlog.
+        unit: short
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: node_load1{job="$job", instance="$instance"}
+            legend: load1
+          - expr: count without (cpu, mode) (node_cpu_seconds_total{job="$job", instance="$instance", mode="idle"})
+            legend: cores
+      - type: timeseries
+        title: Memory headroom (available)
+        description: Bytes available before the OOM killer wakes up. Falling = saturating.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: node_memory_MemAvailable_bytes{job="$job", instance="$instance"}
+            legend: available
+      - type: timeseries
+        title: iowait — disk pressure on the CPU
+        description: CPU time blocked on storage. Rising iowait means the disks are the bottleneck.
+        unit: percent
+        min: 0
+        legend: table
+        targets:
+          - expr: 100 * avg(rate(node_cpu_seconds_total{job="$job", instance="$instance", mode="iowait"}[5m]))
+            legend: iowait
+
+  - title: Errors
+    panels:
+      - type: timeseries
+        title: NIC receive errors & drops
+        description: Inbound packet errors and drops — silent killers behind "random" latency.
+        unit: pps
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_network_receive_errs_total{job="$job", instance="$instance", device!~"lo"}[5m])
+            legend: "{{device}} errs"
+          - expr: rate(node_network_receive_drop_total{job="$job", instance="$instance", device!~"lo"}[5m])
+            legend: "{{device}} drops"
+      - type: timeseries
+        title: NIC transmit errors
+        description: Outbound packet errors per interface.
+        unit: pps
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_network_transmit_errs_total{job="$job", instance="$instance", device!~"lo"}[5m])
+            legend: "{{device}} errs"
+      - type: stat
+        title: Read-only filesystems
+        description: Mounts the kernel remounted read-only — almost always a failing disk.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(node_filesystem_readonly{job="$job", instance="$instance", fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"} == 1) or vector(0)
+            instant: true
+            legend: ro
+
+alerts:
+  - name: HostRunQueueSaturated
+    severity: warning
+    expr: >-
+      node_load1 / count without (cpu, mode) (node_cpu_seconds_total{mode="idle"}) > 2
+    for: 15m
+    summary: "{{ $labels.instance }} run queue is {{ printf \"%.1f\" $value }}× cores"
+    why: A run queue sustained above 2× the core count means tasks spend more time waiting than running — latency climbs even though CPU may not read 100%.
+    investigate: "Open Host USE Method for the instance; check whether iowait is high (storage bound) or CPU modes are saturated (compute bound)."
+    runbook: "Shed load, scale out, or move the heaviest process; if iowait dominates, the disks — not the CPU — are the limit."
+    recovery: Clears when the ratio falls below 2 for 5m.
+    false_positives: Brief bursts during batch jobs or boot — the 15m window absorbs spikes.
+  - name: HostMemoryExhausted
+    severity: warning
+    expr: 100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 92
+    for: 10m
+    summary: "{{ $labels.instance }} memory {{ printf \"%.0f\" $value }}% used"
+    why: Available memory near zero forces swapping or OOM kills, which terminate processes without warning.
+    investigate: "Check the memory headroom panel for a leak (steady decline) versus a legitimate spike."
+    runbook: "Restart or cap the top RSS process, add RAM, or rebalance workloads."
+    recovery: Clears when available memory recovers for 5m.
+    false_positives: Page cache is already excluded by MemAvailable, so a sustained breach is genuine pressure.
+  - name: HostNICErrors
+    severity: warning
+    expr: rate(node_network_receive_errs_total{device!~"lo"}[5m]) > 1
+    for: 10m
+    summary: "{{ $labels.instance }} NIC {{ $labels.device }} receiving errors"
+    why: NIC errors cause retransmits and tail-latency that no utilisation gauge reveals — a classic "everything looks green but the app is slow" cause.
+    investigate: "Correlate with the NIC errors panel; check cabling, the switch port, and driver/ring-buffer settings."
+    runbook: "Replace the cable/SFP, move to another port, or tune ring buffers (ethtool -G); failing hardware should be swapped."
+    recovery: Clears when the error rate returns to zero for 5m.
+    false_positives: A one-off burst during link renegotiation; the 10m window filters transients.
+
+troubleshooting:
+  - symptom: Load saturation gauge reads 0 or N/A
+    cause: "The core count collapsed because a recording rule dropped the `cpu` label."
+    action: Point the dashboard at raw node_exporter series, not a downsampled copy.
+  - symptom: Memory utilisation seems high but the host is fine
+    cause: Confusing "used" with "not cached".
+    action: This panel uses MemAvailable, which already excludes reclaimable cache — trust it.
+  - symptom: Error panels are always empty
+    cause: NIC error counters exist but the device filter excludes the active interface.
+    action: Remove or adjust the `device!~"lo"` selector to match your interface naming.
+
+performance: >-
+  Scoping to a single `$instance` keeps every query to a handful of series, so this
+  board is cheap even on huge fleets. Rates use a 5m window (≥4× a 15s scrape). The
+  only multi-series panels (per-mount, per-device) are naturally bounded by the host's
+  hardware.
+
+customization: >-
+  Adjust the 80/95 utilisation and 2× saturation thresholds to your SLOs. Add disk I/O
+  saturation if you scrape `node_disk_*`. To compare two hosts side by side, duplicate
+  the row and pin a second instance, or switch `$instance` to multi-select.

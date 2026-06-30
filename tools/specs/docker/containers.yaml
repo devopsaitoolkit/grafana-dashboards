@@ -1,0 +1,202 @@
+title: Docker / Container Inventory
+description: >-
+  Inventory and health of the containers on a Docker host: how many are running versus
+  stopped, which ones have restarted recently (a restart loop is the most common silent
+  failure), and a sortable table of per-container CPU and memory. Combines Docker engine
+  state counts with cAdvisor per-container detail.
+datasource: prometheus
+tags: [docker, containers, inventory, restarts, health]
+seo_phrase: Docker container inventory Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many containers are running versus stopped right now?"
+  - "Which containers have restarted in the last hour?"
+  - "Is any container stuck in a crash/restart loop?"
+  - "What is each container consuming in CPU and memory?"
+
+production_lessons: >-
+  The failure mode Docker hides best is the **restart loop**: a container that crashes
+  and is restarted every few seconds shows up as "running" in `docker ps` and burns CPU
+  while serving nothing. We surface a recently-restarted count and a restart table up
+  front, derived from `container_start_time_seconds` changing, because by the time a
+  human notices "it's flapping" you have usually already lost an hour. The running/
+  stopped split from the engine gives the quick census; the cAdvisor table tells you
+  what each survivor is actually costing you.
+
+data_sources:
+  - "`Docker engine metrics` endpoint for `engine_daemon_container_states_containers`
+    (labelled `state=running|paused|stopped`). Enable with `metrics-addr` in the daemon
+    config and scrape it as a target."
+  - "`cAdvisor` for per-container restart detection (`container_start_time_seconds`),
+    CPU (`container_cpu_usage_seconds_total`), memory (`container_memory_working_set_bytes`)
+    and liveness (`container_last_seen`)."
+
+templating:
+  - name: instance
+    label: Host
+    query: label_values(machine_cpu_cores, instance)
+    description: cAdvisor instance (Docker host) for the per-container panels.
+    multi: false
+    includeAll: false
+
+rows:
+  - title: Census & restarts — read these first
+    panels:
+      - type: stat
+        title: Running containers
+        description: Containers cAdvisor saw in the last scrape on this host.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: count(count by (name) (container_last_seen{instance="$instance", name!=""})) or vector(0)
+            instant: true
+            legend: running
+      - type: stat
+        title: Stopped containers (engine)
+        description: Containers the Docker daemon reports as stopped.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+        targets:
+          - expr: sum(engine_daemon_container_states_containers{instance=~"$instance.*", state="stopped"}) or vector(0)
+            instant: true
+            legend: stopped
+      - type: stat
+        title: Recently restarted (1h)
+        description: Containers whose start time changed in the last hour — your flapping suspects.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: count(changes(container_start_time_seconds{instance="$instance", name!=""}[1h]) > 0) or vector(0)
+            instant: true
+            legend: restarted
+      - type: stat
+        title: Total CPU used (cores)
+        description: Sum of CPU cores used by all containers on the host.
+        unit: short
+        decimals: 2
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(container_cpu_usage_seconds_total{instance="$instance", name!=""}[5m])) or vector(0)
+            instant: true
+            legend: cores
+
+  - title: Restart-prone containers
+    panels:
+      - type: table
+        title: Restarts in the last hour
+        description: Containers ranked by restart count — anything above a couple is a crash loop.
+        unit: short
+        filterable: true
+        targets:
+          - expr: topk(15, changes(container_start_time_seconds{instance="$instance", name!=""}[1h]))
+            instant: true
+            format: table
+            legend: "{{name}}"
+      - type: timeseries
+        title: Container restarts over time
+        description: When restarts happened — line them up against deploys and OOM events.
+        unit: short
+        min: 0
+        drawStyle: bars
+        fillOpacity: 50
+        legend: table
+        targets:
+          - expr: topk(10, changes(container_start_time_seconds{instance="$instance", name!=""}[15m]))
+            legend: "{{name}}"
+
+  - title: Per-container resource use
+    panels:
+      - type: table
+        title: CPU & memory by container
+        description: Sortable roster of what each container is consuming.
+        unit: short
+        filterable: true
+        sortBy:
+          - {displayName: cores, desc: true}
+        targets:
+          - expr: sum by (name) (rate(container_cpu_usage_seconds_total{instance="$instance", name!=""}[5m]))
+            instant: true
+            format: table
+            legend: "{{name}}"
+          - expr: sum by (name) (container_memory_working_set_bytes{instance="$instance", name!=""})
+            instant: true
+            format: table
+            legend: "{{name}}"
+      - type: timeseries
+        title: Container liveness gaps
+        description: Time since each container was last seen — a rising line means it vanished from cAdvisor.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: topk(10, time() - container_last_seen{instance="$instance", name!=""})
+            legend: "{{name}}"
+
+alerts:
+  - name: ContainerRestartLoop
+    severity: critical
+    expr: changes(container_start_time_seconds{name!=""}[15m]) > 3
+    for: 5m
+    summary: "Container {{ $labels.name }} restarted {{ $value }} times in 15m"
+    why: A container restarting repeatedly is crash-looping — it serves no traffic while consuming CPU and polluting logs, and it stays invisible in `docker ps`.
+    investigate: "Open Docker / Container Inventory, find it in the restart table, then read its logs (docker logs --tail=200) and check for an OOM kill."
+    runbook: "Fix the crash cause (bad config, failing dependency, OOM); roll back the last deploy if the loop started with it."
+    recovery: Clears when restarts stop for 15m.
+    false_positives: A deliberate rolling restart or a job container that exits by design — exclude those names.
+  - name: ContainerStopped
+    severity: warning
+    expr: engine_daemon_container_states_containers{state="stopped"} > 0
+    for: 10m
+    summary: "{{ $labels.instance }} has {{ $value }} stopped container(s)"
+    why: A container that exited and was not restarted may be a failed service the orchestrator gave up on.
+    investigate: "List exited containers (docker ps -a --filter status=exited) and inspect their exit codes."
+    runbook: "Restart or remove the container; if it exits immediately, fix the root cause before restarting."
+    recovery: Clears when no stopped containers remain for 10m.
+    false_positives: One-shot/init containers that exit successfully — filter them out of the alert.
+  - name: ContainerVanished
+    severity: warning
+    expr: time() - container_last_seen{name!=""} > 300
+    for: 5m
+    summary: "Container {{ $labels.name }} not seen by cAdvisor for 5m"
+    why: A container cAdvisor stops seeing has usually been killed or the cgroup removed — but a dashboard scoped to live containers would never show its absence.
+    investigate: "Confirm whether the container is gone (docker ps) or cAdvisor lost the cgroup."
+    runbook: "If the container should be running, restart it; if cAdvisor is stale, restart cAdvisor."
+    recovery: Clears when the container is seen again.
+    false_positives: Intentionally removed containers; scope the alert to services that must stay up.
+
+troubleshooting:
+  - symptom: Stopped count is always 0
+    cause: The Docker engine metrics endpoint is not scraped (only cAdvisor is).
+    action: Enable the daemon `metrics-addr` and add it as a Prometheus target; the cAdvisor panels work without it.
+  - symptom: Restart table is empty during a known crash loop
+    cause: "`container_start_time_seconds` is missing because cAdvisor restarted and reset its view."
+    action: Widen the lookback or confirm cAdvisor has been up longer than the window.
+  - symptom: Running count disagrees with `docker ps`
+    cause: cAdvisor counts cgroups it can see; short-lived containers may be missed between scrapes.
+    action: Cross-check with the engine `state=running` series for the daemon's own count.
+
+performance: >-
+  `changes()` over a 1h window is the heaviest expression here; it is bounded by
+  `topk` so only the worst offenders render. Counts use `count by (name)` to stay at
+  one series per container. Scope `$instance` to one host on dense fleets.
+
+customization: >-
+  Tune the restart thresholds (3 in 15m) to your deploy cadence. Add a `name` filter to
+  watch a single service. If you do not run the engine metrics endpoint, drop the
+  stopped-count stat and derive everything from cAdvisor.

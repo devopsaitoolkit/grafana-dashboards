@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1404" height="1392" viewBox="0 0 1404 1392" font-family="Inter, Roboto, Arial, sans-serif">
+<rect width="1404" height="1392" fill="#0b0c0e"/>
+<text x="16" y="30" fill="#d8d9da" font-size="16" font-weight="600">Kubernetes / Cluster Overview</text>
+<text x="16" y="48" fill="#8e8e8e" font-size="11">Schematic layout · datasource: prometheus · uid: kubernetes-cluster-overview</text>
+<rect x="16" y="56" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="75" fill="#d8d9da" font-size="12" font-weight="600">▾ Cluster health — read these first</text>
+<rect x="18" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="88" width="172" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="106" fill="#d8d9da" font-size="11" font-weight="500">Nodes Ready</text>
+<text x="26" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="104" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="194" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="194" y="88" width="172" height="3" fill="#3274d9" rx="2"/>
+<text x="202" y="106" fill="#d8d9da" font-size="11" font-weight="500">Nodes NotReady</text>
+<text x="202" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="280" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="370" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="370" y="88" width="172" height="3" fill="#3274d9" rx="2"/>
+<text x="378" y="106" fill="#d8d9da" font-size="11" font-weight="500">Pods Running</text>
+<text x="378" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="456" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="546" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="88" width="172" height="3" fill="#3274d9" rx="2"/>
+<text x="554" y="106" fill="#d8d9da" font-size="11" font-weight="500">Pods Pending</text>
+<text x="554" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="632" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="722" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="722" y="88" width="172" height="3" fill="#3274d9" rx="2"/>
+<text x="730" y="106" fill="#d8d9da" font-size="11" font-weight="500">Pods Failed</text>
+<text x="730" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="808" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="898" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="898" y="88" width="172" height="3" fill="#73bf69" rx="2"/>
+<text x="906" y="106" fill="#d8d9da" font-size="11" font-weight="500">CPU committed (requests / allocatable)</text>
+<text x="906" y="120" fill="#8e8e8e" font-size="9">gauge · percent</text>
+<text x="984" y="222" fill="#73bf69" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="18" y="328" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="328" width="172" height="3" fill="#73bf69" rx="2"/>
+<text x="26" y="346" fill="#d8d9da" font-size="11" font-weight="500">Memory committed (requests / allocatable)</text>
+<text x="26" y="360" fill="#8e8e8e" font-size="9">gauge · percent</text>
+<text x="104" y="462" fill="#73bf69" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="16" y="566" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="585" fill="#d8d9da" font-size="12" font-weight="600">▾ Pod phases over time</text>
+<rect x="18" y="598" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="598" width="524" height="3" fill="#73bf69" rx="2"/>
+<text x="26" y="616" fill="#d8d9da" font-size="11" font-weight="500">Pods by phase (now)</text>
+<text x="26" y="630" fill="#8e8e8e" font-size="9">piechart · short</text>
+<rect x="28" y="716" width="252" height="5" fill="#73bf69" opacity="0.70" rx="2"/>
+<rect x="28" y="725" width="328" height="5" fill="#73bf69" opacity="0.55" rx="2"/>
+<rect x="28" y="734" width="403" height="5" fill="#73bf69" opacity="0.40" rx="2"/>
+<rect x="546" y="598" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="598" width="524" height="3" fill="#3274d9" rx="2"/>
+<text x="554" y="616" fill="#d8d9da" font-size="11" font-weight="500">Pending and Failed pods</text>
+<text x="554" y="630" fill="#8e8e8e" font-size="9">timeseries · short</text>
+<polyline points="556,728 640,714 724,728 808,714 892,728 976,714 1060,728" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="16" y="836" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="855" fill="#d8d9da" font-size="12" font-weight="600">▾ Resource commitment</text>
+<rect x="18" y="868" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="868" width="524" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="886" fill="#d8d9da" font-size="11" font-weight="500">CPU cores — requests vs limits vs allocata</text>
+<text x="26" y="900" fill="#8e8e8e" font-size="9">timeseries · short</text>
+<polyline points="28,998 112,984 196,998 280,984 364,998 448,984 532,998" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="546" y="868" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="868" width="524" height="3" fill="#3274d9" rx="2"/>
+<text x="554" y="886" fill="#d8d9da" font-size="11" font-weight="500">Memory — requests vs limits vs allocatable</text>
+<text x="554" y="900" fill="#8e8e8e" font-size="9">timeseries · bytes</text>
+<polyline points="556,998 640,984 724,998 808,984 892,998 976,984 1060,998" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="16" y="1106" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="1125" fill="#d8d9da" font-size="12" font-weight="600">▾ Stability</text>
+<rect x="18" y="1138" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="1138" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="1156" fill="#d8d9da" font-size="11" font-weight="500">Container restarts (1h)</text>
+<text x="26" y="1170" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="192" y="1272" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="370" y="1138" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="370" y="1138" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="378" y="1156" fill="#d8d9da" font-size="11" font-weight="500">Containers crash-looping</text>
+<text x="378" y="1170" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="544" y="1272" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="722" y="1138" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="722" y="1138" width="348" height="3" fill="#8e8e8e" rx="2"/>
+<text x="730" y="1156" fill="#d8d9da" font-size="11" font-weight="500">Top restarting pods (1h)</text>
+<text x="730" y="1170" fill="#8e8e8e" font-size="9">table · short</text>
+<rect x="732" y="1256" width="164" height="5" fill="#8e8e8e" opacity="0.70" rx="2"/>
+<rect x="732" y="1265" width="213" height="5" fill="#8e8e8e" opacity="0.55" rx="2"/>
+<rect x="732" y="1274" width="262" height="5" fill="#8e8e8e" opacity="0.40" rx="2"/>
+<rect x="1088" y="56" width="284" height="1320" fill="#181b1f" stroke="#2c3235" rx="4"/>
+<text x="1100" y="78" fill="#d8d9da" font-size="12" font-weight="700">What to look for</text>
+<circle cx="1106" cy="94" r="4" fill="#3274d9"/>
+<text x="1118" y="98" fill="#8e8e8e" font-size="10">Are all nodes Ready, or is the control</text>
+<text x="1118" y="111" fill="#8e8e8e" font-size="10">plane hiding a down node?</text>
+<circle cx="1106" cy="128" r="4" fill="#3274d9"/>
+<text x="1118" y="132" fill="#8e8e8e" font-size="10">How many pods are Pending or Failed</text>
+<text x="1118" y="145" fill="#8e8e8e" font-size="10">instead of Running right now?</text>
+<circle cx="1106" cy="162" r="4" fill="#3274d9"/>
+<text x="1118" y="166" fill="#8e8e8e" font-size="10">How much CPU and memory has the</text>
+<text x="1118" y="179" fill="#8e8e8e" font-size="10">scheduler committed versus what nodes</text>
+<text x="1118" y="192" fill="#8e8e8e" font-size="10">can allocate?</text>
+<circle cx="1106" cy="209" r="4" fill="#3274d9"/>
+<text x="1118" y="213" fill="#8e8e8e" font-size="10">Is anything crash-looping or restarting</text>
+<text x="1118" y="226" fill="#8e8e8e" font-size="10">across the whole cluster?</text>
+<circle cx="1106" cy="243" r="4" fill="#73bf69"/>
+<text x="1118" y="247" fill="#8e8e8e" font-size="10">Green: within expected range</text>
+<circle cx="1106" cy="264" r="4" fill="#f2cc0c"/>
+<text x="1118" y="268" fill="#8e8e8e" font-size="10">Yellow: investigate — approaching a</text>
+<text x="1118" y="281" fill="#8e8e8e" font-size="10">limit</text>
+<circle cx="1106" cy="298" r="4" fill="#e02f44"/>
+<text x="1118" y="302" fill="#8e8e8e" font-size="10">Red: act now — threshold breached</text>
+</svg>

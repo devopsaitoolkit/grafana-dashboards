@@ -1,0 +1,236 @@
+# Nova service & agent health. Leads with the two signals that decide whether the
+# cloud can place instances at all: control-plane agents down and instances in ERROR.
+title: OpenStack / Nova Service & Agent Health
+description: >-
+  Control-plane health for OpenStack Nova as seen by openstack-exporter: which
+  nova-compute, nova-conductor and nova-scheduler agents are up, how many
+  instances are wedged in ERROR or BUILD, and how deep the build queue is.
+  Answers "can the cloud still launch and run instances right now?" rather than
+  drawing raw counters.
+datasource: prometheus
+tags: [openstack, nova, compute, agent-state, openstack-exporter]
+seo_phrase: OpenStack Nova Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are any nova-compute / conductor / scheduler agents down right now?"
+  - "How many instances are stuck in ERROR or BUILD?"
+  - "Is the scheduler keeping up, or is the build queue (current workload) backing up?"
+  - "Which compute hosts have been disabled or have stopped reporting?"
+  - "Is instance state churning (mass reboots, failed migrations)?"
+
+production_lessons: >-
+  In a Nova outage the question is never "what's the CPU doing" — it is "can the
+  control plane still place and run work". A single down nova-conductor or
+  nova-scheduler stops *all* scheduling cloud-wide while every compute node still
+  looks healthy, so this dashboard leads with **agent state** and **ERROR
+  instances** instead of utilisation. The second hard-won lesson: a growing
+  `current_workload` (the per-host build/resize queue) is the earliest signal that
+  the scheduler is overwhelmed or an image/volume backend is slow — it climbs
+  minutes before users start opening tickets about instances stuck in BUILD.
+
+data_sources:
+  - "`openstack-exporter` (github.com/openstack-exporter/openstack-exporter)
+    scraping the Nova API. Provides `openstack_nova_agent_state`,
+    `openstack_nova_server_status`, `openstack_nova_current_workload` and the
+    per-hypervisor capacity gauges."
+  - "Run one exporter per cloud (or use `--multi-cloud` and the `cloud` label) and
+    scrape it from Prometheus on a 30–60s interval; the Nova API calls it makes are
+    list-heavy, so do not scrape faster."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_nova_agent_state, job)
+    description: Prometheus scrape job for your openstack-exporter target.
+    multi: false
+    includeAll: false
+  - name: cloud
+    label: Cloud
+    query: label_values(openstack_nova_agent_state{job="$job"}, cloud)
+    description: Cloud/region when running the exporter in multi-cloud mode; All if single-cloud.
+    multi: false
+    includeAll: true
+  - name: hostname
+    label: Hypervisor
+    query: label_values(openstack_nova_agent_state{job="$job", cloud=~"$cloud"}, hostname)
+    description: Compute host(s) to scope agent and workload panels to.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Control-plane health — read these first
+    panels:
+      - type: stat
+        title: Agents down (enabled)
+        description: >-
+          Administratively enabled nova-* agents whose state is reporting down.
+          Anything above zero means scheduling or compute is degraded.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(
+                openstack_nova_agent_state{job="$job", cloud=~"$cloud", adminState="enabled"} == 0
+              ) or vector(0)
+            instant: true
+            legend: down
+      - type: stat
+        title: Instances in ERROR
+        description: Servers Nova reports in the ERROR state — failed builds, migrations or reboots.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status="ERROR"}) or vector(0)
+            instant: true
+            legend: error
+      - type: stat
+        title: Compute agents up
+        description: Fraction of nova-compute agents currently reporting up across the fleet.
+        unit: percentunit
+        min: 0
+        max: 1
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 0.9}
+          - {color: green, value: 0.99}
+        targets:
+          - expr: >-
+              avg(openstack_nova_agent_state{job="$job", cloud=~"$cloud", service="nova-compute"}) or vector(0)
+            instant: true
+            legend: up
+      - type: stat
+        title: Build queue (current workload)
+        description: >-
+          Sum of per-host current_workload — instances actively building, resizing
+          or migrating. A rising number means the scheduler/back-end is falling behind.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10}
+          - {color: red, value: 30}
+        targets:
+          - expr: >-
+              sum(openstack_nova_current_workload{job="$job", cloud=~"$cloud", hostname=~"$hostname"}) or vector(0)
+            instant: true
+            legend: workload
+
+  - title: Agent state by service
+    panels:
+      - type: state-timeline
+        title: Agent up/down over time
+        description: Per-service availability. Look for synchronized dips (control-plane) vs single hosts (hardware).
+        unit: short
+        mappings:
+          - {type: value, options: {"0": {text: down, color: red}, "1": {text: up, color: green}}}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: >-
+              min by (service) (openstack_nova_agent_state{job="$job", cloud=~"$cloud", hostname=~"$hostname"})
+            legend: "{{service}}"
+      - type: table
+        title: Down / disabled agents
+        description: Agents not up, or administratively disabled (often a host in maintenance).
+        unit: short
+        filterable: true
+        targets:
+          - expr: >-
+              openstack_nova_agent_state{job="$job", cloud=~"$cloud", hostname=~"$hostname"} == 0
+              or openstack_nova_agent_state{job="$job", cloud=~"$cloud", hostname=~"$hostname", adminState="disabled"}
+            instant: true
+            format: table
+            legend: "{{hostname}}"
+
+  - title: Instance states & throughput
+    panels:
+      - type: timeseries
+        title: Instances by status
+        description: Count of servers in each Nova status. ERROR climbing or BUILD not draining is the alert.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: count by (status) (openstack_nova_server_status{job="$job", cloud=~"$cloud"})
+            legend: "{{status}}"
+      - type: timeseries
+        title: Build / migrate workload per host
+        description: Per-hypervisor current_workload. A single host pinned high points at a slow local back-end.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: openstack_nova_current_workload{job="$job", cloud=~"$cloud", hostname=~"$hostname"} > 0
+            legend: "{{hostname}}"
+
+alerts:
+  - name: NovaComputeAgentDown
+    severity: critical
+    expr: openstack_nova_agent_state{adminState="enabled"} == 0
+    for: 5m
+    summary: "Nova agent {{ $labels.service }} on {{ $labels.hostname }} is down"
+    why: An enabled nova-compute/conductor/scheduler agent that stops reporting cannot place or run instances; a down conductor or scheduler degrades the whole cloud.
+    investigate: "Open Nova Service & Agent Health, scope to the host; check `systemctl status` for the service and the agent logs for AMQP/RabbitMQ disconnects."
+    runbook: "Restart the service; if it is RabbitMQ/conductor-wide, check the message bus and database before chasing individual computes. Re-enable the host once it reports up."
+    recovery: Clears when the agent reports state up (value 1) again for 5m.
+    false_positives: Planned maintenance — disable the host (adminState=disabled) so it is excluded by this rule.
+  - name: NovaInstancesStuckInError
+    severity: warning
+    expr: count(openstack_nova_server_status{status="ERROR"}) > 5
+    for: 15m
+    summary: "{{ $value }} Nova instances in ERROR state"
+    why: A growing pool of ERROR instances usually means failed scheduling, a full hypervisor, or a sick image/volume back-end — and each one is a customer-visible failure.
+    investigate: "Sort the instances-by-status table; `openstack server show` a sample to read the fault; correlate with build-queue and capacity dashboards."
+    runbook: "Resolve the underlying cause (capacity, Glance/Cinder, placement), then hard-reboot or rebuild affected instances; delete abandoned ones to clear the count."
+    recovery: Clears when fewer than 5 instances are in ERROR for 5m.
+    false_positives: A bulk test that intentionally creates failing instances; raise the threshold or scope by tenant.
+  - name: NovaBuildQueueBacklog
+    severity: warning
+    expr: sum(openstack_nova_current_workload) > 30
+    for: 10m
+    summary: "Nova build/migrate queue backed up ({{ $value }} in flight)"
+    why: A sustained high current_workload means new instances sit in BUILD for minutes — the scheduler, image cache or volume back-end cannot keep up.
+    investigate: "Check which hosts carry the workload (per-host panel); inspect nova-scheduler logs and Glance/Cinder latency."
+    runbook: "Throttle bulk provisioning, add scheduler workers, or fix the slow back-end; verify hosts have free vCPU/RAM on the capacity dashboard."
+    recovery: Clears when total in-flight workload falls below 30 for 5m.
+    false_positives: A planned mass-launch or rolling live-migration — expected to drain on its own.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: Wrong `$job`, or openstack-exporter cannot reach the Nova API.
+    action: "Check `up{job=\"$job\"}` and the exporter logs; confirm the keystone/nova endpoints and credentials in the exporter config."
+  - symptom: Agents-up gauge sits below 100% but no host is actually down
+    cause: Disabled hosts (maintenance) report state 0 yet are intentionally offline.
+    action: "Filter on adminState; this dashboard's down-count already excludes adminState=disabled."
+  - symptom: ERROR count never drops
+    cause: Abandoned instances left in ERROR are never cleaned up.
+    action: "Delete or rebuild stale ERROR instances; the metric counts every existing server, healthy or not."
+
+performance: >-
+  `openstack_nova_server_status` emits one series per instance, so `count by
+  (status)` is the cheap way to chart states — never graph the raw series on large
+  clouds. Agent and workload panels aggregate `by (service)`/`by (hostname)` to keep
+  cardinality at one series per host. Scrape the exporter no faster than 30s: each
+  scrape lists servers and services through the Nova API.
+
+customization: >-
+  Tune the build-queue thresholds (10/30) to your normal provisioning rate, and the
+  ERROR thresholds to your fleet size. To watch one tenant, add a `tenant_id` selector
+  to the server_status expressions. If you run a single cloud, the `cloud` variable
+  collapses to All and adds no filtering — leave it for portability.

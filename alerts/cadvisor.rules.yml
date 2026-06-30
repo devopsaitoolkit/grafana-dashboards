@@ -1,0 +1,81 @@
+# Alerting rules for the cadvisor dashboards.
+# Generated from tools/specs/cadvisor/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: cadvisor.rules
+  rules:
+  - alert: ContainerMemoryOOMRisk
+    expr: container_memory_working_set_bytes{name!=""} / (container_spec_memory_limit_bytes{name!=""}
+      > 0) > 0.95
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Container {{ $labels.name }} at {{ printf "%.0f" $value }}% of memory limit
+      description: Above 95% of the limit the container is one allocation from an OOM kill, which restarts
+        it and drops in-flight requests.
+      runbook: Raise the memory limit or fix the leak; if it is already restarting, capture a heap profile
+        before it dies again.
+      dashboard: dashboards/cadvisor/container-detail.json
+  - alert: ContainerThrottledHard
+    expr: sum by (name, instance) (rate(container_cpu_cfs_throttled_periods_total{name!=""}[5m])) / clamp_min(sum
+      by (name, instance) (rate(container_cpu_cfs_periods_total{name!=""}[5m])), 1) > 0.5
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Container {{ $labels.name }} throttled {{ printf "%.0f" $value }}% of periods
+      description: Throttling above 50% of periods means the CFS quota is the dominant limit on the workload
+        — latency will be poor regardless of host headroom.
+      runbook: Increase the CPU quota or remove the limit if the host can absorb it.
+      dashboard: dashboards/cadvisor/container-detail.json
+  - alert: ContainerFilesystemNearFull
+    expr: sum by (name, instance) (container_fs_usage_bytes{name!=""}) / clamp_min(sum by (name, instance)
+      (container_fs_limit_bytes{name!=""}), 1) > 0.9
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Container {{ $labels.name }} filesystem {{ printf "%.0f" $value }}% full
+      description: A full container filesystem causes write failures that crash the app or corrupt local
+        state.
+      runbook: Mount a volume for the growing path, add log rotation, or raise the storage limit.
+      dashboard: dashboards/cadvisor/container-detail.json
+  - alert: ContainerCPUThrottlingHigh
+    expr: sum by (name, instance) (rate(container_cpu_cfs_throttled_periods_total{name!=""}[5m])) / clamp_min(sum
+      by (name, instance) (rate(container_cpu_cfs_periods_total{name!=""}[5m])), 1) > 0.25
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Container {{ $labels.name }} throttled {{ printf "%.0f" $value }}% of periods
+      description: A throttled container is capped below the CPU it is asking for, so requests queue and
+        tail latency rises even though host CPU may look fine.
+      runbook: Raise the container's CPU limit/quota, or scale out so each replica needs less; if the
+        limit is intentional, confirm the SLA still holds.
+      dashboard: dashboards/cadvisor/container-overview.json
+  - alert: ContainerMemoryNearLimit
+    expr: container_memory_working_set_bytes{name!=""} / (container_spec_memory_limit_bytes{name!=""}
+      > 0) > 0.9
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Container {{ $labels.name }} at {{ printf "%.0f" $value }}% of its memory limit
+      description: A container above 90% of its memory limit is one allocation away from an OOM kill,
+        which restarts it and drops in-flight work.
+      runbook: Raise the memory limit, fix the leak, or reduce the workload's footprint.
+      dashboard: dashboards/cadvisor/container-overview.json
+  - alert: ContainerNetworkErrors
+    expr: sum by (name, instance) (rate(container_network_receive_errors_total{name!=""}[5m])) > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Container {{ $labels.name }} receiving network errors
+      description: Container NIC errors point at an overloaded bridge, a saturated host NIC, or a misbehaving
+        overlay network — and cause retransmits the app sees as latency.
+      runbook: Check the Docker bridge/overlay health and host NIC; restart the container's network namespace
+        if it is wedged.
+      dashboard: dashboards/cadvisor/container-overview.json

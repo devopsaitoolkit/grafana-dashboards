@@ -1,0 +1,234 @@
+# Meta-monitoring: is the Prometheus server that watches everything else healthy?
+uid: prometheus-overview
+title: Prometheus / Overview
+description: >-
+  Headline health of a Prometheus server monitoring itself: head-block
+  cardinality, sample ingestion, rule-engine timing, query latency and process
+  memory. Answers "is the server that watches everything else keeping up?" before
+  you trust any other dashboard it renders.
+datasource: prometheus
+tags: [prometheus, meta-monitoring, tsdb, self]
+seo_phrase: Prometheus self-monitoring Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is Prometheus evaluating every rule group on time, or skipping iterations?"
+  - "How fast is head-block cardinality (active series) growing?"
+  - "Is query latency or rule-eval latency creeping up?"
+  - "How much memory is the process using relative to recent baseline?"
+  - "Is Prometheus successfully scraping itself (the canary for everything else)?"
+
+production_lessons: >-
+  A blind Prometheus is the worst kind of outage: dashboards stay green because
+  nothing is updating them. The two signals that predict a meltdown are missed
+  rule-group iterations (the engine is behind and alerts are now stale) and
+  unbounded head-series growth (a cardinality bomb that ends in an OOM kill). We
+  lead with those plus resident memory, then break out ingestion, rule and query
+  timing. Average CPU tells you little here — the head block and the rule engine
+  are what fall over first.
+
+data_sources:
+  - "`prometheus` exposing its own `/metrics` (the `prometheus_tsdb_*`,
+    `prometheus_rule_*`, `prometheus_engine_*` and `process_*` series)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(prometheus_tsdb_head_series, job)
+    description: Scrape job under which Prometheus scrapes itself.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(prometheus_tsdb_head_series{job="$job"}, instance)
+    description: Prometheus server instance(s); supports multi-select for HA pairs.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Health — read these first
+    panels:
+      - type: stat
+        title: Active series (head block)
+        description: Distinct time series held in the in-memory head block — the primary cardinality and memory driver.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 2000000}
+          - {color: red, value: 5000000}
+        targets:
+          - expr: sum(prometheus_tsdb_head_series{job="$job", instance=~"$instance"})
+            instant: true
+            legend: series
+      - type: stat
+        title: Missed rule iterations
+        description: Rule-group evaluations skipped because the engine ran behind. Anything sustained above zero means alerts are now stale.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(increase(prometheus_rule_group_iterations_missed_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: missed
+      - type: stat
+        title: Process memory
+        description: Resident set size of the Prometheus process — compare to recent baseline; a steady climb tracks cardinality.
+        unit: bytes
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 8589934592}
+          - {color: red, value: 17179869184}
+        targets:
+          - expr: max(process_resident_memory_bytes{job="$job", instance=~"$instance"})
+            instant: true
+            legend: rss
+      - type: stat
+        title: Self-scrape up
+        description: Whether Prometheus is currently scraping its own target — the canary for the entire pipeline.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: min(up{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: up
+
+  - title: Ingestion & cardinality
+    panels:
+      - type: timeseries
+        title: Samples appended per second
+        description: Rate of samples written into the head block — your effective ingestion throughput.
+        unit: wps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (rate(prometheus_tsdb_head_samples_appended_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Head series & chunks
+        description: In-memory series and chunks over time — a steep, monotonic climb signals a cardinality leak.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (prometheus_tsdb_head_series{job="$job", instance=~"$instance"})
+            legend: "{{instance}} series"
+          - expr: sum by (instance) (prometheus_tsdb_head_chunks{job="$job", instance=~"$instance"})
+            legend: "{{instance}} chunks"
+
+  - title: Rule & query engine
+    panels:
+      - type: timeseries
+        title: Mean rule evaluation duration
+        description: Average wall-clock per rule evaluation. When this approaches the group interval, iterations start getting missed.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              sum(rate(prometheus_rule_evaluation_duration_seconds_sum{job="$job", instance=~"$instance"}[5m]))
+              /
+              sum(rate(prometheus_rule_evaluation_duration_seconds_count{job="$job", instance=~"$instance"}[5m]))
+            legend: mean eval
+      - type: timeseries
+        title: Query duration p99 by slice
+        description: 99th-percentile PromQL engine timing per execution slice — rising inner_eval points at expensive queries or dashboards.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: max by (slice) (prometheus_engine_query_duration_seconds{job="$job", instance=~"$instance", quantile="0.99"})
+            legend: "{{slice}}"
+
+  - title: Process resources
+    panels:
+      - type: timeseries
+        title: Resident memory
+        description: Process RSS trend — the line that precedes an OOM kill on a cardinality runaway.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: process_resident_memory_bytes{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Self-scrape availability
+        description: up for the Prometheus self-target — gaps here mean the server lost sight of itself.
+        unit: short
+        min: 0
+        max: 1
+        legend: table
+        drawStyle: bars
+        fillOpacity: 40
+        targets:
+          - expr: up{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+
+alerts:
+  - name: PrometheusRuleEvaluationsMissed
+    severity: critical
+    expr: increase(prometheus_rule_group_iterations_missed_total[5m]) > 0
+    for: 10m
+    summary: "Prometheus {{ $labels.instance }} is missing rule-group iterations"
+    why: Missed iterations mean alerting and recording rules are not evaluating on schedule, so alerts can be silently late or stale.
+    investigate: "Open Prometheus / Overview, check mean rule evaluation duration vs the group interval and head-series growth."
+    runbook: "Reduce per-group rule cost or split heavy groups; lower cardinality feeding the rules; give the server more CPU/memory."
+    recovery: Clears when no iterations are missed for 5m.
+    false_positives: A one-off spike during reload or a slow restart can miss a single iteration — the 10m for filters that out.
+  - name: PrometheusHeadSeriesHigh
+    severity: warning
+    expr: sum by (instance, job) (prometheus_tsdb_head_series) > 5000000
+    for: 30m
+    summary: "Prometheus {{ $labels.instance }} head series above 5M"
+    why: Head cardinality drives memory; unbounded growth ends in an OOM kill that takes down all monitoring.
+    investigate: "Find the offending metric with topk on series count by __name__; identify a recently added high-cardinality label."
+    runbook: "Drop or aggregate the high-cardinality label via metric_relabel_configs; add a sample/label limit to the noisy job."
+    recovery: Clears when head series drops back below 5M for 5m.
+    false_positives: Large but healthy installations — tune the threshold to your provisioned memory.
+  - name: PrometheusSelfScrapeDown
+    severity: critical
+    expr: up{job=~".*prometheus.*"} == 0
+    for: 5m
+    summary: "Prometheus {{ $labels.instance }} is not scraping itself"
+    why: If Prometheus cannot scrape its own metrics, its self-health is invisible and the process may be wedged.
+    investigate: "Check the process is running and the self-scrape target's endpoint is reachable from the server."
+    runbook: "Restart or replace the instance; confirm the scrape config still targets 127.0.0.1 on the listen port."
+    recovery: Clears when the self-scrape returns up for 5m.
+    false_positives: Planned restarts and config reloads cause brief gaps — covered by the 5m for.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: Prometheus is not scraping its own /metrics, or $job does not match.
+    action: "Check `up{job=\"$job\"}` in Explore and confirm a self-scrape job exists."
+  - symptom: Missed iterations climbing but eval duration looks fine
+    cause: A few heavy groups dominate while the average stays low.
+    action: Break out duration per rule group and split or thin the slow groups.
+  - symptom: Memory climbs but series count is flat
+    cause: Long query/range load or churn (high series turnover) rather than raw cardinality.
+    action: Check query duration p99 and head chunk churn; throttle expensive dashboards.
+
+performance: >-
+  All rates use a 5m window (>=4x a typical scrape) so counters survive a restart.
+  Aggregations use `sum by (instance)` to keep one series per server. The query
+  p99 panel reads the engine summary directly rather than a histogram, so it adds
+  no quantile computation cost.
+
+customization: >-
+  Tune the 5M head-series and 8/16 GiB memory thresholds to your provisioned
+  capacity. For HA pairs, leave `$instance` on All to compare both replicas side
+  by side. Swap the 5m rate window for 1m if you need faster reaction at the cost
+  of more noise.

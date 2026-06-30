@@ -1,0 +1,223 @@
+title: OpenStack / Keystone — Usage & Growth
+description: >-
+  How fast the identity estate is growing: projects, users and groups over time,
+  hour-over-hour and week-over-week growth, and an inventory breakdown table.
+  Answers "are we onboarding (or leaking) tenants faster than capacity planning
+  assumed?" for capacity and audit, not just a point-in-time count.
+datasource: prometheus
+tags: [openstack, keystone, identity, capacity, openstack-exporter]
+seo_phrase: OpenStack Keystone usage growth Grafana dashboard
+refresh: 5m
+time_from: now-30d
+
+questions:
+  - "How many projects/users/groups exist now, and how fast is each growing?"
+  - "What was net growth over the last 24h and the last 7d?"
+  - "Is growth steady, or did a single onboarding event spike the count?"
+  - "Is the directory shrinking anywhere (de-provisioning or a broken sync)?"
+
+production_lessons: >-
+  Identity inventory grows quietly until a capacity assumption breaks — Fernet key
+  rotation cost, role-assignment table size, and per-project quota accounting all
+  scale with the directory, not with traffic. Tracking the *rate* of project and
+  user creation is what lets capacity planning stay ahead of the curve, and it is
+  also the cheapest tripwire for a runaway automation that creates projects in a
+  loop. Lead with current totals plus 24h/7d growth so a human can see at a glance
+  whether the slope is healthy.
+
+data_sources:
+  - "`openstack-exporter` with the `identity` collector — the gauges
+    `openstack_identity_projects`, `openstack_identity_users`,
+    `openstack_identity_groups` and `openstack_identity_domains`."
+  - "Growth panels use `delta()`/`offset` over the gauge values, so they need
+    Prometheus retention at least as long as the comparison window (≥7d for the
+    weekly panels). The standard exporter exposes totals only, not per-domain
+    segmentation; the breakdown table below is by resource type."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_identity_users, job)
+    description: Prometheus scrape job for your openstack-exporter target(s).
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Exporter
+    query: label_values(openstack_identity_users{job="$job"}, instance)
+    description: openstack-exporter instance(s) — one per cloud/region.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Totals & growth — read these first
+    panels:
+      - type: stat
+        title: Projects
+        description: Current total Keystone projects.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(openstack_identity_projects{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: projects
+      - type: stat
+        title: Users
+        description: Current total Keystone users.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(openstack_identity_users{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: users
+      - type: stat
+        title: Net users +24h
+        description: Net change in user count over the last 24 hours. Negative means more de-provisioned than created.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 0}
+          - {color: green, value: 1}
+        targets:
+          - expr: >-
+              (sum(openstack_identity_users{job="$job", instance=~"$instance"})
+               - sum(openstack_identity_users{job="$job", instance=~"$instance"} offset 1d)) or vector(0)
+            instant: true
+            legend: users 24h
+      - type: stat
+        title: Net projects +7d
+        description: Net change in project count over the last 7 days — the capacity-planning number.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 0}
+          - {color: green, value: 1}
+        targets:
+          - expr: >-
+              (sum(openstack_identity_projects{job="$job", instance=~"$instance"})
+               - sum(openstack_identity_projects{job="$job", instance=~"$instance"} offset 7d)) or vector(0)
+            instant: true
+            legend: projects 7d
+
+  - title: Growth trends
+    panels:
+      - type: timeseries
+        title: Inventory over time
+        description: Projects, users and groups trended together over the selected range. Watch the slope, not the absolute value.
+        unit: short
+        min: 0
+        legend: table
+        legend_calcs: [first, last, max]
+        targets:
+          - expr: sum(openstack_identity_projects{job="$job", instance=~"$instance"})
+            legend: projects
+          - expr: sum(openstack_identity_users{job="$job", instance=~"$instance"})
+            legend: users
+          - expr: sum(openstack_identity_groups{job="$job", instance=~"$instance"})
+            legend: groups
+      - type: timeseries
+        title: Daily creation rate
+        description: New projects and users per day (positive bars) — sustained spikes are onboarding events or runaway automation.
+        unit: short
+        legend: table
+        drawStyle: bars
+        fillOpacity: 40
+        targets:
+          - expr: delta(sum(openstack_identity_projects{job="$job", instance=~"$instance"})[1d:1h])
+            legend: projects/day
+          - expr: delta(sum(openstack_identity_users{job="$job", instance=~"$instance"})[1d:1h])
+            legend: users/day
+
+  - title: Inventory breakdown
+    panels:
+      - type: bargauge
+        title: Identity objects by type
+        description: Relative size of each identity object class — a quick sense of where the directory's weight sits.
+        unit: short
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(openstack_identity_projects{job="$job", instance=~"$instance"})
+            instant: true
+            legend: projects
+          - expr: sum(openstack_identity_users{job="$job", instance=~"$instance"})
+            instant: true
+            legend: users
+          - expr: sum(openstack_identity_groups{job="$job", instance=~"$instance"})
+            instant: true
+            legend: groups
+          - expr: sum(openstack_identity_domains{job="$job", instance=~"$instance"})
+            instant: true
+            legend: domains
+      - type: stat
+        title: Users per project
+        description: Average users per project — a rough density metric for role-assignment and quota sizing.
+        unit: short
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              sum(openstack_identity_users{job="$job", instance=~"$instance"})
+              / clamp_min(sum(openstack_identity_projects{job="$job", instance=~"$instance"}), 1)
+            instant: true
+            legend: users/project
+
+alerts:
+  - name: KeystoneProjectGrowthSpike
+    severity: warning
+    expr: >-
+      (sum(openstack_identity_projects) - sum(openstack_identity_projects offset 1h)) > 50
+    for: 5m
+    summary: "Keystone created >50 projects in the last hour"
+    why: A burst of project creation is either a large planned onboarding or a runaway automation loop; both can exhaust quota-accounting and role-assignment capacity if unnoticed.
+    investigate: "Open OpenStack / Keystone — Usage & Growth, check the daily-creation panel, and correlate with the automation/onboarding pipeline that calls the projects API."
+    runbook: "If unplanned, pause the offending automation and clean up the orphaned projects; if planned, confirm quotas and control-plane capacity were sized for the new tenants."
+    recovery: Clears once hourly project creation falls back below 50.
+    false_positives: Genuine bulk onboarding events — silence the rule during scheduled migrations or raise the threshold to your largest expected batch.
+  - name: KeystoneInventoryStale
+    severity: info
+    expr: >-
+      delta(sum(openstack_identity_users)[6h:1h]) == 0 and sum(openstack_identity_users) > 0
+    for: 6h
+    summary: "Keystone user count unchanged for 6h"
+    why: On an active cloud some churn is expected; a perfectly flat count for hours can mean the exporter is serving a cached/stale value or the sync stopped.
+    investigate: "Check exporter scrape freshness and the identity sync job's last successful run."
+    runbook: "Restart the exporter or the sync job; verify the service account still has list permissions."
+    recovery: Clears as soon as the inventory changes again.
+    false_positives: Genuinely quiet clouds (lab/staging) with no onboarding — disable this informational rule there.
+
+troubleshooting:
+  - symptom: Growth panels show "No data" beyond a few days
+    cause: Prometheus retention is shorter than the offset window (e.g. 7d offset on 3d retention).
+    action: Increase retention or shorten the comparison windows to fit your retention.
+  - symptom: Net deltas look jagged or negative briefly
+    cause: A scrape gap makes `offset`/`delta` straddle a missing sample.
+    action: Use a slightly longer step on the daily panels; ensure the exporter is scraped reliably.
+  - symptom: Users-per-project is enormous
+    cause: Projects scraped as zero (permissions) while users are non-zero, so the ratio divides by the `clamp_min` floor.
+    action: Grant the exporter account list rights on projects across all domains.
+
+performance: >-
+  Gauges are low-cardinality, so even a 30-day default range is cheap. The
+  `offset`/`delta` panels are the only expensive part; they require retention to
+  cover the window. Prefer a 5m refresh — inventory does not change second to
+  second and slower refresh keeps subquery cost down.
+
+customization: >-
+  Adjust the 50-projects/hour alert to your largest legitimate onboarding batch.
+  If you run a per-domain-aware exporter build, add `by (domain_id)` to the
+  inventory queries and turn the breakdown into a true per-domain table. Switch
+  the default range to `now-90d` for quarterly capacity reviews.

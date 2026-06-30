@@ -1,0 +1,248 @@
+# PostgreSQL connection management. Leads with saturation against max_connections and
+# the idle-in-transaction count, the two numbers that decide whether the server is
+# about to start refusing clients.
+uid: postgres-connections
+title: PostgreSQL / Connections
+description: >-
+  Connection-pool health for PostgreSQL via postgres_exporter: saturation against
+  max_connections, backends per database, sessions by state, idle-in-transaction
+  backends and recovery conflicts. Answers "do we have connection headroom, and where
+  are the connections going?".
+datasource: prometheus
+tags: [postgres, database, postgres-exporter, connections]
+seo_phrase: PostgreSQL connections Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How close is each instance to max_connections?"
+  - "How many backends are idle-in-transaction and wasting slots?"
+  - "Which database is using the most connections?"
+  - "How are connections split across active, idle and idle-in-transaction?"
+  - "Are recovery conflicts terminating queries on standbys?"
+
+production_lessons: >-
+  PostgreSQL has no built-in connection pool, so every application connection is a real
+  backend process competing for max_connections. The failure mode is abrupt: at the
+  limit the server refuses new connections and the whole application errors at once,
+  with CPU and memory looking healthy. This dashboard leads with **saturation** and the
+  **idle-in-transaction** count because idle backends consume slots while doing nothing,
+  and a top-N-by-database view tells you which service to throttle. The fix is almost
+  always a pooler (PgBouncer) plus smaller per-app pools — not a higher max_connections.
+
+data_sources:
+  - "`postgres_exporter` with the `pg_stat_activity` collector (the
+    `pg_stat_database_numbackends`, `pg_stat_activity_count`,
+    `pg_settings_max_connections` and `pg_stat_database_conflicts` series)."
+
+templating:
+  - name: instance
+    label: Instance
+    query: label_values(pg_up, instance)
+    description: PostgreSQL server(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+  - name: datname
+    label: Database
+    query: label_values(pg_stat_database_numbackends{instance=~"$instance"}, datname)
+    description: Database(s) for the per-database backend panels.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Saturation — read these first
+    panels:
+      - type: gauge
+        title: Connection saturation
+        description: Worst instance's backends as a percentage of its max_connections. At 100% the server refuses clients.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(
+                100 * sum by (instance) (pg_stat_database_numbackends{instance=~"$instance"})
+                / on (instance) pg_settings_max_connections{instance=~"$instance"}
+              ) or vector(0)
+            instant: true
+            legend: saturation
+      - type: stat
+        title: Idle in transaction
+        description: Backends holding an open transaction while idle — slots wasted and locks held.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 20}
+        targets:
+          - expr: sum(pg_stat_activity_count{instance=~"$instance", state="idle in transaction"}) or vector(0)
+            instant: true
+            legend: idle-in-txn
+      - type: stat
+        title: Total backends
+        description: Server-side connections in use across the selected instances.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 200}
+          - {color: red, value: 500}
+        targets:
+          - expr: sum(pg_stat_database_numbackends{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: backends
+      - type: stat
+        title: Connection headroom
+        description: Free connection slots remaining on the tightest instance before max_connections.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 20}
+          - {color: green, value: 100}
+        targets:
+          - expr: >-
+              min(
+                pg_settings_max_connections{instance=~"$instance"}
+                - on (instance) sum by (instance) (pg_stat_database_numbackends{instance=~"$instance"})
+              ) or vector(0)
+            instant: true
+            legend: headroom
+
+  - title: Where the connections go
+    panels:
+      - type: bargauge
+        title: Backends per database (top 10)
+        description: Which databases hold the most connections — the candidates to pool or throttle.
+        unit: short
+        orientation: horizontal
+        targets:
+          - expr: topk(10, pg_stat_database_numbackends{instance=~"$instance", datname=~"$datname"})
+            instant: true
+            legend: "{{datname}}"
+      - type: piechart
+        title: Sessions by state
+        description: Current split of backends across active, idle and idle-in-transaction.
+        unit: short
+        pieType: donut
+        targets:
+          - expr: sum by (state) (pg_stat_activity_count{instance=~"$instance"})
+            instant: true
+            legend: "{{state}}"
+
+  - title: Trends
+    panels:
+      - type: timeseries
+        title: Backends vs max_connections
+        description: Used connections against the configured ceiling per instance. Watch the gap close under load.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (pg_stat_database_numbackends{instance=~"$instance"})
+            legend: "{{instance}} backends"
+          - expr: pg_settings_max_connections{instance=~"$instance"}
+            legend: "{{instance}} max"
+      - type: timeseries
+        title: Backends by state
+        description: Connection states over time. A rising idle-in-transaction band predicts trouble.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 40
+        legend: table
+        targets:
+          - expr: sum by (state) (pg_stat_activity_count{instance=~"$instance"})
+            legend: "{{state}}"
+
+  - title: Errors and conflicts
+    panels:
+      - type: timeseries
+        title: Recovery conflicts
+        description: Queries cancelled on standbys because they conflicted with WAL replay.
+        unit: ops
+        min: 0
+        drawStyle: bars
+        fillOpacity: 50
+        targets:
+          - expr: sum(rate(pg_stat_database_conflicts{instance=~"$instance", datname=~"$datname"}[5m]))
+            legend: conflicts/s
+      - type: timeseries
+        title: Saturation over time
+        description: Per-instance connection saturation — confirm whether a spike was momentary or sustained.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * sum by (instance) (pg_stat_database_numbackends{instance=~"$instance"})
+              / on (instance) pg_settings_max_connections{instance=~"$instance"}
+            legend: "{{instance}}"
+
+alerts:
+  - name: PostgresConnectionsNearMax
+    severity: critical
+    expr: >-
+      100 * sum by (instance) (pg_stat_database_numbackends)
+      / on (instance) pg_settings_max_connections > 90
+    for: 5m
+    summary: "PostgreSQL {{ $labels.instance }} above 90% of max_connections"
+    why: Past ~90% the server is one burst away from refusing connections and failing the whole application.
+    investigate: "Open PostgreSQL / Connections; find the top database and any idle-in-transaction backends."
+    runbook: "Add or right-size PgBouncer, cut per-app pool sizes, and terminate stuck sessions."
+    recovery: Clears when saturation falls below 90% for 5m.
+    false_positives: Short deploy-time spikes; if your pooler recycles connections, raise `for`.
+  - name: PostgresIdleInTransactionHigh
+    severity: warning
+    expr: sum by (instance) (pg_stat_activity_count{state="idle in transaction"}) > 10
+    for: 10m
+    summary: "PostgreSQL {{ $labels.instance }} has >10 idle-in-transaction backends"
+    why: Idle-in-transaction backends waste connection slots and hold locks that block VACUUM and other writers.
+    investigate: "Identify the sessions and the application code path that left a transaction open."
+    runbook: "Set idle_in_transaction_session_timeout and fix the application to commit/rollback promptly."
+    recovery: Clears when the count falls below 10 for 5m.
+    false_positives: Some frameworks legitimately hold a transaction per request; tune to your baseline.
+  - name: PostgresRecoveryConflicts
+    severity: warning
+    expr: sum by (instance) (rate(pg_stat_database_conflicts[5m])) > 0
+    for: 10m
+    summary: "PostgreSQL standby {{ $labels.instance }} cancelling queries (recovery conflicts)"
+    why: Read queries on the standby are being cancelled by WAL replay, surfacing as errors to read-replica users.
+    investigate: "Check which conflict type dominates and how long the offending read queries run."
+    runbook: "Tune max_standby_streaming_delay or enable hot_standby_feedback to reduce cancellations."
+    recovery: Clears when conflicts stop for 5m.
+    false_positives: Occasional conflicts under heavy write+read load are expected; alert only on a sustained rate.
+
+troubleshooting:
+  - symptom: Saturation gauge reads 0 or "No data"
+    cause: pg_settings_max_connections not exported, so the ratio has no denominator.
+    action: Enable the settings collector in postgres_exporter and re-scrape.
+  - symptom: Top-N database panel includes template databases
+    cause: numbackends is emitted for template0/template1 too.
+    action: Scope `$datname` with a regex that excludes the template and postgres databases.
+  - symptom: Headroom goes negative
+    cause: Background workers and superuser-reserved connections are counted in numbackends.
+    action: Treat small negative values as "effectively full"; the saturation gauge is the cleaner signal.
+
+performance: >-
+  Saturation joins numbackends to max_connections on `instance` with `on (instance)`,
+  keeping the result one series per server. The conflicts panel uses a 5m rate window
+  so a restart never produces a false spike.
+
+customization: >-
+  Set the 90% critical and 75% warning thresholds to leave room for your superuser and
+  replication reserved slots. Add a per-`usename` breakdown if you need to attribute
+  connections to specific application users.

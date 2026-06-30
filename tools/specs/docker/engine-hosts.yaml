@@ -1,0 +1,243 @@
+title: Docker / Engine & Hosts
+description: >-
+  Health of the Docker daemon and the host it runs on: container state breakdown
+  (running/paused/stopped), image and build activity, and the host's CPU and memory
+  headroom from node_exporter. Answers "can this Docker host take more containers, and
+  is the daemon itself healthy?"
+datasource: prometheus
+tags: [docker, engine, daemon, host, capacity]
+seo_phrase: Docker engine host Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many containers are running, paused or stopped on each engine?"
+  - "Does the host have CPU and memory headroom for more containers?"
+  - "Is there unusual image pull/build activity?"
+  - "Which engine version and configuration is each host running?"
+
+production_lessons: >-
+  A Docker host falls over for two different reasons, and you must tell them apart fast:
+  the **daemon** is unhealthy (containers stuck, image operations hung) or the **host**
+  is out of resources. So this board puts the engine's container-state counts next to
+  the host's CPU and memory headroom from node_exporter — the same instance, two layers.
+  The headroom framing matters: schedulers care about what is *left*, not what is used,
+  so we show available cores and available memory rather than utilisation percentages.
+
+data_sources:
+  - "`Docker engine metrics` endpoint: `engine_daemon_container_states_containers`
+    (state breakdown), `engine_daemon_image_actions_seconds_count` (image pulls/pushes/
+    deletes by action), `builder_builds_triggered_total` and `engine_daemon_engine_info`
+    (version/commit labels). Enable via the daemon `metrics-addr`."
+  - "`node_exporter` on the same host for CPU and memory headroom (`node_cpu_seconds_total`,
+    `node_memory_MemAvailable_bytes`, `node_memory_MemTotal_bytes`)."
+
+templating:
+  - name: instance
+    label: Docker host
+    query: label_values(engine_daemon_engine_info, instance)
+    description: The Docker engine instance to inspect.
+    multi: false
+    includeAll: false
+  - name: node
+    label: Node exporter target
+    query: label_values(node_uname_info, instance)
+    description: The node_exporter target for the same host (for headroom panels).
+    multi: false
+    includeAll: false
+
+rows:
+  - title: Container states — read these first
+    panels:
+      - type: stat
+        title: Running
+        description: Containers the daemon currently reports as running.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(engine_daemon_container_states_containers{instance="$instance", state="running"}) or vector(0)
+            instant: true
+            legend: running
+      - type: stat
+        title: Paused
+        description: Paused containers — usually a forgotten debug pause.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+        targets:
+          - expr: sum(engine_daemon_container_states_containers{instance="$instance", state="paused"}) or vector(0)
+            instant: true
+            legend: paused
+      - type: stat
+        title: Stopped
+        description: Stopped containers the daemon is still tracking.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 3}
+        targets:
+          - expr: sum(engine_daemon_container_states_containers{instance="$instance", state="stopped"}) or vector(0)
+            instant: true
+            legend: stopped
+      - type: gauge
+        title: Host CPU headroom
+        description: Idle CPU left on the host — what a scheduler can still place.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 15}
+          - {color: green, value: 30}
+        targets:
+          - expr: >-
+              100 * avg(rate(node_cpu_seconds_total{instance="$node", mode="idle"}[5m]))
+            instant: true
+            legend: idle
+      - type: gauge
+        title: Host memory headroom
+        description: Available memory on the host as a share of total.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 15}
+          - {color: green, value: 30}
+        targets:
+          - expr: >-
+              100 * node_memory_MemAvailable_bytes{instance="$node"} / node_memory_MemTotal_bytes{instance="$node"}
+            instant: true
+            legend: available
+
+  - title: Container states & activity over time
+    panels:
+      - type: timeseries
+        title: Container states
+        description: Running/paused/stopped over time — a climbing stopped line means failures piling up.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum by (state) (engine_daemon_container_states_containers{instance="$instance"})
+            legend: "{{state}}"
+      - type: timeseries
+        title: Image actions rate
+        description: Image pulls, pushes and deletes per second by action.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (action) (rate(engine_daemon_image_actions_seconds_count{instance="$instance"}[5m]))
+            legend: "{{action}}"
+      - type: timeseries
+        title: Builds triggered
+        description: Image build rate — a spike here often explains CPU and disk pressure.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(builder_builds_triggered_total{instance="$instance"}[5m]))
+            legend: builds
+
+  - title: Host headroom over time
+    panels:
+      - type: timeseries
+        title: Host CPU idle
+        description: Idle CPU trend; when this approaches zero the daemon and its containers contend.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 15}
+        targets:
+          - expr: 100 * avg(rate(node_cpu_seconds_total{instance="$node", mode="idle"}[5m]))
+            legend: idle
+      - type: timeseries
+        title: Host memory available
+        description: Bytes of memory the host can still hand out before swapping or OOM.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: node_memory_MemAvailable_bytes{instance="$node"}
+            legend: available
+
+  - title: Engine info
+    panels:
+      - type: table
+        title: Docker engine version
+        description: Daemon version and build metadata per host — confirm a fleet is on one version.
+        unit: short
+        filterable: true
+        targets:
+          - expr: engine_daemon_engine_info{instance="$instance"}
+            instant: true
+            format: table
+            legend: "{{version}}"
+
+alerts:
+  - name: DockerHostCPUExhausted
+    severity: warning
+    expr: 100 * avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) < 10
+    for: 10m
+    summary: "Docker host {{ $labels.instance }} CPU idle below 10%"
+    why: With almost no idle CPU the daemon and its containers contend for cores, so every container slows together and new placements stall.
+    investigate: "Open Docker / Engine & Hosts and find the container burning CPU via the overview board."
+    runbook: "Move or throttle the heaviest container, or scale the host pool."
+    recovery: Clears when idle CPU rises above 10% for 5m.
+    false_positives: Build hosts intentionally run hot during CI bursts — scope or raise `for`.
+  - name: DockerHostMemoryLow
+    severity: warning
+    expr: 100 * node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 10
+    for: 10m
+    summary: "Docker host {{ $labels.instance }} memory headroom below 10%"
+    why: Low host memory triggers the OOM killer, which kills containers unpredictably and can take down the daemon's own workloads.
+    investigate: "Check per-container working set on the container overview board for a leak or an over-allocated container."
+    runbook: "Set/lower container memory limits, add RAM, or rebalance containers across hosts."
+    recovery: Clears when headroom rises above 10% for 5m.
+    false_positives: Page cache is excluded by MemAvailable, so a sustained breach is real pressure.
+  - name: DockerContainersPaused
+    severity: info
+    expr: engine_daemon_container_states_containers{state="paused"} > 0
+    for: 15m
+    summary: "{{ $labels.instance }} has {{ $value }} paused container(s)"
+    why: A long-paused container is almost always a forgotten manual `docker pause` that silently removed capacity.
+    investigate: "List paused containers (docker ps --filter status=paused)."
+    runbook: "Unpause if it should be running (docker unpause), or remove it."
+    recovery: Clears when no containers are paused for 15m.
+    false_positives: Deliberate maintenance pauses — silence during the window.
+
+troubleshooting:
+  - symptom: All engine panels show "No data"
+    cause: The Docker daemon metrics endpoint is not exposed or not scraped.
+    action: Set `metrics-addr` in /etc/docker/daemon.json, restart Docker, and add the endpoint as a target.
+  - symptom: Headroom panels are empty
+    cause: The `$node` variable does not match the node_exporter instance for the same host.
+    action: Pick the node_exporter target whose host matches the Docker engine instance.
+  - symptom: Engine info table is blank
+    cause: "`engine_daemon_engine_info` is exposed only by newer daemons."
+    action: Upgrade Docker, or drop this panel if your version predates the metric.
+
+performance: >-
+  Engine metrics are low cardinality and cheap. The node_exporter headroom queries are
+  a single series each. The only multi-series panel (container states) is bounded by
+  the three state values. Rates use a 5m window (≥4× a 15s scrape).
+
+customization: >-
+  Tune the 10% headroom floors to your overcommit policy. Switch `$instance` and
+  `$node` to multi-select with `sum by (instance)` to watch a small Docker host pool on
+  one board. Add disk headroom from `node_filesystem_*` if your image store is a concern.

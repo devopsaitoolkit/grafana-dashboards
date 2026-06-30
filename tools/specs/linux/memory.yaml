@@ -1,0 +1,256 @@
+# Memory pressure for a fleet of Linux hosts scraped by node_exporter.
+uid: linux-memory
+title: Linux / Memory
+description: >-
+  Memory pressure for Linux hosts scraped by node_exporter: available headroom,
+  the used breakdown (anonymous vs reclaimable cache/buffers), swap utilisation
+  and swap traffic, major page faults and OOM kills. Answers "is this host about
+  to start reclaiming, swapping or OOM-killing?" rather than drawing raw counters.
+datasource: prometheus
+tags: [linux, memory, node-exporter, saturation]
+seo_phrase: Node Exporter memory Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which hosts have the least available memory right now?"
+  - "How much of the resident set is reclaimable cache vs real anonymous demand?"
+  - "Is the host swapping, and how fast is it paging in/out?"
+  - "Are we taking major page faults or — worse — OOM-killing processes?"
+
+production_lessons: >-
+  The number that pages you is **MemAvailable**, not MemFree: Linux deliberately uses
+  almost all RAM for page cache, so a box at "1% free" can be perfectly healthy while a
+  box at "20% free" is about to thrash. This dashboard leads with available percent and
+  swap, then separates reclaimable cache/buffers from genuine anonymous demand so you can
+  tell a cache-warm host from one that is one allocation away from the OOM killer. In
+  practice the earliest reliable signal of trouble is **major page faults climbing
+  together with swap-in** — by the time `oom_kill` increments you have already lost a
+  process, so the alerts here fire on the leading indicators first.
+
+data_sources:
+  - "`node_exporter` `meminfo` collector (`node_memory_MemAvailable_bytes`,
+    `node_memory_MemTotal_bytes`, `node_memory_Cached_bytes`, `node_memory_Buffers_bytes`,
+    `node_memory_SwapTotal_bytes`, `node_memory_SwapFree_bytes`)."
+  - "`node_exporter` `vmstat` collector (`node_vmstat_pgmajfault`, `node_vmstat_oom_kill`,
+    `node_vmstat_pswpin`, `node_vmstat_pswpout`)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job for your node_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(node_uname_info{job="$job"}, instance)
+    description: Host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Pressure — read these first
+    panels:
+      - type: stat
+        title: Lowest available memory
+        description: Minimum MemAvailable as a percentage of MemTotal across selected hosts. Low is bad.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 15}
+          - {color: green, value: 30}
+        targets:
+          - expr: >-
+              min(100 * node_memory_MemAvailable_bytes{job="$job", instance=~"$instance"}
+              / node_memory_MemTotal_bytes{job="$job", instance=~"$instance"})
+            instant: true
+            legend: min available
+      - type: gauge
+        title: Max swap utilisation
+        description: Highest swap usage across hosts that have swap configured.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 25}
+          - {color: red, value: 75}
+        targets:
+          - expr: >-
+              max(100 * (node_memory_SwapTotal_bytes{job="$job", instance=~"$instance"}
+              - node_memory_SwapFree_bytes{job="$job", instance=~"$instance"})
+              / (node_memory_SwapTotal_bytes{job="$job", instance=~"$instance"} > 0)) or vector(0)
+            instant: true
+            legend: max swap
+      - type: stat
+        title: OOM kills (last 1h)
+        description: Processes terminated by the kernel OOM killer across the fleet in the last hour.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(increase(node_vmstat_oom_kill{job="$job", instance=~"$instance"}[1h])) or vector(0)
+            instant: true
+            legend: oom kills
+      - type: stat
+        title: Major page faults/s
+        description: Fleet rate of major (disk-backed) page faults — sustained values mean the working set no longer fits in RAM.
+        unit: ops
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 50}
+          - {color: red, value: 500}
+        targets:
+          - expr: sum(rate(node_vmstat_pgmajfault{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: majflt/s
+
+  - title: Utilisation breakdown
+    panels:
+      - type: timeseries
+        title: Memory used per host
+        description: Real memory pressure — 100 × (1 − MemAvailable/MemTotal). Spot the outlier before it swaps.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * (1 - node_memory_MemAvailable_bytes{job="$job", instance=~"$instance"}
+              / node_memory_MemTotal_bytes{job="$job", instance=~"$instance"})
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Composition (fleet bytes)
+        description: Total vs available, with reclaimable cache and buffers. The gap between Total and Available is genuine anonymous demand.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(node_memory_MemTotal_bytes{job="$job", instance=~"$instance"})
+            legend: total
+          - expr: sum(node_memory_MemAvailable_bytes{job="$job", instance=~"$instance"})
+            legend: available
+          - expr: sum(node_memory_Cached_bytes{job="$job", instance=~"$instance"})
+            legend: cached
+          - expr: sum(node_memory_Buffers_bytes{job="$job", instance=~"$instance"})
+            legend: buffers
+
+  - title: Swap activity
+    panels:
+      - type: timeseries
+        title: Swap used per host
+        description: Per-host swap utilisation. Steady swap use under memory pressure is normal; growing swap with paging is not.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        targets:
+          - expr: >-
+              100 * (node_memory_SwapTotal_bytes{job="$job", instance=~"$instance"}
+              - node_memory_SwapFree_bytes{job="$job", instance=~"$instance"})
+              / (node_memory_SwapTotal_bytes{job="$job", instance=~"$instance"} > 0)
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Swap in/out (pages/s)
+        description: Pages read from and written to swap. Sustained swap-in is the symptom that correlates with latency spikes.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(node_vmstat_pswpin{job="$job", instance=~"$instance"}[5m]))
+            legend: swap-in
+          - expr: sum(rate(node_vmstat_pswpout{job="$job", instance=~"$instance"}[5m]))
+            legend: swap-out
+
+  - title: Faults and OOM
+    panels:
+      - type: timeseries
+        title: Major page faults per host
+        description: Per-host major fault rate — isolates which box lost its cache working set.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_vmstat_pgmajfault{job="$job", instance=~"$instance"}[5m])
+            legend: "{{instance}}"
+      - type: timeseries
+        title: OOM kills per host
+        description: Per-host OOM-kill rate. Any non-zero value means the kernel reclaimed memory by killing a process.
+        unit: short
+        min: 0
+        drawStyle: bars
+        legend: table
+        targets:
+          - expr: increase(node_vmstat_oom_kill{job="$job", instance=~"$instance"}[5m])
+            legend: "{{instance}}"
+
+alerts:
+  - name: HostMemoryAvailableLow
+    severity: warning
+    expr: >-
+      100 * node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 10
+    for: 10m
+    summary: "Host {{ $labels.instance }} has < 10% memory available for 10m"
+    why: Below ~10% available the kernel starts aggressive reclaim, which evicts page cache and pushes the host toward swapping and OOM.
+    investigate: "Open Linux / Memory, scope to the instance, and compare the Total/Available gap against Cached+Buffers to see whether the demand is anonymous (real) or reclaimable."
+    runbook: "Identify the top RSS consumers (ps aux --sort=-rss / top); restart or rightsize the offending service, or add memory. If it is cache, no action is needed."
+    recovery: Clears when available memory rises above 10% for 5m.
+    false_positives: Databases and caches (Redis, JVM heaps) that intentionally pin most of RAM — scope the rule with a role label or raise the threshold for those hosts.
+  - name: HostSwapUtilisationHigh
+    severity: warning
+    expr: >-
+      100 * (node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes)
+      / (node_memory_SwapTotal_bytes > 0) > 75
+    for: 15m
+    summary: "Host {{ $labels.instance }} swap > 75% used for 15m"
+    why: Heavy swap use means the working set no longer fits in RAM; latency becomes dominated by disk paging and gets dramatically worse under load.
+    investigate: "Check the Swap in/out panel — sustained swap-in confirms active thrashing rather than stale pages parked in swap."
+    runbook: "Reduce memory demand (rightsize/limit services) or add RAM; if swap is only holding idle pages and swap-in is flat, no urgent action is needed."
+    recovery: Clears when swap utilisation falls below 75% for 5m.
+    false_positives: Hosts that filled swap during a past spike and never paged it back in — correlate with the swap-in rate before acting.
+  - name: HostOOMKilled
+    severity: critical
+    expr: increase(node_vmstat_oom_kill[10m]) > 0
+    for: 0m
+    summary: "Host {{ $labels.instance }} OOM-killed a process"
+    why: The kernel killed a process to reclaim memory — something on the host already lost work, and it will recur until demand drops.
+    investigate: "Check dmesg / journalctl -k for the 'Out of memory: Killed process' line to identify the victim, then correlate with the per-host used-memory panel."
+    runbook: "Add a memory limit or rightsize the offending workload; if the victim is a critical service, add RAM or move it off the host."
+    recovery: Resolves once 10m pass with no further oom_kill increments.
+    false_positives: cgroup-local OOM kills from container memory limits show here too but may be expected for batch jobs — confirm the victim before escalating.
+
+troubleshooting:
+  - symptom: Available memory looks low but the host is fine
+    cause: Confusing MemFree with MemAvailable; cache counts as used in MemFree but is reclaimable.
+    action: Trust the available-percent panel (MemAvailable based); large Cached/Buffers with healthy available is normal.
+  - symptom: Swap panels show "No data"
+    cause: Host has no swap configured, so SwapTotal is 0 and the ratio is filtered out.
+    action: Expected on swapless hosts; the guard `SwapTotal > 0` intentionally drops them.
+  - symptom: oom_kill panel is always empty
+    cause: Older kernels or node_exporter builds without the oom_kill vmstat field.
+    action: Verify `node_vmstat_oom_kill` exists in Explore; if absent, alert on memory-available and major faults instead.
+
+performance: >-
+  All rates use a 5m window (≥4× a 15s scrape) so vmstat counters stay smooth across a
+  reset. Gauges aggregate with `min`/`max` to one value, and the per-host panels return one
+  series per instance. The swap ratio guards division by zero with `> 0`, which both avoids
+  NaN and drops swapless hosts from the panel.
+
+customization: >-
+  Tune the 10% available and 75% swap thresholds to your workload — pin databases lower.
+  To watch a single tier, add a `nodename`/`role` selector to `$instance`. For very large
+  fleets, back the per-host used-memory panel with a recording rule and widen the time
+  range gradually.

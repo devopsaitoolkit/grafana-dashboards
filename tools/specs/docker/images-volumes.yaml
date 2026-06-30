@@ -1,0 +1,233 @@
+title: Docker / Images & Volumes
+description: >-
+  Container filesystem and storage view: which containers are closest to their
+  filesystem limit, the top disk consumers, and how container writable layers and
+  volumes grow over time. The board to open when a Docker host is running out of disk
+  and you need to know which container's writable layer is to blame.
+datasource: prometheus
+tags: [docker, storage, filesystem, volumes, capacity]
+seo_phrase: Docker images and volumes Grafana dashboard
+refresh: 1m
+time_from: now-12h
+
+questions:
+  - "How many containers are near their filesystem limit right now?"
+  - "Which containers are consuming the most disk?"
+  - "Which writable layers or volumes are growing fastest?"
+  - "Will any container fill its filesystem within the next few hours?"
+
+production_lessons: >-
+  "Docker host out of disk" is a top-three on-call page, and the cause is almost always
+  one container's **writable layer** quietly growing — an app logging to stdout into a
+  container that does not rotate, or temp files nobody mounts a volume for. So this board
+  leads with the count of containers near their limit and ranks consumers by absolute
+  bytes, then adds a growth projection so you get paged on the *trend* before the disk
+  is actually full. Watching `container_fs_usage_bytes` per container beats watching the
+  host filesystem because it tells you *which* container to fix, not just that you are in
+  trouble.
+
+data_sources:
+  - "`cAdvisor` filesystem collector: `container_fs_usage_bytes` (bytes used by each
+    container's writable layer and tracked mounts) and `container_fs_limit_bytes` (the
+    filesystem size backing it). Requires cAdvisor's disk metrics to be enabled and a
+    supported storage driver (overlay2)."
+
+templating:
+  - name: instance
+    label: Host
+    query: label_values(machine_cpu_cores, instance)
+    description: cAdvisor instance (Docker host) to inspect.
+    multi: false
+    includeAll: false
+
+rows:
+  - title: Storage pressure — read these first
+    panels:
+      - type: stat
+        title: Containers near FS limit
+        description: Containers using more than 80% of their filesystem limit.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: >-
+              count(
+                sum by (name) (container_fs_usage_bytes{instance="$instance", name!=""})
+                / clamp_min(sum by (name) (container_fs_limit_bytes{instance="$instance", name!=""}), 1) > 0.8
+              ) or vector(0)
+            instant: true
+            legend: near-limit
+      - type: gauge
+        title: Worst container FS used
+        description: Fullest container filesystem on the host.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              max(
+                100 * sum by (name) (container_fs_usage_bytes{instance="$instance", name!=""})
+                / clamp_min(sum by (name) (container_fs_limit_bytes{instance="$instance", name!=""}), 1)
+              ) or vector(0)
+            instant: true
+            legend: worst
+      - type: stat
+        title: Total container disk used
+        description: Sum of writable-layer and tracked-mount usage across all containers.
+        unit: bytes
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(container_fs_usage_bytes{instance="$instance", name!=""}) or vector(0)
+            instant: true
+            legend: used
+
+  - title: Top consumers
+    panels:
+      - type: bargauge
+        title: Disk used by container (top 10)
+        description: Absolute filesystem bytes per container, ranked.
+        unit: bytes
+        min: 0
+        orientation: horizontal
+        targets:
+          - expr: >-
+              topk(10, sum by (name) (container_fs_usage_bytes{instance="$instance", name!=""}))
+            instant: true
+            legend: "{{name}}"
+      - type: bargauge
+        title: FS used percent by container (top 10)
+        description: Each container's usage as a share of its filesystem limit.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              topk(10,
+                100 * sum by (name) (container_fs_usage_bytes{instance="$instance", name!=""})
+                / clamp_min(sum by (name) (container_fs_limit_bytes{instance="$instance", name!=""}), 1))
+            instant: true
+            legend: "{{name}}"
+
+  - title: Growth & projection
+    panels:
+      - type: timeseries
+        title: Filesystem usage over time (top 10)
+        description: Per-container disk growth — a straight climb is an unrotated log or leaking temp dir.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              topk(10, sum by (name) (container_fs_usage_bytes{instance="$instance", name!=""}))
+            legend: "{{name}}"
+      - type: timeseries
+        title: Projected full in (hours)
+        description: Hours until each growing container hits its limit at the current 1h rate. Lower is more urgent.
+        unit: h
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 6}
+          - {color: green, value: 24}
+        targets:
+          - expr: >-
+              topk(10,
+                (sum by (name) (container_fs_limit_bytes{instance="$instance", name!=""}) - sum by (name) (container_fs_usage_bytes{instance="$instance", name!=""}))
+                / clamp_min(sum by (name) (deriv(container_fs_usage_bytes{instance="$instance", name!=""}[1h])), 1) / 3600)
+            legend: "{{name}}"
+
+  - title: Detail
+    panels:
+      - type: table
+        title: Filesystem usage vs limit by container
+        description: Sortable per-container used, limit and percent for capacity planning.
+        unit: bytes
+        filterable: true
+        sortBy:
+          - {displayName: used, desc: true}
+        targets:
+          - expr: sum by (name) (container_fs_usage_bytes{instance="$instance", name!=""})
+            instant: true
+            format: table
+            legend: "{{name}}"
+          - expr: sum by (name) (container_fs_limit_bytes{instance="$instance", name!=""})
+            instant: true
+            format: table
+            legend: "{{name}}"
+
+alerts:
+  - name: ContainerFilesystemNearFull
+    severity: warning
+    expr: >-
+      sum by (name, instance) (container_fs_usage_bytes{name!=""})
+      / clamp_min(sum by (name, instance) (container_fs_limit_bytes{name!=""}), 1) > 0.9
+    for: 10m
+    summary: "Container {{ $labels.name }} filesystem {{ printf \"%.0f\" $value }}% full"
+    why: A container that fills its filesystem starts failing writes, which crashes the app or corrupts local state and can wedge the whole Docker storage pool.
+    investigate: "Open Docker / Images & Volumes, scope to the host, and find the container in the top-consumers panel; check what is writing inside it."
+    runbook: "Mount a volume for the growing path, enable log rotation, prune the writable layer, or grow the backing filesystem."
+    recovery: Clears when usage drops below 90% for 5m.
+    false_positives: Containers that write large temp files transiently — they self-clear.
+  - name: ContainerFilesystemFillingFast
+    severity: warning
+    expr: >-
+      predict_linear(container_fs_usage_bytes{name!=""}[1h], 4 * 3600)
+      > container_fs_limit_bytes{name!=""}
+    for: 15m
+    summary: "Container {{ $labels.name }} projected to fill its filesystem within 4h"
+    why: Catching the trend lets you act during business hours instead of being paged at 3am when the disk is already full.
+    investigate: "Check the growth panel for the slope; identify the file or directory responsible."
+    runbook: "Rotate/ship logs off the host, mount a volume, or expand storage before the projection lands."
+    recovery: Clears when the projection no longer crosses the limit.
+    false_positives: A one-off bulk write (a large import) inflates the slope briefly.
+  - name: HostContainerDiskExhausted
+    severity: critical
+    expr: >-
+      sum by (instance) (container_fs_usage_bytes{name!=""})
+      / clamp_min(max by (instance) (container_fs_limit_bytes{name!=""}), 1) > 0.95
+    for: 10m
+    summary: "Docker host {{ $labels.instance }} container storage above 95%"
+    why: When the shared storage pool is nearly full, every container on the host risks write failures at once, not just the heaviest one.
+    investigate: "Rank containers by absolute usage and prune dangling images/volumes (docker system df)."
+    runbook: "Run docker system prune, remove unused volumes, or grow the storage backing /var/lib/docker."
+    recovery: Clears when pool usage falls below 95% for 5m.
+    false_positives: Shared-filesystem accounting can overlap; confirm against `df` on the host.
+
+troubleshooting:
+  - symptom: All filesystem panels are empty
+    cause: cAdvisor's disk collector is disabled or the storage driver is unsupported.
+    action: Enable disk metrics in cAdvisor and confirm overlay2 is in use.
+  - symptom: FS percent reads ~100% for every container
+    cause: "`container_fs_limit_bytes` equals the whole host filesystem, so usage shares the same backing store."
+    action: Rank by absolute bytes instead; the percent is only meaningful when per-container quotas are set.
+  - symptom: Projection panel shows huge or negative hours
+    cause: A flat or shrinking usage trend makes the slope near zero or negative.
+    action: This is expected for stable containers; only short positive projections are actionable.
+
+performance: >-
+  Filesystem series are moderate cardinality; `topk(10)` and `sum by (name)` cap what
+  renders. `predict_linear`/`deriv` over a 1h window are the heaviest expressions —
+  the longer 1m refresh keeps them cheap. Scope `$instance` to one host on large fleets.
+
+customization: >-
+  Tune the 80/95 fill thresholds and the 4h projection horizon to your storage runway.
+  Add a `name` filter to track one noisy container. If you set per-container storage
+  quotas, the percent panels become far more meaningful than on a shared pool.

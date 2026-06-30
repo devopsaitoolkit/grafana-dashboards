@@ -1,0 +1,114 @@
+# Alerting rules for the redis dashboards.
+# Generated from tools/specs/redis/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: redis.rules
+  rules:
+  - alert: RedisNoConnectedReplicas
+    expr: redis_connected_slaves == 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Redis {{ $labels.instance }} has no connected replicas
+      description: With zero replicas there is no failover target — the node is a single point of failure
+        for its data.
+      runbook: Restart replication on the replica (REPLICAOF), fix connectivity, and confirm Sentinel/Cluster
+        sees the node.
+      dashboard: dashboards/redis/cluster.json
+  - alert: RedisReplicaLagHigh
+    expr: redis_master_last_io_seconds_ago > 10
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Redis replica {{ $labels.instance }} >10s since last master contact
+      description: A replica that has not heard from its master in seconds is stale and may be dropped
+        or trigger a failover.
+      runbook: Restore connectivity, reduce master write pressure, or re-point the replica at a healthy
+        master.
+      dashboard: dashboards/redis/cluster.json
+  - alert: RedisRejectedConnections
+    expr: sum by (instance) (rate(redis_rejected_connections_total[5m])) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Redis {{ $labels.instance }} is rejecting connections (maxclients)
+      description: The node hit its maxclients limit and is refusing new clients, surfacing as connection
+        errors in the application.
+      runbook: Raise maxclients if RAM allows, fix the client leak, or add a connection pool/proxy in
+        front of Redis.
+      dashboard: dashboards/redis/cluster.json
+  - alert: RedisEvictingKeys
+    expr: sum by (instance) (rate(redis_evicted_keys_total[5m])) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Redis {{ $labels.instance }} is evicting keys
+      description: Evictions mean Redis is over maxmemory and discarding data; every evicted key becomes
+        a database cache miss.
+      runbook: Raise maxmemory if RAM allows, add TTLs to unbounded keys, or shard the keyspace across
+        instances.
+      dashboard: dashboards/redis/keyspace-and-memory.json
+  - alert: RedisMemoryHigh
+    expr: 100 * redis_memory_used_bytes / clamp_min(redis_memory_max_bytes, 1) > 90
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Redis {{ $labels.instance }} memory above 90% of maxmemory
+      description: Approaching maxmemory means eviction or write rejection is imminent depending on the
+        policy.
+      runbook: Increase maxmemory, expire or trim large keys, or move cold data out of Redis.
+      dashboard: dashboards/redis/keyspace-and-memory.json
+  - alert: RedisRDBSaveStale
+    expr: time() - redis_rdb_last_save_timestamp_seconds > 86400
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Redis {{ $labels.instance }} has not saved an RDB snapshot in 24h
+      description: A stalled RDB save means a restart would lose everything since the last snapshot —
+        silent durability loss.
+      runbook: Free disk space, fix fork/copy-on-write memory limits, or trigger BGSAVE and confirm it
+        completes.
+      dashboard: dashboards/redis/keyspace-and-memory.json
+  - alert: RedisInstanceDown
+    expr: redis_up == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: Redis {{ $labels.instance }} is down
+      description: The exporter cannot reach the instance — dependent services losing their cache or queue
+        are likely failing.
+      runbook: Restart redis-server if crashed; on a Sentinel/Cluster setup confirm a failover promoted
+        a replica.
+      dashboard: dashboards/redis/overview.json
+  - alert: RedisMemoryHigh
+    expr: 100 * redis_memory_used_bytes / clamp_min(redis_memory_max_bytes, 1) > 90
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Redis {{ $labels.instance }} memory above 90% of maxmemory
+      description: Past maxmemory Redis either evicts keys (cache misses spike) or rejects writes, depending
+        on the policy.
+      runbook: Raise maxmemory if RAM allows, add TTLs to unbounded keys, or shard the keyspace.
+      dashboard: dashboards/redis/overview.json
+  - alert: RedisLowHitRatio
+    expr: "100 * sum by (instance) (rate(redis_keyspace_hits_total[5m])) / clamp_min(\n    sum by (instance)\
+      \ (rate(redis_keyspace_hits_total[5m]))\n    + sum by (instance) (rate(redis_keyspace_misses_total[5m])),\
+      \ 1) < 80"
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Redis {{ $labels.instance }} keyspace hit ratio below 80%
+      description: A low hit ratio means most lookups miss, pushing load onto the backing database the
+        cache was meant to protect.
+      runbook: Increase capacity, warm the cache, lengthen TTLs, or fix the application's cache-key strategy.
+      dashboard: dashboards/redis/overview.json

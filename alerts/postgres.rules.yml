@@ -1,0 +1,146 @@
+# Alerting rules for the postgres dashboards.
+# Generated from tools/specs/postgres/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: postgres.rules
+  rules:
+  - alert: PostgresConnectionsNearMax
+    expr: 100 * sum by (instance) (pg_stat_database_numbackends) / on (instance) pg_settings_max_connections
+      > 90
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: PostgreSQL {{ $labels.instance }} above 90% of max_connections
+      description: Past ~90% the server is one burst away from refusing connections and failing the whole
+        application.
+      runbook: Add or right-size PgBouncer, cut per-app pool sizes, and terminate stuck sessions.
+      dashboard: dashboards/postgres/connections.json
+  - alert: PostgresIdleInTransactionHigh
+    expr: sum by (instance) (pg_stat_activity_count{state="idle in transaction"}) > 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: PostgreSQL {{ $labels.instance }} has >10 idle-in-transaction backends
+      description: Idle-in-transaction backends waste connection slots and hold locks that block VACUUM
+        and other writers.
+      runbook: Set idle_in_transaction_session_timeout and fix the application to commit/rollback promptly.
+      dashboard: dashboards/postgres/connections.json
+  - alert: PostgresRecoveryConflicts
+    expr: sum by (instance) (rate(pg_stat_database_conflicts[5m])) > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: PostgreSQL standby {{ $labels.instance }} cancelling queries (recovery conflicts)
+      description: Read queries on the standby are being cancelled by WAL replay, surfacing as errors
+        to read-replica users.
+      runbook: Tune max_standby_streaming_delay or enable hot_standby_feedback to reduce cancellations.
+      dashboard: dashboards/postgres/connections.json
+  - alert: PostgresInstanceDown
+    expr: pg_up == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: PostgreSQL {{ $labels.instance }} is down
+      description: The exporter cannot reach the server — clients are likely failing too.
+      runbook: Restart postgres if crashed; if the host is down, fail over to a replica and promote it.
+      dashboard: dashboards/postgres/overview.json
+  - alert: PostgresConnectionSaturationHigh
+    expr: 100 * sum by (instance) (pg_stat_database_numbackends) / on (instance) pg_settings_max_connections
+      > 85
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: PostgreSQL {{ $labels.instance }} using >85% of max_connections
+      description: At 100% the server refuses new connections and the application starts failing, even
+        with spare CPU and RAM.
+      runbook: Put PgBouncer in front of the server; lower per-app pool sizes; kill stuck idle-in-transaction
+        sessions.
+      dashboard: dashboards/postgres/overview.json
+  - alert: PostgresCacheHitRatioLow
+    expr: "100 * sum by (instance) (rate(pg_stat_database_blks_hit[5m])) / clamp_min(\n    sum by (instance)\
+      \ (rate(pg_stat_database_blks_hit[5m]))\n    + sum by (instance) (rate(pg_stat_database_blks_read[5m])),\
+      \ 1) < 95"
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: PostgreSQL {{ $labels.instance }} cache hit ratio below 95%
+      description: Reads are going to disk instead of shared buffers, so query latency has already risen.
+      runbook: Add the missing index, increase shared_buffers, or schedule the heavy scan off-peak.
+      dashboard: dashboards/postgres/overview.json
+  - alert: PostgresIdleInTransactionHigh
+    expr: sum by (instance) (pg_stat_activity_count{state="idle in transaction"}) > 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: PostgreSQL {{ $labels.instance }} has >10 idle-in-transaction backends
+      description: Idle-in-transaction sessions pin snapshots, hold locks and block VACUUM, causing bloat
+        and stalls.
+      runbook: Set idle_in_transaction_session_timeout; fix the app to commit/rollback promptly; terminate
+        stuck backends.
+      dashboard: dashboards/postgres/queries-and-locks.json
+  - alert: PostgresDeadlocksDetected
+    expr: sum by (instance) (rate(pg_stat_database_deadlocks[5m])) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: PostgreSQL {{ $labels.instance }} is hitting deadlocks
+      description: Deadlocks mean transactions take locks in conflicting order; one is aborted every time,
+        losing work.
+      runbook: Make the application acquire locks in a consistent order, or shrink the transaction scope.
+      dashboard: dashboards/postgres/queries-and-locks.json
+  - alert: PostgresHighRollbackRatio
+    expr: "100 * sum by (instance) (rate(pg_stat_database_xact_rollback[5m])) / clamp_min(\n    sum by\
+      \ (instance) (rate(pg_stat_database_xact_commit[5m]))\n    + sum by (instance) (rate(pg_stat_database_xact_rollback[5m])),\
+      \ 1) > 5"
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: PostgreSQL {{ $labels.instance }} rollback ratio above 5%
+      description: A high rollback share signals application errors, failed constraints or serialisation
+        conflicts wasting capacity.
+      runbook: Fix the failing statements or add retry-with-backoff for serialisation failures.
+      dashboard: dashboards/postgres/queries-and-locks.json
+  - alert: PostgresReplicationLagHigh
+    expr: pg_replication_lag > 30
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: PostgreSQL replica {{ $labels.instance }} lagging >30s
+      description: A standby 30s behind means a failover would lose up to 30s of committed transactions.
+      runbook: Relieve the write burst, give the standby faster storage, or check the network between
+        primary and replica.
+      dashboard: dashboards/postgres/replication.json
+  - alert: PostgresNoReplicasConnected
+    expr: count by (instance) (pg_stat_replication_pg_wal_lsn_diff) == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: PostgreSQL {{ $labels.instance }} has no connected replicas
+      description: With zero streaming standbys there is no hot failover target — the primary is a single
+        point of failure.
+      runbook: Restart replication on the standby, fix pg_hba/replication slots, and confirm the WAL sender
+        is running.
+      dashboard: dashboards/postgres/replication.json
+  - alert: PostgresWALLagHigh
+    expr: pg_stat_replication_pg_wal_lsn_diff > 268435456
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: PostgreSQL standby {{ $labels.application_name }} >256MB of WAL behind
+      description: A growing WAL backlog precedes seconds-behind lag and can exhaust WAL retention, breaking
+        the replica entirely.
+      runbook: Increase wal_keep_size or use a replication slot; speed up standby replay (storage/CPU).
+      dashboard: dashboards/postgres/replication.json

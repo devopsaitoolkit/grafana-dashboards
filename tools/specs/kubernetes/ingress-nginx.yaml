@@ -1,0 +1,246 @@
+# ingress-nginx controller dashboard — the cluster's front door for HTTP traffic.
+# Leads with 5xx error ratio, request p99 latency and the soonest TLS cert expiry,
+# the three things that turn into a user-facing outage.
+title: Kubernetes / Ingress NGINX
+description: >-
+  Request rate and status by ingress, p99 latency, 5xx error ratio, active
+  connections and TLS certificate expiry for the ingress-nginx controller. Answers
+  "is the front door serving traffic within SLO, and is any cert about to expire?"
+  rather than dumping raw nginx counters.
+datasource: prometheus
+tags: [kubernetes, ingress, nginx, networking]
+seo_phrase: ingress-nginx Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is the ingress returning 5xx errors right now, and for which ingress?"
+  - "What is request p99 latency through the controller?"
+  - "Which TLS certificate expires soonest?"
+  - "How many connections is the controller handling?"
+  - "Where is the traffic going and what status mix does each ingress serve?"
+
+production_lessons: >-
+  The ingress controller is where a backend problem becomes a customer problem, so it
+  is the right place to watch the user-facing SLI: the **5xx ratio** here counts only
+  errors the platform owns (a 502/503/504 is usually an unhealthy upstream, a 500 is
+  the app). The single most embarrassing ingress outage is an **expired TLS
+  certificate** — everything looks healthy until the clock ticks over and every
+  request fails the handshake — so this dashboard puts the soonest cert expiry right in
+  the lead row, in time units, next to errors and latency. Active connections is the
+  saturation signal: a controller pinned near its worker connection limit starts
+  queuing and shedding regardless of upstream health.
+
+data_sources:
+  - "`ingress-nginx` controller metrics (the `nginx_ingress_controller_requests`,
+    `nginx_ingress_controller_request_duration_seconds_bucket`,
+    `nginx_ingress_controller_nginx_process_connections` and
+    `nginx_ingress_controller_ssl_expire_time_seconds` series)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(nginx_ingress_controller_requests, job)
+    description: Prometheus scrape job for the ingress-nginx controller.
+    multi: false
+    includeAll: false
+  - name: ingress
+    label: Ingress
+    query: label_values(nginx_ingress_controller_requests{job="$job"}, ingress)
+    description: Ingress object(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Front-door health — read these first
+    panels:
+      - type: stat
+        title: 5xx error ratio
+        description: Share of requests returning a 5xx status across the selected ingresses. The user-facing error SLI.
+        unit: percent
+        min: 0
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum(rate(nginx_ingress_controller_requests{job="$job", ingress=~"$ingress", status=~"5.."}[5m]))
+              / sum(rate(nginx_ingress_controller_requests{job="$job", ingress=~"$ingress"}[5m]))
+            instant: true
+            legend: 5xx ratio
+      - type: stat
+        title: Request p99 latency
+        description: 99th percentile end-to-end request duration through the controller.
+        unit: s
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.5}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(nginx_ingress_controller_request_duration_seconds_bucket{job="$job", ingress=~"$ingress"}[5m])))
+            instant: true
+            legend: p99
+      - type: stat
+        title: Soonest TLS cert expiry
+        description: Time until the nearest-expiring certificate. Grafana renders the seconds value as days/hours.
+        unit: s
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 604800}
+          - {color: green, value: 2592000}
+        targets:
+          - expr: min(nginx_ingress_controller_ssl_expire_time_seconds{job="$job"} - time())
+            instant: true
+            legend: expires in
+      - type: stat
+        title: Active connections
+        description: Current connections handled by the controller. Approaching the worker connection limit means saturation.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5000}
+          - {color: red, value: 10000}
+        targets:
+          - expr: sum(nginx_ingress_controller_nginx_process_connections{job="$job", state="active"}) or vector(0)
+            instant: true
+            legend: active
+
+  - title: Traffic
+    panels:
+      - type: timeseries
+        title: Request rate by ingress
+        description: Throughput per ingress object. Spot which app is driving load or suddenly went quiet.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (ingress) (rate(nginx_ingress_controller_requests{job="$job", ingress=~"$ingress"}[5m]))
+            legend: "{{ingress}}"
+      - type: timeseries
+        title: Status class breakdown
+        description: Request rate by HTTP status class. A rising 5xx with steady 2xx is a backend going bad.
+        unit: reqps
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum(rate(nginx_ingress_controller_requests{job="$job", ingress=~"$ingress", status=~"2.."}[5m]))
+            legend: 2xx
+          - expr: sum(rate(nginx_ingress_controller_requests{job="$job", ingress=~"$ingress", status=~"3.."}[5m]))
+            legend: 3xx
+          - expr: sum(rate(nginx_ingress_controller_requests{job="$job", ingress=~"$ingress", status=~"4.."}[5m]))
+            legend: 4xx
+          - expr: sum(rate(nginx_ingress_controller_requests{job="$job", ingress=~"$ingress", status=~"5.."}[5m]))
+            legend: 5xx
+      - type: timeseries
+        title: Request p99 latency by ingress
+        description: Per-ingress tail latency. Isolate the slow backend behind the controller.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le, ingress) (rate(nginx_ingress_controller_request_duration_seconds_bucket{job="$job", ingress=~"$ingress"}[5m])))
+            legend: "{{ingress}}"
+
+  - title: Errors, connections and TLS
+    panels:
+      - type: table
+        title: Top ingresses by 5xx rate
+        description: Which ingresses are throwing server errors — the ranked list to start triage from.
+        unit: reqps
+        targets:
+          - expr: >-
+              topk(10, sum by (ingress) (rate(nginx_ingress_controller_requests{job="$job", ingress=~"$ingress", status=~"5.."}[5m])) > 0)
+            instant: true
+            format: table
+            legend: "{{ingress}}"
+      - type: timeseries
+        title: Connections by state
+        description: Reading/writing/waiting/active connection counts. A wall of waiting connections signals keepalive or saturation issues.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (state) (nginx_ingress_controller_nginx_process_connections{job="$job"})
+            legend: "{{state}}"
+      - type: table
+        title: TLS certificates by expiry
+        description: Days remaining on each served certificate. Renew anything inside two weeks before it pages you.
+        unit: s
+        sortBy:
+          - {displayName: Value, desc: false}
+        targets:
+          - expr: nginx_ingress_controller_ssl_expire_time_seconds{job="$job"} - time()
+            instant: true
+            format: table
+            legend: "{{host}}"
+
+alerts:
+  - name: IngressNginxHigh5xxRate
+    severity: critical
+    expr: >-
+      100 * sum by (job) (rate(nginx_ingress_controller_requests{status=~"5.."}[5m]))
+      / sum by (job) (rate(nginx_ingress_controller_requests[5m])) > 5
+    for: 5m
+    summary: "ingress-nginx 5xx ratio above 5% on {{ $labels.job }}"
+    why: A high 5xx ratio at the front door means users are seeing errors right now — usually an unhealthy upstream service.
+    investigate: "Open Kubernetes / Ingress NGINX and use the Top ingresses by 5xx table to find which ingress/backend is failing."
+    runbook: "Check the failing backend's pods/endpoints and health; if the controller itself is saturated (active connections), scale the controller replicas."
+    recovery: Clears when the 5xx ratio stays below 5% for 5m.
+    false_positives: A backend rollout can spike 5xx briefly as old pods drain; confirm it is sustained.
+  - name: IngressNginxHighLatency
+    severity: warning
+    expr: >-
+      histogram_quantile(0.99, sum by (le, job) (rate(nginx_ingress_controller_request_duration_seconds_bucket[5m]))) > 1
+    for: 10m
+    summary: "ingress-nginx request p99 latency above 1s on {{ $labels.job }}"
+    why: Slow requests at the ingress mean slow pages for users regardless of which backend is responsible.
+    investigate: "Use the per-ingress p99 panel to isolate the slow ingress, then check that backend's own latency."
+    runbook: "Scale or fix the slow backend; check controller CPU and active connections for saturation; review any recent ingress annotation/timeout change."
+    recovery: Clears when p99 falls below 1s for 5m.
+    false_positives: A few slow large-file or streaming ingresses can lift p99 without a real problem — scope the alert per ingress if so.
+  - name: IngressNginxTLSCertExpiringSoon
+    severity: warning
+    expr: (nginx_ingress_controller_ssl_expire_time_seconds - time()) < 1209600
+    for: 1h
+    summary: "TLS certificate for {{ $labels.host }} expires within 14 days"
+    why: An expired certificate fails every TLS handshake — a total outage for that host with no warning if you don't watch the clock.
+    investigate: "Check the TLS certificates table for the exact host and remaining time; confirm whether cert-manager owns this cert."
+    runbook: "Renew the certificate (or fix the failing cert-manager Order/Challenge); verify the new secret is mounted and the controller reloaded."
+    recovery: Clears once the renewed certificate pushes expiry back beyond 14 days.
+    false_positives: Short-lived certs (e.g. 90-day ACME) are fine as long as renewal runs well before this window — tighten the threshold if needed.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The controller metrics service isn't scraped, or the wrong `$job`.
+    action: "Confirm `up{job=\"$job\"}` is 1 and the controller is started with `--enable-metrics` and a scraped metrics port (10254)."
+  - symptom: TLS expiry stat shows a huge negative number
+    cause: A certificate has already expired (expire_time is in the past).
+    action: This is an active outage for that host — renew it immediately and check the per-host table.
+  - symptom: 5xx ratio is blank during low traffic
+    cause: No requests in the window, so the denominator is empty.
+    action: This is benign; widen the time range to confirm there simply was no traffic.
+
+performance: >-
+  All rates use a 5m window (>=4x a 30s scrape). Latency quantiles aggregate the
+  histogram with `sum by (le, ...)` before `histogram_quantile`. The
+  `nginx_ingress_controller_requests` series can be high-cardinality (per ingress and
+  status); bound it with `by (ingress)`/`by (status)` and back the busiest panels with
+  a recording rule on large clusters.
+
+customization: >-
+  Tune the 1%/5% error and 0.5s/1s latency thresholds to your SLO, and the
+  active-connection bands to your controller's `worker-connections`. The 14-day cert
+  window and 7/30-day color stops should match your renewal cadence. Scope `$ingress`
+  to a team's ingresses to give each app team its own view.

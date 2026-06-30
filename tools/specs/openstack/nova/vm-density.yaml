@@ -1,0 +1,221 @@
+# VM density & distribution. Leads with the densest hypervisor and how lopsided the
+# fleet is, because imbalance — not the average — is what wastes capacity and pages you.
+title: OpenStack / Nova VM Density
+description: >-
+  Instance density and balance across an OpenStack Nova fleet from openstack-exporter:
+  VMs and vCPUs per hypervisor, the spread between the packed and the empty hosts, and
+  how many hosts sit idle. Answers "is the fleet evenly loaded, and which host is the
+  outlier?".
+datasource: prometheus
+tags: [openstack, nova, density, distribution, openstack-exporter]
+seo_phrase: OpenStack Nova VM density Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "Which hypervisor is packing the most instances?"
+  - "How lopsided is the fleet — what is the gap between the densest and emptiest host?"
+  - "How many hosts are effectively empty (drain or decommission candidates)?"
+  - "Does vCPU density track instance density, or are a few hosts carrying fat flavours?"
+  - "Is density drifting toward a few hosts over time?"
+
+production_lessons: >-
+  A balanced fleet and a lopsided one can share the same average and behave completely
+  differently: the lopsided one fails builds and throws steal-time alerts on its hot
+  hosts while paying to power near-empty ones. So this dashboard leads with the
+  **densest host** and an **imbalance** measure rather than a mean. Two patterns recur
+  in production — a few hosts hoarding instances because the others are filtered out by
+  full memory or strict aggregates, and a cluster of near-empty hosts left behind after
+  a migration that nobody rebalanced. Watching vCPU density alongside instance density
+  catches the third case: a host with few but very large instances that is full on cores
+  while looking sparse on VM count.
+
+data_sources:
+  - "`openstack-exporter` (github.com/openstack-exporter/openstack-exporter) scraping
+    the Nova API: `openstack_nova_running_vms` and `openstack_nova_vcpus_used`, labelled
+    by `hostname` and `aggregate`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_nova_running_vms, job)
+    description: Prometheus scrape job for your openstack-exporter target.
+    multi: false
+    includeAll: false
+  - name: aggregate
+    label: Aggregate
+    query: label_values(openstack_nova_running_vms{job="$job"}, aggregate)
+    description: Host aggregate / availability zone to scope to; All for the whole fleet.
+    multi: false
+    includeAll: true
+  - name: hostname
+    label: Hypervisor
+    query: label_values(openstack_nova_running_vms{job="$job", aggregate=~"$aggregate"}, hostname)
+    description: Compute host(s) to include; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Density & balance — read these first
+    panels:
+      - type: stat
+        title: Densest hypervisor
+        description: Highest instance count on any single host in scope.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 30}
+          - {color: red, value: 50}
+        targets:
+          - expr: >-
+              max(openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}) or vector(0)
+            instant: true
+            legend: max
+      - type: stat
+        title: Density spread (max − min)
+        description: Instance gap between the fullest and emptiest host. A wide gap means an unbalanced fleet.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 15}
+          - {color: red, value: 30}
+        targets:
+          - expr: >-
+              (max(openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+              - min(openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})) or vector(0)
+            instant: true
+            legend: spread
+      - type: stat
+        title: Empty hosts
+        description: Hosts in scope running zero instances — candidates to drain, decommission or schedule onto.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+        targets:
+          - expr: >-
+              count(openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"} == 0) or vector(0)
+            instant: true
+            legend: empty
+      - type: stat
+        title: Total instances
+        description: All running instances across the selected hosts.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              sum(openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}) or vector(0)
+            instant: true
+            legend: total
+
+  - title: Per-host density (top-N)
+    panels:
+      - type: bargauge
+        title: Instances per hypervisor
+        description: Ranked instance count per host. The bars should look even on a balanced fleet.
+        unit: short
+        min: 0
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 30}
+          - {color: red, value: 50}
+        targets:
+          - expr: openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            instant: true
+            legend: "{{hostname}}"
+      - type: bargauge
+        title: Allocated vCPUs per hypervisor
+        description: vCPUs committed per host. Compare with instance count to spot hosts carrying fat flavours.
+        unit: short
+        min: 0
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            instant: true
+            legend: "{{hostname}}"
+
+  - title: Distribution & drift
+    panels:
+      - type: timeseries
+        title: Instances per host over time
+        description: Density per hypervisor over the window. A line pulling away from the pack is drift toward imbalance.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            legend: "{{hostname}}"
+      - type: timeseries
+        title: Fleet density envelope
+        description: Max, mean and min instances per host. A widening max-to-min band is the fleet going lopsided.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: max(openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+            legend: max host
+          - expr: avg(openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+            legend: mean
+          - expr: min(openstack_nova_running_vms{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+            legend: min host
+
+alerts:
+  - name: NovaFleetImbalanced
+    severity: warning
+    expr: >-
+      (max(openstack_nova_running_vms) - min(openstack_nova_running_vms)) > 30
+    for: 30m
+    summary: "Nova fleet instance spread is {{ $value }} (packed vs empty)"
+    why: A large density gap means the scheduler is concentrating load — hot hosts hit steal/capacity limits while paid-for hosts sit idle.
+    investigate: "Open Nova VM Density; check whether the empty hosts are disabled, full on memory, or excluded by aggregate/affinity filters."
+    runbook: "Re-enable wrongly disabled hosts, relax over-strict filters, or live-migrate instances off the packed hosts to rebalance."
+    recovery: Clears when the spread falls back below 30 for 10m.
+    false_positives: Intentional pinning (dedicated/anti-affinity tiers) or a small fleet where one big host skews the gap — scope by aggregate.
+  - name: NovaHypervisorOverPacked
+    severity: warning
+    expr: openstack_nova_running_vms > 50
+    for: 20m
+    summary: "Hypervisor {{ $labels.hostname }} running {{ $value }} instances"
+    why: Very high instance counts on one host raise noisy-neighbour contention and make the host a single large blast radius.
+    investigate: "Check the host's vCPU/memory allocation and steal time; confirm the density is intended for its flavour mix."
+    runbook: "Migrate some instances to emptier hosts; review the scheduler weights so new builds spread more evenly."
+    recovery: Clears when the host drops below 50 instances for 10m.
+    false_positives: High-density small-flavour tiers run this hot by design — raise the threshold for that aggregate.
+
+troubleshooting:
+  - symptom: Spread reads high but the fleet is fine
+    cause: One legitimately large or one legitimately empty host dominates max/min in a small fleet.
+    action: Scope `$hostname`/`$aggregate` to comparable hosts before judging balance.
+  - symptom: vCPU bars and instance bars disagree sharply
+    cause: A host runs a few very large flavours, or many tiny ones — count and core load diverge.
+    action: That is the insight, not a bug; plan capacity on cores, not instance count, for those hosts.
+  - symptom: Empty-hosts count is high after a migration
+    cause: Instances were drained off hosts that were never repopulated or decommissioned.
+    action: Rebalance new builds onto the empty hosts or remove them from the fleet to save power.
+
+performance: >-
+  Every panel is one series per host (`openstack_nova_running_vms` /
+  `openstack_nova_vcpus_used`), so the dashboard is cheap regardless of instance count —
+  it never touches per-instance series. Aggregations (`max`/`min`/`avg`/`count`) collapse
+  to a single series. A 1m refresh is plenty; density changes on the timescale of builds
+  and migrations, not seconds.
+
+customization: >-
+  Set the density thresholds (30/50 instances) to your flavour mix and hardware, and the
+  spread thresholds (15/30) to your tolerance for imbalance. Use the `aggregate` variable
+  to compare like-for-like tiers. Add a `count(... > 0)` panel if you want utilisation of
+  the host pool (non-empty hosts) rather than raw density.

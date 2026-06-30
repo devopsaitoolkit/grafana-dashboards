@@ -1,0 +1,257 @@
+# NIC throughput and errors for a fleet of Linux hosts scraped by node_exporter.
+uid: linux-network
+title: Linux / Network
+description: >-
+  Network interface health for Linux hosts scraped by node_exporter: receive/transmit
+  throughput, error and drop rates, and conntrack table saturation. Answers "is the
+  NIC the bottleneck, are we dropping packets, and is the connection-tracking table
+  about to overflow?" rather than drawing raw byte counters.
+datasource: prometheus
+tags: [linux, network, node-exporter, saturation]
+seo_phrase: Node Exporter network Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which hosts/interfaces are the top talkers right now?"
+  - "Are we dropping or erroring packets on receive or transmit?"
+  - "How close is the conntrack table to its limit?"
+  - "Is transmit or receive the saturated direction?"
+
+production_lessons: >-
+  Network incidents split cleanly into two failure modes, and this dashboard leads with
+  both. The first is **bandwidth saturation** — easy to see as Bps near the link ceiling.
+  The second, far nastier, is **silent packet loss**: drops and errors that never show up
+  in throughput graphs but quietly murder TCP throughput and tail latency. The single most
+  overlooked panel here is **conntrack utilisation**: when `nf_conntrack_entries` reaches
+  its limit the kernel starts dropping *new* connections with no obvious CPU or bandwidth
+  symptom, so a host that "looks idle" refuses connections. Watch drops and conntrack
+  before you watch bytes.
+
+data_sources:
+  - "`node_exporter` `netdev` collector (`node_network_receive_bytes_total`,
+    `node_network_transmit_bytes_total`, `node_network_receive_errs_total`,
+    `node_network_receive_drop_total`, `node_network_transmit_drop_total`)."
+  - "`node_exporter` `conntrack` collector (`node_nf_conntrack_entries`,
+    `node_nf_conntrack_entries_limit`)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job for your node_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(node_uname_info{job="$job"}, instance)
+    description: Host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Saturation and loss — read these first
+    panels:
+      - type: stat
+        title: Top talker (rx+tx)
+        description: Highest combined receive + transmit throughput on any single interface.
+        unit: Bps
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              max(
+                rate(node_network_receive_bytes_total{job="$job", instance=~"$instance", device!~"lo|veth.*|docker.*|br-.*|cni.*|flannel.*"}[5m])
+                + rate(node_network_transmit_bytes_total{job="$job", instance=~"$instance", device!~"lo|veth.*|docker.*|br-.*|cni.*|flannel.*"}[5m])
+              ) or vector(0)
+            instant: true
+            legend: top talker
+      - type: stat
+        title: Packet drops/s
+        description: Total receive + transmit packet drops per second across selected interfaces. Should be zero on a healthy fleet.
+        unit: ops
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 10}
+        targets:
+          - expr: >-
+              sum(
+                rate(node_network_receive_drop_total{job="$job", instance=~"$instance", device!~"lo"}[5m])
+                + rate(node_network_transmit_drop_total{job="$job", instance=~"$instance", device!~"lo"}[5m])
+              ) or vector(0)
+            instant: true
+            legend: drops/s
+      - type: stat
+        title: Receive errors/s
+        description: Total receive errors per second — CRC/frame/FIFO errors point at cabling, NICs or driver issues.
+        unit: ops
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.1}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(rate(node_network_receive_errs_total{job="$job", instance=~"$instance", device!~"lo"}[5m])) or vector(0)
+            instant: true
+            legend: rx errors/s
+      - type: gauge
+        title: Max conntrack usage
+        description: Highest connection-tracking table utilisation across hosts. At 100% the kernel drops new connections.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 70}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(100 * node_nf_conntrack_entries{job="$job", instance=~"$instance"}
+              / clamp_min(node_nf_conntrack_entries_limit{job="$job", instance=~"$instance"}, 1)) or vector(0)
+            instant: true
+            legend: max conntrack
+
+  - title: Throughput
+    panels:
+      - type: timeseries
+        title: Receive throughput by interface
+        description: Per-interface inbound bytes per second. Compare against the link ceiling.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_network_receive_bytes_total{job="$job", instance=~"$instance", device!~"lo|veth.*|docker.*|br-.*|cni.*|flannel.*"}[5m])
+            legend: "{{instance}} {{device}}"
+      - type: timeseries
+        title: Transmit throughput by interface
+        description: Per-interface outbound bytes per second. Egress is often the first link to saturate.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_network_transmit_bytes_total{job="$job", instance=~"$instance", device!~"lo|veth.*|docker.*|br-.*|cni.*|flannel.*"}[5m])
+            legend: "{{instance}} {{device}}"
+
+  - title: Errors and drops
+    panels:
+      - type: timeseries
+        title: Drops by interface
+        description: Receive and transmit drops per interface. Persistent drops mean ring-buffer or qdisc overrun.
+        unit: ops
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: rate(node_network_receive_drop_total{job="$job", instance=~"$instance", device!~"lo"}[5m])
+            legend: "{{instance}} {{device}} rx-drop"
+          - expr: rate(node_network_transmit_drop_total{job="$job", instance=~"$instance", device!~"lo"}[5m])
+            legend: "{{instance}} {{device}} tx-drop"
+      - type: timeseries
+        title: Receive errors by interface
+        description: Hardware/driver receive errors per interface — a steady rate is a failing NIC or cable.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_network_receive_errs_total{job="$job", instance=~"$instance", device!~"lo"}[5m])
+            legend: "{{instance}} {{device}}"
+
+  - title: Top talkers and conntrack
+    panels:
+      - type: bargauge
+        title: Top interfaces by total throughput
+        description: Ranked rx+tx throughput — find the busy links at a glance.
+        unit: Bps
+        min: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              topk(10,
+                rate(node_network_receive_bytes_total{job="$job", instance=~"$instance", device!~"lo|veth.*|docker.*|br-.*|cni.*|flannel.*"}[5m])
+                + rate(node_network_transmit_bytes_total{job="$job", instance=~"$instance", device!~"lo|veth.*|docker.*|br-.*|cni.*|flannel.*"}[5m]))
+            instant: true
+            legend: "{{instance}} {{device}}"
+      - type: timeseries
+        title: Conntrack utilisation by host
+        description: Tracked connections as a percentage of the table limit. Approaching 100% drops new connections.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * node_nf_conntrack_entries{job="$job", instance=~"$instance"}
+              / clamp_min(node_nf_conntrack_entries_limit{job="$job", instance=~"$instance"}, 1)
+            legend: "{{instance}}"
+
+alerts:
+  - name: HostNetworkPacketDrops
+    severity: warning
+    expr: >-
+      rate(node_network_receive_drop_total{device!~"lo"}[5m])
+      + rate(node_network_transmit_drop_total{device!~"lo"}[5m]) > 1
+    for: 10m
+    summary: "Interface {{ $labels.device }} on {{ $labels.instance }} dropping > 1 pkt/s for 10m"
+    why: Packet drops trigger TCP retransmits and collapse effective throughput long before bandwidth graphs look full.
+    investigate: "Check whether throughput is near the link ceiling (saturation) or low (ring-buffer/qdisc overrun); inspect `ethtool -S` for the drop counters."
+    runbook: "Raise NIC ring-buffer sizes (ethtool -G), tune the qdisc, or shed load; for cloud NICs, check the instance's packet-per-second allowance."
+    recovery: Clears when the drop rate falls below 1 pkt/s for 5m.
+    false_positives: Brief drops during traffic bursts or interface flaps; the 10m `for` filters most transients.
+  - name: HostNetworkReceiveErrors
+    severity: warning
+    expr: rate(node_network_receive_errs_total{device!~"lo"}[5m]) > 1
+    for: 10m
+    summary: "Interface {{ $labels.device }} on {{ $labels.instance }} > 1 rx error/s for 10m"
+    why: Receive errors (CRC/frame/FIFO) indicate a physical-layer or driver fault that silently corrupts and discards frames.
+    investigate: "Inspect `ethtool -S` error counters and the switch port; on bare metal, suspect the cable, SFP or NIC."
+    runbook: "Reseat or replace the cable/SFP, move to another switch port, or update the NIC driver/firmware; drain the host if errors persist."
+    recovery: Clears when the error rate falls below 1/s for 5m.
+    false_positives: A one-off burst after a link renegotiation; sustained errors are real hardware faults.
+  - name: HostConntrackTableNearLimit
+    severity: critical
+    expr: >-
+      100 * node_nf_conntrack_entries / clamp_min(node_nf_conntrack_entries_limit, 1) > 90
+    for: 5m
+    summary: "Host {{ $labels.instance }} conntrack table > 90% full"
+    why: When the connection-tracking table fills, the kernel drops new connections and logs an nf_conntrack table-full message — the host refuses traffic while looking otherwise healthy.
+    investigate: "Check for a connection flood or leak (ss -s, conntrack -L); correlate with a spike in new connections on the throughput panels."
+    runbook: "Raise `net.netfilter.nf_conntrack_max`, shorten conntrack timeouts, or stop the connection source; consider NOTRACK rules for high-volume stateless traffic."
+    recovery: Clears when utilisation falls below 90% for 5m.
+    false_positives: Hosts that legitimately hold many connections (load balancers) — size the table for them and raise the threshold.
+
+troubleshooting:
+  - symptom: Throughput panels are noisy with hundreds of veth series
+    cause: Container virtual interfaces are being scraped.
+    action: The `device!~"veth.*|docker.*|br-.*|cni.*|flannel.*"` filter trims them; extend the regex for your CNI.
+  - symptom: Conntrack panels show "No data"
+    cause: The conntrack collector is disabled or netfilter conntrack is not loaded.
+    action: Enable the node_exporter conntrack collector; confirm `node_nf_conntrack_entries` exists in Explore.
+  - symptom: Negative or spiky rates after reboot
+    cause: Counter reset on interface re-creation.
+    action: rate() handles resets; ignore the first window after boot or interface flap.
+
+performance: >-
+  Rates use a 5m window (≥4× a 15s scrape). Per-interface panels can explode in cardinality
+  on container hosts; the device regex filter is essential. Conntrack ratios guard the
+  denominator with `clamp_min(...,1)`. For large fleets, pre-compute top-talker rankings
+  with a recording rule rather than `topk` over raw series at render time.
+
+customization: >-
+  Tune the device regex to your interface naming (bond/eno/ens/CNI). Adjust the drop/error
+  thresholds to your tolerance — strict zero-drop SLOs should lower them. Raise the
+  conntrack threshold for load balancers that legitimately hold many flows.

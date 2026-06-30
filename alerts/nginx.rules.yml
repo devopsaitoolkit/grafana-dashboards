@@ -1,0 +1,81 @@
+# Alerting rules for the nginx dashboards.
+# Generated from tools/specs/nginx/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: nginx.rules
+  rules:
+  - alert: NginxConnectionsDropped
+    expr: "sum by (job, instance) (\n  rate(nginx_connections_accepted[5m]) - rate(nginx_connections_handled[5m])\n\
+      ) > 0"
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: NGINX {{ $labels.instance }} is dropping connections
+      description: Dropped connections mean clients are refused before being served — a hard capacity
+        limit, usually worker_connections or file descriptors.
+      runbook: Raise `worker_connections` and `worker_rlimit_nofile`, increase the systemd `LimitNOFILE`,
+        and reload NGINX; if upstreams are slow, fix them so workers free up.
+      dashboard: dashboards/nginx/connections-and-upstreams.json
+  - alert: NginxExporterDown
+    expr: nginx_up == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: NGINX target {{ $labels.instance }} is down (nginx_up == 0)
+      description: The exporter can't reach stub_status — NGINX is down, unreachable, or stub_status is
+        misconfigured. You are blind to the proxy.
+      runbook: Restart NGINX or the exporter; verify the `stub_status` location is allowed from the exporter's
+        source IP.
+      dashboard: dashboards/nginx/connections-and-upstreams.json
+  - alert: NginxUpstreamErrorRatio
+    expr: 100 * sum by (job, upstream) (rate(nginx_vts_upstream_responses_total{code="5xx"}[5m])) / clamp_min(sum
+      by (job, upstream) (rate(nginx_vts_upstream_responses_total[5m])), 1) > 5
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: NGINX upstream {{ $labels.upstream }} returning >5% 5xx
+      description: A backend behind NGINX is failing a meaningful share of requests, which surfaces to
+        users as errors or retries.
+      runbook: Drain or restart the unhealthy member, roll back the backend deploy, or add capacity.
+      dashboard: dashboards/nginx/connections-and-upstreams.json
+  - alert: NginxHigh5xxRatio
+    expr: 100 * sum by (job, host) (rate(nginx_vts_server_requests_total{code="5xx"}[5m])) / clamp_min(sum
+      by (job, host) (rate(nginx_vts_server_requests_total{code="total"}[5m])), 1) > 5
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: NGINX host {{ $labels.host }} serving >5% 5xx
+      description: A sustained server-error ratio means users are getting failures — this is a customer-facing
+        outage signal.
+      runbook: Identify the failing upstream; check the backend's own health/logs, roll back the most
+        recent deploy, or drain the unhealthy member.
+      dashboard: dashboards/nginx/requests-and-latency.json
+  - alert: NginxUpstreamSlow
+    expr: max by (job, upstream) (quantile_over_time(0.95, nginx_vts_upstream_response_seconds[5m])) >
+      1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: NGINX upstream {{ $labels.upstream }} p95 response > 1s
+      description: Slow upstream responses inflate user-facing latency even when error rate looks fine.
+      runbook: Scale or restart the slow backend, add capacity, or check for a downstream dependency (DB/cache)
+        that is the real bottleneck.
+      dashboard: dashboards/nginx/requests-and-latency.json
+  - alert: NginxHigh4xxRatio
+    expr: 100 * sum by (job, host) (rate(nginx_vts_server_requests_total{code="4xx"}[5m])) / clamp_min(sum
+      by (job, host) (rate(nginx_vts_server_requests_total{code="total"}[5m])), 1) > 20
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: NGINX host {{ $labels.host }} serving >20% 4xx
+      description: A jump in client errors often signals a broken release (wrong routes), an auth outage,
+        or an abusive client.
+      runbook: If it followed a deploy, roll back; if it is a single client/IP, rate-limit or block it.
+      dashboard: dashboards/nginx/requests-and-latency.json

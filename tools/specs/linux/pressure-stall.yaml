@@ -1,0 +1,239 @@
+# PSI pressure-stall information for Linux hosts scraped by node_exporter.
+uid: linux-pressure-stall
+title: Linux / Pressure Stall (PSI)
+description: >-
+  Pressure Stall Information (PSI) for Linux hosts scraped by node_exporter: the
+  fraction of time tasks stalled waiting on CPU, IO and memory, split into "some"
+  (any task waiting) and "full" (every task waiting). Answers "which resource is the
+  real bottleneck?" with a single normalised signal that utilisation graphs miss.
+datasource: prometheus
+tags: [linux, psi, pressure, saturation, node-exporter]
+seo_phrase: Node Exporter PSI pressure Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which resource — CPU, IO or memory — is causing the most stall right now?"
+  - "Are tasks merely contended (some pressure) or fully blocked (full pressure)?"
+  - "Which host has the highest pressure on each resource?"
+  - "Is memory pressure rising before swapping or OOM becomes visible?"
+
+production_lessons: >-
+  Utilisation lies about saturation: a host can sit at 60% CPU and still stall constantly if
+  work arrives in bursts, and a disk can show modest throughput while tasks queue for it.
+  Linux PSI fixes this by measuring the thing you actually care about — **how much time
+  tasks spent waiting** for a resource — as a clean 0–100% signal per resource. This
+  dashboard leads with one gauge per resource so on-call can point at the bottleneck in five
+  seconds instead of cross-reading CPU, disk and memory dashboards. The key distinction is
+  **some vs full**: "some" pressure means at least one task is waiting (contention,
+  expected under load), while "full" pressure means *every* runnable task is blocked and the
+  host is doing no useful work — full memory pressure in particular is the earliest reliable
+  warning of impending thrash and OOM, firing well before swap or oom_kill move. PSI needs
+  a 4.20+ kernel with PSI enabled, and CPU exposes "some" only.
+
+data_sources:
+  - "`node_exporter` `pressure` collector (`node_pressure_cpu_waiting_seconds_total`,
+    `node_pressure_io_waiting_seconds_total`, `node_pressure_io_stalled_seconds_total`,
+    `node_pressure_memory_waiting_seconds_total`,
+    `node_pressure_memory_stalled_seconds_total`). Requires a 4.20+ kernel with PSI enabled."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job for your node_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(node_uname_info{job="$job"}, instance)
+    description: Host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Bottleneck — read these first
+    panels:
+      - type: gauge
+        title: Max CPU pressure (some)
+        description: Highest fraction of time any host had at least one task waiting on CPU.
+        unit: percentunit
+        min: 0
+        max: 1
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.2}
+          - {color: red, value: 0.5}
+        targets:
+          - expr: max(rate(node_pressure_cpu_waiting_seconds_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: cpu some
+      - type: gauge
+        title: Max IO pressure (some)
+        description: Highest fraction of time any host had at least one task waiting on IO.
+        unit: percentunit
+        min: 0
+        max: 1
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.2}
+          - {color: red, value: 0.5}
+        targets:
+          - expr: max(rate(node_pressure_io_waiting_seconds_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: io some
+      - type: gauge
+        title: Max memory pressure (some)
+        description: Highest fraction of time any host had at least one task waiting on memory. The earliest thrash warning.
+        unit: percentunit
+        min: 0
+        max: 1
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.1}
+          - {color: red, value: 0.3}
+        targets:
+          - expr: max(rate(node_pressure_memory_waiting_seconds_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: mem some
+      - type: stat
+        title: Max memory pressure (full)
+        description: Highest fraction of time every task on a host was blocked on memory. Non-trivial values mean active thrashing.
+        unit: percentunit
+        decimals: 3
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.05}
+          - {color: red, value: 0.2}
+        targets:
+          - expr: max(rate(node_pressure_memory_stalled_seconds_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: mem full
+
+  - title: CPU pressure
+    panels:
+      - type: timeseries
+        title: CPU pressure (some) per host
+        description: Per-host fraction of time at least one task waited for CPU. Rises with run-queue contention.
+        unit: percentunit
+        min: 0
+        max: 1
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.5}
+        targets:
+          - expr: rate(node_pressure_cpu_waiting_seconds_total{job="$job", instance=~"$instance"}[5m])
+            legend: "{{instance}}"
+
+  - title: IO pressure
+    panels:
+      - type: timeseries
+        title: IO pressure some vs full (fleet)
+        description: Some (any task waiting) vs full (all tasks blocked) IO pressure. A growing gap toward full means the disk is the bottleneck.
+        unit: percentunit
+        min: 0
+        max: 1
+        legend: table
+        targets:
+          - expr: avg(rate(node_pressure_io_waiting_seconds_total{job="$job", instance=~"$instance"}[5m]))
+            legend: io some
+          - expr: avg(rate(node_pressure_io_stalled_seconds_total{job="$job", instance=~"$instance"}[5m]))
+            legend: io full
+      - type: timeseries
+        title: IO pressure (some) per host
+        description: Per-host IO stall fraction — find the box whose tasks are waiting on storage.
+        unit: percentunit
+        min: 0
+        max: 1
+        legend: table
+        targets:
+          - expr: rate(node_pressure_io_waiting_seconds_total{job="$job", instance=~"$instance"}[5m])
+            legend: "{{instance}}"
+
+  - title: Memory pressure
+    panels:
+      - type: timeseries
+        title: Memory pressure some vs full (fleet)
+        description: Some vs full memory pressure. Full memory pressure is the leading indicator of thrash and impending OOM.
+        unit: percentunit
+        min: 0
+        max: 1
+        legend: table
+        targets:
+          - expr: avg(rate(node_pressure_memory_waiting_seconds_total{job="$job", instance=~"$instance"}[5m]))
+            legend: mem some
+          - expr: avg(rate(node_pressure_memory_stalled_seconds_total{job="$job", instance=~"$instance"}[5m]))
+            legend: mem full
+      - type: bargauge
+        title: Top hosts by memory pressure (full)
+        description: Ranked full memory pressure — the hosts closest to thrashing first.
+        unit: percentunit
+        min: 0
+        max: 1
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.05}
+          - {color: red, value: 0.2}
+        targets:
+          - expr: topk(10, rate(node_pressure_memory_stalled_seconds_total{job="$job", instance=~"$instance"}[5m]))
+            instant: true
+            legend: "{{instance}}"
+
+alerts:
+  - name: HostMemoryPressureFull
+    severity: critical
+    expr: rate(node_pressure_memory_stalled_seconds_total[5m]) > 0.2
+    for: 5m
+    summary: "Host {{ $labels.instance }} full memory pressure over 20%"
+    why: Full memory pressure means every task was blocked on memory for over a fifth of the time — the host is thrashing and OOM is imminent.
+    investigate: "Open Linux / Memory for the host and check available memory, swap-in rate and major faults; PSI moves before oom_kill does."
+    runbook: "Shed or rightsize the memory hog, add RAM, or move workloads off the host before the OOM killer makes the choice for you."
+    recovery: Clears when full memory pressure falls below 20% for 5m.
+    false_positives: A brief burst during a large allocation that the kernel satisfies quickly; the 5m `for` filters most transients.
+  - name: HostIOPressureHigh
+    severity: warning
+    expr: rate(node_pressure_io_waiting_seconds_total[5m]) > 0.5
+    for: 10m
+    summary: "Host {{ $labels.instance }} IO pressure (some) over 50%"
+    why: Tasks spent more than half the time waiting on IO — storage is the bottleneck even if disk throughput looks unremarkable.
+    investigate: "Cross-check Linux / Disk IO for the busiest device's %util and latency to find which volume is stalling tasks."
+    runbook: "Move hot data to faster storage, raise provisioned IOPS, or reduce the IO source (compaction, backup, log volume)."
+    recovery: Clears when IO some-pressure falls below 50% for 5m.
+    false_positives: Scheduled backups and bulk-IO jobs raise IO pressure by design — scope or silence during known windows.
+  - name: HostCPUPressureHigh
+    severity: warning
+    expr: rate(node_pressure_cpu_waiting_seconds_total[5m]) > 0.5
+    for: 10m
+    summary: "Host {{ $labels.instance }} CPU pressure (some) over 50%"
+    why: Tasks spent more than half the time waiting for a CPU — real scheduling contention that utilisation averages can hide.
+    investigate: "Compare with normalized load and run queue on Linux / Load Average; identify the hot processes with top/pidstat."
+    runbook: "Rightsize or scale out the contended workload, or relieve oversubscription by moving tasks off the host."
+    recovery: Clears when CPU some-pressure falls below 50% for 5m.
+    false_positives: Batch/CI hosts intentionally run CPU-bound — scope by role or raise the threshold for them.
+
+troubleshooting:
+  - symptom: All PSI panels show "No data"
+    cause: Kernel older than 4.20, PSI not enabled (`psi=1`), or the pressure collector disabled.
+    action: Enable PSI on the kernel and the node_exporter pressure collector; confirm `node_pressure_cpu_waiting_seconds_total` in Explore.
+  - symptom: There is no CPU "full" line
+    cause: The kernel does not report full pressure for CPU — only some.
+    action: Expected; use some-pressure for CPU and reserve the some/full split for IO and memory.
+  - symptom: Pressure looks high but utilisation looks fine
+    cause: That is exactly what PSI is for — bursty arrival stalls tasks without raising average utilisation.
+    action: Trust PSI as the saturation signal and use the utilisation dashboards to find the offending workload.
+
+performance: >-
+  PSI counters are accumulated stall-seconds, so `rate(...[5m])` yields a clean 0–1 fraction
+  with a 5m window (≥4× a 15s scrape). Series are one per host per resource — very low
+  cardinality — so this dashboard stays light even on large fleets. The `or vector(0)`
+  guards keep headline gauges from going blank on hosts that lack PSI.
+
+customization: >-
+  Tune the some/full thresholds to your latency tolerance — latency-sensitive tiers should
+  alert on lower full-pressure values. Pair the CPU/IO some-pressure alerts with a load or
+  %util condition to suppress intentional batch hosts. PSI is also available per-cgroup; this
+  dashboard uses the host-level files exposed by node_exporter.

@@ -1,0 +1,13 @@
+# Auto-provision the Prometheus datasource with uid DS_PROMETHEUS so the
+# provisioned dashboards bind to it without manual selection.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: DS_PROMETHEUS
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s

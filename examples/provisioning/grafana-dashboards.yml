@@ -1,0 +1,10 @@
+# Load every dashboard under /var/lib/grafana/dashboards, preserving the folder tree.
+apiVersion: 1
+providers:
+  - name: devopsaitoolkit
+    type: file
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

@@ -1,0 +1,222 @@
+title: OpenStack / MariaDB — Galera Cluster Health
+description: >-
+  Galera (wsrep) cluster health behind the OpenStack databases: which nodes are
+  Synced, the cluster size versus expected, flow-control pause time and the
+  replication receive/send queues. Answers "is the cluster healthy and writable, or
+  is one node desynced and dragging replication?" before the control plane sees
+  write errors.
+datasource: prometheus
+tags: [openstack, mariadb, galera, wsrep, mysqld-exporter]
+seo_phrase: MariaDB Galera cluster Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are all nodes in the Synced state (wsrep_local_state = 4)?"
+  - "Is the cluster the size I expect, or did a node drop out?"
+  - "Is flow control pausing writes (a slow node throttling the whole cluster)?"
+  - "Are the replication receive/send queues backing up on any node?"
+
+production_lessons: >-
+  Galera fails in a way that average dashboards miss: the cluster stays "up" while
+  one node silently leaves the Synced state, and from then on writes either skip
+  that node or — worse — the whole cluster throttles itself via flow control to let
+  the laggard catch up, so every OpenStack write slows down at once. The two
+  signals that matter are `wsrep_local_state == 4` (Synced) per node and
+  `wsrep_flow_control_paused`: a node Donor/Joiner during SST, or a non-zero
+  flow-control pause, explains control-plane write latency that CPU and connection
+  graphs never will. Cluster size dropping below the expected odd number is the
+  split-brain tripwire.
+
+data_sources:
+  - "`mysqld_exporter` on each MariaDB/Galera node with the global-status collector
+    enabled, exposing `mysql_global_status_wsrep_*` and `mysql_up`."
+  - "`wsrep_local_state` values: 1=Joining, 2=Donor/Desynced, 3=Joined, 4=Synced.
+    `wsrep_flow_control_paused` is the fraction of time (0-1) replication was
+    paused since the last status read."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(mysql_global_status_wsrep_cluster_size, job)
+    description: Prometheus scrape job for your mysqld_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Node
+    query: label_values(mysql_global_status_wsrep_cluster_size{job="$job"}, instance)
+    description: Galera node(s); supports multi-select.
+    multi: true
+    includeAll: true
+  - name: expected
+    label: Expected nodes
+    type: constant
+    value: "3"
+    description: Expected Galera cluster size used by the size alert/threshold.
+
+rows:
+  - title: Cluster state — read these first
+    panels:
+      - type: stat
+        title: Nodes not Synced
+        description: Count of nodes whose wsrep_local_state is not 4 (Synced). Any value >0 means degraded replication.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(mysql_global_status_wsrep_local_state{job="$job", instance=~"$instance"} != 4) or vector(0)
+            instant: true
+            legend: not synced
+      - type: stat
+        title: Cluster size
+        description: Number of nodes the cluster believes are members. Should equal your expected odd node count.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 2}
+          - {color: green, value: 3}
+        targets:
+          - expr: max(mysql_global_status_wsrep_cluster_size{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: size
+      - type: stat
+        title: Nodes wsrep-ready
+        description: Count of nodes reporting wsrep_ready = 1 (able to accept queries via the cluster).
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: sum(mysql_global_status_wsrep_ready{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: ready
+      - type: stat
+        title: Max flow-control paused
+        description: Highest fraction of time replication was paused by flow control. Above zero, a slow node is throttling cluster writes.
+        unit: percentunit
+        decimals: 3
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.01}
+          - {color: red, value: 0.1}
+        targets:
+          - expr: max(mysql_global_status_wsrep_flow_control_paused{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: paused
+
+  - title: Per-node sync state
+    panels:
+      - type: state-timeline
+        title: wsrep state per node
+        description: Replication state history per node. Anything other than Synced (4) during steady state needs investigation.
+        unit: short
+        legend: hidden
+        mappings:
+          - type: value
+            options:
+              "1": {text: Joining, color: yellow}
+              "2": {text: Donor/Desynced, color: orange}
+              "3": {text: Joined, color: yellow}
+              "4": {text: Synced, color: green}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 4}
+        targets:
+          - expr: mysql_global_status_wsrep_local_state{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Cluster size over time
+        description: Membership over time. A dip is a node leaving (planned drain or partition); a drop to an even number risks split-brain.
+        unit: short
+        min: 0
+        legend: table
+        drawStyle: line
+        targets:
+          - expr: max(mysql_global_status_wsrep_cluster_size{job="$job", instance=~"$instance"})
+            legend: size
+
+  - title: Replication pressure
+    panels:
+      - type: timeseries
+        title: Flow control paused
+        description: Per-node fraction of time replication is paused. Sustained non-zero values directly slow every OpenStack write.
+        unit: percentunit
+        min: 0
+        legend: table
+        targets:
+          - expr: mysql_global_status_wsrep_flow_control_paused{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Receive & send queues
+        description: Replication apply (recv) and replicate (send) queue depth per node. A deep recv queue is a node that cannot apply writesets fast enough.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: mysql_global_status_wsrep_local_recv_queue{job="$job", instance=~"$instance"}
+            legend: "{{instance}} recv"
+          - expr: mysql_global_status_wsrep_local_send_queue{job="$job", instance=~"$instance"}
+            legend: "{{instance}} send"
+
+alerts:
+  - name: GaleraNodeNotSynced
+    severity: critical
+    expr: mysql_global_status_wsrep_local_state != 4
+    for: 2m
+    summary: "Galera node {{ $labels.instance }} not Synced (state {{ $value }})"
+    why: A node out of the Synced state is not reliably part of replication; OpenStack writes routed there can fail or the cluster may exclude it, reducing redundancy.
+    investigate: "Open OpenStack / MariaDB — Galera Cluster Health, check the per-node state timeline and whether the node is doing an SST (Donor/Joiner) or genuinely stuck."
+    runbook: "If it is doing SST, let it finish; if stuck, check the node's error log, network to peers, and restart it to rejoin (it will re-sync via SST/IST)."
+    recovery: Clears when the node returns to state 4 (Synced).
+    false_positives: Planned SST after a node restart shows Donor/Joiner briefly; the 2m `for` filters short transitions.
+  - name: GaleraClusterSizeDegraded
+    severity: critical
+    expr: max(mysql_global_status_wsrep_cluster_size) < 3
+    for: 3m
+    summary: "Galera cluster size dropped below 3"
+    why: Below the expected odd member count the cluster loses redundancy and is one failure away from losing quorum and going read-only, which freezes the OpenStack control plane.
+    investigate: "Identify the missing node and check its mysqld service, network partition status and Galera error log."
+    runbook: "Recover the down node so it rejoins; never bootstrap a new primary component while others are alive (split-brain risk)."
+    recovery: Clears when membership returns to the expected size.
+    false_positives: Rolling maintenance; silence during planned node drains or set the threshold to your real cluster size.
+  - name: GaleraFlowControlPausing
+    severity: warning
+    expr: mysql_global_status_wsrep_flow_control_paused > 0.1
+    for: 5m
+    summary: "Galera flow control pausing writes on {{ $labels.instance }}"
+    why: Flow control pauses the whole cluster's writes to let a slow node catch up, so a single lagging node adds latency to every OpenStack database write.
+    investigate: "Check the receive-queue panel for the lagging node and its disk/CPU; a slow disk or saturated node is the usual cause."
+    runbook: "Relieve the slow node (faster storage, reduce its other load) or temporarily desync it from the load balancer; tune `gcs.fc_limit` if pauses are chronic."
+    recovery: Clears when flow-control pause falls back near zero.
+    false_positives: Brief pauses during an SST or a large batch write; the 5m window filters short spikes.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: mysqld_exporter cannot read global status, or wsrep is not enabled (not a Galera build).
+    action: "Grant the exporter user `PROCESS`/`REPLICATION CLIENT`; confirm `SHOW STATUS LIKE 'wsrep_%'` returns rows on the node."
+  - symptom: Cluster size differs between nodes
+    cause: A network partition split the cluster; nodes disagree on membership.
+    action: "Run `wsrep_cluster_status`/`SHOW STATUS LIKE 'wsrep_cluster_status'`; resolve the partition before any write proceeds."
+  - symptom: Flow-control paused stuck at a high value
+    cause: A chronically slow node (disk or CPU bound) keeps the cluster throttled.
+    action: Move that node to faster storage or remove it from the write path until fixed.
+
+performance: >-
+  All wsrep status series are one per node and cheap, so 30s refresh is fine. The
+  `expected` constant variable feeds the size threshold without hardcoding it in
+  PromQL. If you scrape many clusters from one Prometheus, scope `$job`/`$instance`
+  tightly so the `max`/`count` aggregates stay within a single cluster.
+
+customization: >-
+  Set the `Expected nodes` variable and the size thresholds to your cluster size
+  (3, 5, …). Tighten the flow-control thresholds for latency-sensitive control
+  planes. Pair this with the MariaDB Performance dashboard to see whether a desync
+  is caused by connection saturation or slow queries on the lagging node.

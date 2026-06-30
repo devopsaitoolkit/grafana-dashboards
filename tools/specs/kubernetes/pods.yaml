@@ -1,0 +1,237 @@
+# Pod health — phases, crash loops, restart pressure and not-ready pods.
+uid: kubernetes-pods
+title: Kubernetes / Pods
+description: >-
+  Pod-level health for a namespace: phase breakdown, CrashLoopBackOff and other
+  waiting reasons, restart rate, and a table of pods that are not Ready. Answers
+  "what is broken in this namespace and why won't it start?" from kube-state-metrics.
+datasource: prometheus
+tags: [kubernetes, pods, kube-state-metrics, crashloop, restarts]
+seo_phrase: Kubernetes pod health Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many pods are Pending or crash-looping in this namespace?"
+  - "Which container waiting reason is blocking startup — image pull, crash loop, config?"
+  - "Which pods are restarting the most, and how fast?"
+  - "Which pods are running but not Ready (failing their readiness probe)?"
+
+production_lessons: >-
+  "The app is down" almost always resolves to one of a handful of pod states, and
+  the waiting *reason* tells you who owns the fix: CrashLoopBackOff is the app or
+  its config, ImagePullBackOff is the registry or a typo'd tag, CreateContainerError
+  is a missing secret/volume, and ContainerCreating that never clears is usually a
+  volume mount. This dashboard leads with Pending and crash-loop counts, then breaks
+  waiting reasons out so triage skips guessing. Restart *rate* matters more than
+  total restarts — a pod with 4000 lifetime restarts that is now stable is far less
+  urgent than one restarting twice a minute.
+
+data_sources:
+  - "`kube-state-metrics` for pod phase, readiness, restart counts and container
+    waiting reasons (`kube_pod_status_phase`, `kube_pod_status_ready`,
+    `kube_pod_container_status_restarts_total`, `kube_pod_container_status_waiting_reason`)."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(kube_node_info, cluster)
+    description: Cluster to scope to. Select All on single-cluster setups.
+    multi: false
+    includeAll: true
+  - name: namespace
+    label: Namespace
+    query: label_values(kube_pod_status_phase{cluster=~"$cluster"}, namespace)
+    description: Namespace(s) to inspect; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Pod problems — read these first
+    panels:
+      - type: stat
+        title: Pods Pending
+        description: Pods that cannot schedule or start in the selected namespaces.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              sum(kube_pod_status_phase{cluster=~"$cluster", namespace=~"$namespace", phase="Pending"}) or vector(0)
+            instant: true
+            legend: pending
+      - type: stat
+        title: Containers crash-looping
+        description: Containers in CrashLoopBackOff — repeatedly starting and dying.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              sum(kube_pod_container_status_waiting_reason{cluster=~"$cluster", namespace=~"$namespace", reason="CrashLoopBackOff"}) or vector(0)
+            instant: true
+            legend: crashloop
+      - type: stat
+        title: Containers failing image pull
+        description: Containers stuck in ImagePullBackOff or ErrImagePull — registry, credentials, or a bad tag.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              sum(kube_pod_container_status_waiting_reason{cluster=~"$cluster", namespace=~"$namespace", reason=~"ImagePullBackOff|ErrImagePull"}) or vector(0)
+            instant: true
+            legend: imagepull
+      - type: stat
+        title: Pods running but NotReady
+        description: Pods in Running phase that are failing their readiness probe — receiving no traffic.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              sum(kube_pod_status_ready{cluster=~"$cluster", namespace=~"$namespace", condition="false"}) or vector(0)
+            instant: true
+            legend: notready
+
+  - title: Phases and waiting reasons
+    panels:
+      - type: piechart
+        title: Pods by phase
+        description: Lifecycle phase share across the selected namespaces.
+        unit: short
+        pieType: donut
+        targets:
+          - expr: sum by (phase) (kube_pod_status_phase{cluster=~"$cluster", namespace=~"$namespace"})
+            instant: true
+            legend: "{{phase}}"
+      - type: bargauge
+        title: Containers by waiting reason
+        description: Why containers are stuck waiting. The reason names the responder — app, registry, config or volume.
+        unit: short
+        orientation: horizontal
+        targets:
+          - expr: >-
+              sum by (reason) (kube_pod_container_status_waiting_reason{cluster=~"$cluster", namespace=~"$namespace"}) > 0
+            instant: true
+            legend: "{{reason}}"
+
+  - title: Restart pressure
+    panels:
+      - type: timeseries
+        title: Restart rate by pod (per minute)
+        description: Container restarts per minute per pod. A flat non-zero line is an active crash loop.
+        unit: short
+        min: 0
+        legend: table
+        drawStyle: bars
+        targets:
+          - expr: >-
+              60 * sum by (namespace, pod) (rate(kube_pod_container_status_restarts_total{cluster=~"$cluster", namespace=~"$namespace"}[5m])) > 0
+            legend: "{{namespace}}/{{pod}}"
+      - type: stat
+        title: Restarts (1h)
+        description: Total container restarts in the selected namespaces over the last hour.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 25}
+        targets:
+          - expr: >-
+              sum(increase(kube_pod_container_status_restarts_total{cluster=~"$cluster", namespace=~"$namespace"}[1h])) or vector(0)
+            instant: true
+            legend: restarts
+
+  - title: Not-ready detail
+    panels:
+      - type: table
+        title: Pods not Ready
+        description: Pods whose Ready condition is false — running but out of the load-balancer rotation. The list to work through during an incident.
+        unit: short
+        targets:
+          - expr: >-
+              kube_pod_status_ready{cluster=~"$cluster", namespace=~"$namespace", condition="true"} == 0
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{pod}}"
+      - type: table
+        title: Top restarting pods (1h)
+        description: Pods with the most restarts in the last hour — ranked crash-investigation queue.
+        unit: short
+        targets:
+          - expr: >-
+              topk(15, sum by (namespace, pod) (increase(kube_pod_container_status_restarts_total{cluster=~"$cluster", namespace=~"$namespace"}[1h])))
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{pod}}"
+
+alerts:
+  - name: KubePodCrashLooping
+    severity: critical
+    expr: >-
+      sum by (namespace, pod, container) (kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"}) > 0
+    for: 10m
+    summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} container {{ $labels.container }} is CrashLoopBackOff"
+    why: A crash-looping container serves no traffic and burns the node restarting it; if it is a critical service the namespace is effectively down.
+    investigate: "Read the container's previous logs (`kubectl logs --previous`) and recent events; check the waiting-reason panel to confirm the reason."
+    runbook: "Roll back to the last working image, fix the failing config/secret, or correct the failing health/liveness probe, then redeploy."
+    recovery: Clears when no container reports CrashLoopBackOff for 5m.
+    false_positives: A job container that exits non-zero by design — exclude job pods from the rule.
+  - name: KubePodImagePullFailing
+    severity: warning
+    expr: >-
+      sum by (namespace, pod, container) (kube_pod_container_status_waiting_reason{reason=~"ImagePullBackOff|ErrImagePull"}) > 0
+    for: 10m
+    summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} cannot pull its image"
+    why: An unpullable image means the pod will never start — a typo'd tag, deleted image, or broken registry credentials blocks the whole rollout.
+    investigate: "Inspect pod events for the exact pull error; verify the image tag exists and the imagePullSecret is valid."
+    runbook: "Fix the image reference or registry credentials, or push the missing tag, then delete the pod to retry the pull."
+    recovery: Clears when no container is in ImagePullBackOff/ErrImagePull for 5m.
+    false_positives: Transient registry rate-limits during a mass rollout — usually self-resolve within minutes.
+  - name: KubePodNotReady
+    severity: warning
+    expr: >-
+      sum by (namespace, pod) (kube_pod_status_ready{condition="true"}) == 0
+      and on (namespace, pod) sum by (namespace, pod) (kube_pod_status_phase{phase="Running"}) > 0
+    for: 15m
+    summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} Running but NotReady for 15m"
+    why: A Running-but-NotReady pod is failing its readiness probe, so it receives no traffic yet still counts as a replica — capacity you think you have but do not.
+    investigate: "Check the readiness probe path/port and the app's dependency health; the pod is up but the app says it is not ready."
+    runbook: "Fix the failing dependency or correct an over-strict readiness probe; if the probe is wrong, adjust its timeout/threshold."
+    recovery: Clears when the pod reports Ready for 5m.
+    false_positives: Slow-starting apps during a deploy — raise `for` past the app's warm-up time.
+
+troubleshooting:
+  - {symptom: Restart-rate panel is empty, cause: No pods are restarting (the `> 0` filter hides flat zeros), action: This is the healthy state — restarts only appear when they happen.}
+  - {symptom: NotReady table empty during an incident, cause: Pods are CrashLooping (not Running) so the Ready filter excludes them, action: Check the crash-loop stat and waiting-reason panel instead.}
+  - {symptom: All panels show No data, cause: Wrong $namespace selection or kube-state-metrics not scraped, action: Set $namespace to All and verify kube-state-metrics in Explore.}
+
+performance: >-
+  Restart and waiting-reason panels aggregate `by (namespace, pod[, container])`,
+  so series scale with the namespace size, not the whole cluster — keep $namespace
+  scoped on large clusters. Tables use `topk(15)` and `== 0` / `> 0` filters so only
+  problem rows render. Restart rate uses a 5m window; `increase(...[1h])` is
+  reset-safe for the hourly totals.
+
+customization: >-
+  To watch one app, set $namespace and append a `pod=~"myapp-.*"` selector. Tune
+  the crash-loop `for: 10m` to your tolerance — shorter pages faster but catches
+  benign deploy-time restarts. Add `OOMKilled` handling by graphing
+  `kube_pod_container_status_last_terminated_reason` alongside the waiting reasons.

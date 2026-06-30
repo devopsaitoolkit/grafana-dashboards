@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1404" height="882" viewBox="0 0 1404 882" font-family="Inter, Roboto, Arial, sans-serif">
+<rect width="1404" height="882" fill="#0b0c0e"/>
+<text x="16" y="30" fill="#d8d9da" font-size="16" font-weight="600">Kubernetes / PVC Capacity</text>
+<text x="16" y="48" fill="#8e8e8e" font-size="11">Schematic layout · datasource: prometheus · uid: kubernetes-pvc-usage</text>
+<rect x="16" y="56" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="75" fill="#d8d9da" font-size="12" font-weight="600">▾ Capacity risk — read these first</text>
+<rect x="18" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="88" width="172" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="106" fill="#d8d9da" font-size="11" font-weight="500">PVCs over 85% full</text>
+<text x="26" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="104" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="194" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="194" y="88" width="172" height="3" fill="#3274d9" rx="2"/>
+<text x="202" y="106" fill="#d8d9da" font-size="11" font-weight="500">PVCs over 95% full</text>
+<text x="202" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="280" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="370" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="370" y="88" width="172" height="3" fill="#3274d9" rx="2"/>
+<text x="378" y="106" fill="#d8d9da" font-size="11" font-weight="500">Fullest PVC</text>
+<text x="378" y="120" fill="#8e8e8e" font-size="9">stat · percent</text>
+<text x="456" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="546" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="88" width="172" height="3" fill="#3274d9" rx="2"/>
+<text x="554" y="106" fill="#d8d9da" font-size="11" font-weight="500">Pending PVCs</text>
+<text x="554" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="632" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="722" y="88" width="172" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="722" y="88" width="172" height="3" fill="#3274d9" rx="2"/>
+<text x="730" y="106" fill="#d8d9da" font-size="11" font-weight="500">Total used capacity</text>
+<text x="730" y="120" fill="#8e8e8e" font-size="9">stat · bytes</text>
+<text x="808" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="16" y="326" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="345" fill="#d8d9da" font-size="12" font-weight="600">▾ Usage by claim</text>
+<rect x="18" y="358" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="358" width="348" height="3" fill="#f2cc0c" rx="2"/>
+<text x="26" y="376" fill="#d8d9da" font-size="11" font-weight="500">Top PVCs by usage</text>
+<text x="26" y="390" fill="#8e8e8e" font-size="9">bargauge · percent</text>
+<rect x="28" y="476" width="164" height="5" fill="#f2cc0c" opacity="0.70" rx="2"/>
+<rect x="28" y="485" width="213" height="5" fill="#f2cc0c" opacity="0.55" rx="2"/>
+<rect x="28" y="494" width="262" height="5" fill="#f2cc0c" opacity="0.40" rx="2"/>
+<rect x="370" y="358" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="370" y="358" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="378" y="376" fill="#d8d9da" font-size="11" font-weight="500">Usage percent over time</text>
+<text x="378" y="390" fill="#8e8e8e" font-size="9">timeseries · percent</text>
+<polyline points="380,488 435,474 489,488 544,474 599,488 653,474 708,488" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="722" y="358" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="722" y="358" width="348" height="3" fill="#8e8e8e" rx="2"/>
+<text x="730" y="376" fill="#d8d9da" font-size="11" font-weight="500">Available bytes per PVC</text>
+<text x="730" y="390" fill="#8e8e8e" font-size="9">table · bytes</text>
+<rect x="732" y="476" width="164" height="5" fill="#8e8e8e" opacity="0.70" rx="2"/>
+<rect x="732" y="485" width="213" height="5" fill="#8e8e8e" opacity="0.55" rx="2"/>
+<rect x="732" y="494" width="262" height="5" fill="#8e8e8e" opacity="0.40" rx="2"/>
+<rect x="16" y="596" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="615" fill="#d8d9da" font-size="12" font-weight="600">▾ Forecast and supply</text>
+<rect x="18" y="628" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="628" width="348" height="3" fill="#8e8e8e" rx="2"/>
+<text x="26" y="646" fill="#d8d9da" font-size="11" font-weight="500">PVCs predicted to fill within 4 days</text>
+<text x="26" y="660" fill="#8e8e8e" font-size="9">table · s</text>
+<rect x="28" y="746" width="164" height="5" fill="#8e8e8e" opacity="0.70" rx="2"/>
+<rect x="28" y="755" width="213" height="5" fill="#8e8e8e" opacity="0.55" rx="2"/>
+<rect x="28" y="764" width="262" height="5" fill="#8e8e8e" opacity="0.40" rx="2"/>
+<rect x="370" y="628" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="370" y="628" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="378" y="646" fill="#d8d9da" font-size="11" font-weight="500">Available bytes trend</text>
+<text x="378" y="660" fill="#8e8e8e" font-size="9">timeseries · bytes</text>
+<polyline points="380,758 435,744 489,758 544,744 599,758 653,744 708,758" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="722" y="628" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="722" y="628" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="730" y="646" fill="#d8d9da" font-size="11" font-weight="500">Requested vs used capacity</text>
+<text x="730" y="660" fill="#8e8e8e" font-size="9">timeseries · bytes</text>
+<polyline points="732,758 787,744 841,758 896,744 951,758 1005,744 1060,758" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="1088" y="56" width="284" height="810" fill="#181b1f" stroke="#2c3235" rx="4"/>
+<text x="1100" y="78" fill="#d8d9da" font-size="12" font-weight="700">What to look for</text>
+<circle cx="1106" cy="94" r="4" fill="#3274d9"/>
+<text x="1118" y="98" fill="#8e8e8e" font-size="10">Which PVCs are over 85% full right now?</text>
+<circle cx="1106" cy="115" r="4" fill="#3274d9"/>
+<text x="1118" y="119" fill="#8e8e8e" font-size="10">Are any PVCs predicted to fill within a</text>
+<text x="1118" y="132" fill="#8e8e8e" font-size="10">few days at the current growth rate?</text>
+<circle cx="1106" cy="149" r="4" fill="#3274d9"/>
+<text x="1118" y="153" fill="#8e8e8e" font-size="10">What is the fullest PVC in the cluster?</text>
+<circle cx="1106" cy="170" r="4" fill="#3274d9"/>
+<text x="1118" y="174" fill="#8e8e8e" font-size="10">How much capacity is requested versus</text>
+<text x="1118" y="187" fill="#8e8e8e" font-size="10">actually used?</text>
+<circle cx="1106" cy="204" r="4" fill="#73bf69"/>
+<text x="1118" y="208" fill="#8e8e8e" font-size="10">Green: within expected range</text>
+<circle cx="1106" cy="225" r="4" fill="#f2cc0c"/>
+<text x="1118" y="229" fill="#8e8e8e" font-size="10">Yellow: investigate — approaching a</text>
+<text x="1118" y="242" fill="#8e8e8e" font-size="10">limit</text>
+<circle cx="1106" cy="259" r="4" fill="#e02f44"/>
+<text x="1118" y="263" fill="#8e8e8e" font-size="10">Red: act now — threshold breached</text>
+</svg>

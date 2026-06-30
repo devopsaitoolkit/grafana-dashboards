@@ -1,0 +1,234 @@
+# Meta-monitoring: is the VictoriaMetrics store healthy and not about to fill disk?
+uid: victoria-metrics-cluster
+title: VictoriaMetrics / Cluster
+description: >-
+  Health of a VictoriaMetrics store: active rows, ingestion rate, free disk vs
+  data size, HTTP error rate and concurrent-insert saturation. Answers "is the
+  long-term metrics store keeping up and will it run out of disk?"
+datasource: prometheus
+tags: [victoriametrics, tsdb, storage, meta-monitoring]
+seo_phrase: VictoriaMetrics Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How much free disk is left versus the data already on disk?"
+  - "What is the current ingestion rate, and is it steady?"
+  - "Are HTTP requests erroring (rejected writes or failed reads)?"
+  - "Is the concurrent-insert pool saturating (ingest backpressure)?"
+  - "Are rows being ignored (dropped) on ingest?"
+
+production_lessons: >-
+  VictoriaMetrics is unusually forgiving until it hits two walls: disk and the
+  concurrent-insert limiter. Free disk is the one number that ends the cluster
+  outright, so it leads, followed by ingestion rate and HTTP errors. The
+  concurrent-insert pool is the subtle one — when current inserts pin against
+  capacity, writers queue and remote_write upstreams start buffering, so we surface
+  that as a saturation gauge rather than burying it. Ignored rows reveal malformed
+  or out-of-retention data that silently never lands.
+
+data_sources:
+  - "`victoria-metrics` (single-node or cluster vmstorage/vminsert) exposing the
+    `vm_rows`, `vm_rows_inserted_total`, `vm_free_disk_space_bytes`,
+    `vm_data_size_bytes`, `vm_http_request_errors_total`,
+    `vm_concurrent_insert_*` and `vm_rows_ignored_total` series."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(vm_rows, job)
+    description: Scrape job for your VictoriaMetrics targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(vm_rows{job="$job"}, instance)
+    description: VictoriaMetrics instance(s); keep All for clustered storage.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Capacity & health — read these first
+    panels:
+      - type: stat
+        title: Free disk (min)
+        description: Smallest free-disk figure across selected nodes. When this hits zero the store stops accepting writes.
+        unit: bytes
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 53687091200}
+          - {color: green, value: 214748364800}
+        targets:
+          - expr: min(vm_free_disk_space_bytes{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: free
+      - type: stat
+        title: Ingestion rate
+        description: Rows inserted per second across selected nodes — your effective write throughput.
+        unit: wps
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(vm_rows_inserted_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: rows/s
+      - type: stat
+        title: HTTP error rate
+        description: HTTP request errors per second — rejected writes or failed reads against the store.
+        unit: ops
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.1}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(rate(vm_http_request_errors_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: errors/s
+      - type: stat
+        title: Active rows
+        description: Rows currently tracked by the store — a proxy for active time series and the memory/disk driver.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(vm_rows{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: rows
+
+  - title: Ingestion
+    panels:
+      - type: timeseries
+        title: Rows inserted per second by instance
+        description: Per-node insert throughput — a node falling behind shows up as a divergence here.
+        unit: wps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (rate(vm_rows_inserted_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Rows ignored per second
+        description: Dropped rows (malformed, out-of-order, past retention) — every increment is data that never landed.
+        unit: wps
+        min: 0
+        legend: table
+        drawStyle: bars
+        fillOpacity: 50
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum by (instance) (rate(vm_rows_ignored_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{instance}}"
+
+  - title: Capacity trend
+    panels:
+      - type: timeseries
+        title: Free disk vs data size
+        description: Free space and on-disk data over time — extrapolate the gap to estimate days-to-full.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (vm_free_disk_space_bytes{job="$job", instance=~"$instance"})
+            legend: "{{instance}} free"
+          - expr: sum by (instance) (vm_data_size_bytes{job="$job", instance=~"$instance"})
+            legend: "{{instance}} data"
+      - type: gauge
+        title: Concurrent-insert saturation
+        description: Current concurrent inserts as a fraction of capacity. Near 100% means writers are queueing.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 70}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * sum(vm_concurrent_insert_current{job="$job", instance=~"$instance"})
+              / clamp_min(sum(vm_concurrent_insert_capacity{job="$job", instance=~"$instance"}), 1)
+            instant: true
+            legend: saturation
+
+  - title: Errors & memory
+    panels:
+      - type: timeseries
+        title: HTTP errors per second by instance
+        description: Where request errors are concentrated — a single bad node or a fleet-wide rejection.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (rate(vm_http_request_errors_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Resident memory
+        description: Process RSS per node — VictoriaMetrics trades memory for ingest speed, so watch this against active rows.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: process_resident_memory_bytes{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+
+alerts:
+  - name: VictoriaMetricsLowDisk
+    severity: critical
+    expr: vm_free_disk_space_bytes < 53687091200
+    for: 10m
+    summary: "VictoriaMetrics {{ $labels.instance }} below 50 GiB free disk"
+    why: When free disk runs out VictoriaMetrics stops accepting writes and you lose ingestion until space is recovered.
+    investigate: "Open VictoriaMetrics / Cluster, check the free-vs-data trend to estimate time-to-full and recent data growth."
+    runbook: "Lower retention (-retentionPeriod), add disk, or scale out vmstorage nodes; in an emergency, drop low-value series."
+    recovery: Clears when free disk rises back above 50 GiB for 5m.
+    false_positives: Small dev instances run intentionally tight — tune the threshold to the node's volume size.
+  - name: VictoriaMetricsInsertSaturation
+    severity: warning
+    expr: >-
+      vm_concurrent_insert_current / clamp_min(vm_concurrent_insert_capacity, 1) > 0.9
+    for: 10m
+    summary: "VictoriaMetrics {{ $labels.instance }} insert pool >90% saturated"
+    why: A saturated insert limiter queues writers and pushes backpressure to remote_write upstreams, risking dropped samples there.
+    investigate: "Check ingestion rate and CPU on the node, and whether a burst of new series arrived."
+    runbook: "Scale vminsert/vmstorage, raise -insert.maxQueueDuration headroom, or reduce the write rate at the source."
+    recovery: Clears when saturation falls below 90% for 5m.
+    false_positives: Brief saturation during a backfill or scrape-storm is expected.
+  - name: VictoriaMetricsHTTPErrors
+    severity: warning
+    expr: sum by (instance, job) (rate(vm_http_request_errors_total[5m])) > 1
+    for: 10m
+    summary: "VictoriaMetrics {{ $labels.instance }} HTTP errors above 1/s"
+    why: Sustained HTTP errors mean writes are being rejected or reads are failing, so data is lost or queries break.
+    investigate: "Correlate with insert saturation and disk; check the VictoriaMetrics log for the error class."
+    runbook: "Fix the rejected-write cause (bad labels, out-of-retention timestamps) or relieve the resource pressure causing 5xx."
+    recovery: Clears when the error rate drops below 1/s for 5m.
+    false_positives: A scraper sending malformed data inflates this without the store itself being unhealthy.
+
+troubleshooting:
+  - symptom: Free-disk stat is red but the node has space
+    cause: The metric reflects the data directory's volume, which may differ from root.
+    action: Check df on the actual -storageDataPath volume, not the host root.
+  - symptom: Saturation gauge stuck at 0
+    cause: vm_concurrent_insert_capacity is unset on this version, so the ratio collapses.
+    action: Use the ingestion-rate panel and CPU instead on older builds.
+  - symptom: Ignored rows climbing
+    cause: A client is sending out-of-order or out-of-retention timestamps.
+    action: Inspect the client's clock and the configured retention; fix the offending writer.
+
+performance: >-
+  Rate panels use 5m windows. The saturation expression guards the divisor with
+  `clamp_min(..., 1)` so it never divides by zero on a fresh start. Disk and rows
+  panels read gauges directly and aggregate per instance to bound series count.
+
+customization: >-
+  Tune the 50/200 GiB disk thresholds to your volume sizes and the 90% saturation
+  threshold to your latency tolerance. For cluster mode, scope `$instance` to the
+  vmstorage role when chasing disk, and to vminsert when chasing insert saturation.

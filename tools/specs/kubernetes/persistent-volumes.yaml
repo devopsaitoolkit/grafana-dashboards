@@ -1,0 +1,234 @@
+# Persistent Volume inventory dashboard — cluster-wide storage object health.
+# Leads with failed PVs and unbound supply, the two states that signal a provisioning
+# or reclaim problem before workloads notice.
+title: Kubernetes / Persistent Volumes
+description: >-
+  Persistent Volume inventory by phase (Bound/Available/Released/Failed), capacity by
+  storage class, and the PVs and PVCs that need attention. Answers "is storage
+  provisioning healthy and is any volume stuck or leaking capacity?" using
+  kube-state-metrics, not raw object dumps.
+datasource: prometheus
+tags: [kubernetes, storage, persistent-volume, kube-state-metrics]
+seo_phrase: Kubernetes persistent volume Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "Are any PersistentVolumes in the Failed phase right now?"
+  - "How many PVs are unbound (Available/Released) and tying up capacity?"
+  - "How is provisioned capacity split across storage classes?"
+  - "Are there pending PVCs that can't bind?"
+  - "Which released PVs are leaking capacity that should be reclaimed?"
+
+production_lessons: >-
+  Storage problems are quiet until a pod won't start, so this dashboard watches the
+  control objects rather than the data path. **Failed** PVs mean the reclaim or
+  provisioning step errored and that capacity is stuck; **Released** PVs are the slow
+  leak — a PVC was deleted but the PV (with `Retain`) never returned to the pool, so
+  capacity quietly disappears over months. The lead row pairs failed volumes with the
+  unbound count so you can tell "something broke" from "we have idle supply". Pending
+  PVCs are the user-facing symptom: a PVC that can't bind is a pod stuck in
+  ContainerCreating, and the cause is almost always a missing storage class, an
+  exhausted backend, or no matching PV for a static setup.
+
+data_sources:
+  - "`kube-state-metrics` (the `kube_persistentvolume_status_phase`,
+    `kube_persistentvolume_capacity_bytes`, `kube_persistentvolume_info` and
+    `kube_persistentvolumeclaim_status_phase` series)."
+
+templating:
+  - name: storageclass
+    label: Storage class
+    query: label_values(kube_persistentvolume_info, storageclass)
+    description: Storage class(es) to scope the inventory to; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Storage inventory health — read these first
+    panels:
+      - type: stat
+        title: Failed PVs
+        description: PersistentVolumes in the Failed phase. These are stuck — reclaim or provisioning errored.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(kube_persistentvolume_status_phase{phase="Failed"}) or vector(0)
+            instant: true
+            legend: failed
+      - type: stat
+        title: Released (unbound) PVs
+        description: PVs whose claim was deleted but that haven't returned to the pool — capacity leaking under a Retain policy.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 10}
+        targets:
+          - expr: sum(kube_persistentvolume_status_phase{phase="Released"}) or vector(0)
+            instant: true
+            legend: released
+      - type: stat
+        title: Available PVs
+        description: Provisioned PVs waiting to be bound. Idle supply — fine in small numbers, wasteful in large ones.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10}
+        targets:
+          - expr: sum(kube_persistentvolume_status_phase{phase="Available"}) or vector(0)
+            instant: true
+            legend: available
+      - type: stat
+        title: Pending PVCs
+        description: PersistentVolumeClaims that can't bind. Each one is a pod stuck waiting for storage.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(kube_persistentvolumeclaim_status_phase{phase="Pending"}) or vector(0)
+            instant: true
+            legend: pending
+      - type: stat
+        title: Total provisioned capacity
+        description: Sum of capacity across all PersistentVolumes in scope.
+        unit: bytes
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              sum(kube_persistentvolume_capacity_bytes * on (persistentvolume) group_left (storageclass) kube_persistentvolume_info{storageclass=~"$storageclass"})
+            instant: true
+            legend: capacity
+
+  - title: Inventory breakdown
+    panels:
+      - type: piechart
+        title: PVs by phase
+        description: Distribution of PVs across lifecycle phases. A healthy cluster is almost entirely Bound.
+        unit: short
+        pieType: donut
+        targets:
+          - expr: sum by (phase) (kube_persistentvolume_status_phase)
+            instant: true
+            legend: "{{phase}}"
+      - type: bargauge
+        title: Capacity by storage class
+        description: Provisioned bytes per storage class — where your storage spend actually lands.
+        unit: bytes
+        orientation: horizontal
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: >-
+              sum by (storageclass) (kube_persistentvolume_capacity_bytes * on (persistentvolume) group_left (storageclass) kube_persistentvolume_info{storageclass=~"$storageclass"})
+            instant: true
+            legend: "{{storageclass}}"
+      - type: timeseries
+        title: PVs by phase over time
+        description: Phase counts over time. A rising Released/Failed line is a reclaim problem accumulating.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum by (phase) (kube_persistentvolume_status_phase)
+            legend: "{{phase}}"
+
+  - title: Volumes and claims needing attention
+    panels:
+      - type: table
+        title: Failed and released PVs
+        description: The specific PVs stuck in Failed or Released — clean these up to reclaim capacity.
+        unit: short
+        targets:
+          - expr: kube_persistentvolume_status_phase{phase=~"Failed|Released"} == 1
+            instant: true
+            format: table
+            legend: "{{persistentvolume}}"
+      - type: table
+        title: Pending PVCs
+        description: Claims that can't bind, with their namespace. Each maps to a pod waiting on storage.
+        unit: short
+        targets:
+          - expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{persistentvolumeclaim}}"
+      - type: timeseries
+        title: Pending PVCs over time
+        description: Count of unbound claims. A sustained nonzero line means provisioning is broken, not just slow.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(kube_persistentvolumeclaim_status_phase{phase="Pending"})
+            legend: pending
+
+alerts:
+  - name: PersistentVolumeFailed
+    severity: warning
+    expr: kube_persistentvolume_status_phase{phase="Failed"} == 1
+    for: 5m
+    summary: "PersistentVolume {{ $labels.persistentvolume }} is in the Failed phase"
+    why: A Failed PV means automatic reclamation or provisioning errored; the capacity is stuck and won't be reused.
+    investigate: "Open Kubernetes / Persistent Volumes, find the PV in the failed/released table, and check its events and the provisioner/CSI driver logs."
+    runbook: "Resolve the underlying backend error; manually reclaim or delete the PV once the data is handled and confirm the storage backend freed the volume."
+    recovery: Clears when the PV leaves the Failed phase.
+    false_positives: A transient Failed state during a flaky CSI operation that retries successfully.
+  - name: PersistentVolumeClaimPending
+    severity: warning
+    expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1
+    for: 15m
+    summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} stuck Pending"
+    why: A PVC that can't bind blocks its pod from starting — a real outage for that workload.
+    investigate: "Check the PVC's events and the requested storage class; confirm the provisioner exists and the backend has capacity."
+    runbook: "Create/fix the missing StorageClass or provisioner, free backend capacity, or (for static provisioning) supply a matching PV; check CSI driver health."
+    recovery: Clears when the PVC binds.
+    false_positives: Brief Pending right after creation while the provisioner works is normal — the 15m `for` filters it out.
+  - name: PersistentVolumesReleasedAccumulating
+    severity: info
+    expr: sum(kube_persistentvolume_status_phase{phase="Released"}) > 10
+    for: 1h
+    summary: "More than 10 PVs are stuck in the Released phase"
+    why: Released PVs under a Retain policy never return to the pool; over time this silently leaks real storage capacity and cost.
+    investigate: "Use the failed/released PVs table to list them and confirm their reclaim policy and whether the data is still needed."
+    runbook: "Back up if needed, then delete the released PVs (and their backing volumes), or switch the storage class reclaim policy to Delete for ephemeral data."
+    recovery: Clears when the released count drops back below 10 after cleanup.
+    false_positives: Clusters that intentionally retain volumes for audit/recovery — raise the threshold to match your policy.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: kube-state-metrics isn't deployed or isn't scraped.
+    action: "Confirm kube-state-metrics is running and `kube_persistentvolume_status_phase` exists in Explore."
+  - symptom: Capacity-by-class panel is empty but PVs exist
+    cause: The `group_left` join failed because `kube_persistentvolume_info` lacks the storageclass label in your KSM version.
+    action: Check the label names KSM emits for PV info and adjust the `group_left (storageclass)` join key.
+  - symptom: Phase counts look doubled
+    cause: The metric kube_persistentvolume_status_phase emits a series per phase; summing without `by (phase)` collapses them incorrectly.
+    action: Keep the `by (phase)` aggregation and filter with `== 1` for tables.
+
+performance: >-
+  These are gauge metrics from kube-state-metrics, so a 1m refresh is plenty and the
+  queries are cheap. The capacity-by-class join (`* on (persistentvolume) group_left`)
+  is the only non-trivial expression; on clusters with thousands of PVs, prefer a
+  recording rule for it.
+
+customization: >-
+  Tune the Released (10) and Available thresholds to your reclaim policy and supply
+  strategy. Scope `$storageclass` to a tier (e.g. fast SSD vs archival) to review one
+  class at a time. Add a `$namespace` variable to the PVC tables if you want per-team
+  views.

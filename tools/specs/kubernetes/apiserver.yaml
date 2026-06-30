@@ -1,0 +1,283 @@
+# Kubernetes API server SLO dashboard.
+# Leads with the three signals that decide whether the control plane is healthy:
+# request error ratio, request latency (p99 by verb), and inflight saturation.
+title: Kubernetes / API Server
+description: >-
+  Request rate, p99 latency, 5xx error ratio and concurrency saturation for the
+  kube-apiserver, plus API Priority & Fairness rejections. Answers "is the control
+  plane serving requests within its SLO, and if not, is it errors, latency or
+  saturation?" rather than dumping raw counters.
+datasource: prometheus
+tags: [kubernetes, control-plane, apiserver, slo]
+seo_phrase: Kubernetes API server Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is the API server inside its error budget (5xx ratio) right now?"
+  - "What is read vs write p99 latency, and which verb is slow?"
+  - "Are we saturating inflight capacity or being throttled by API Priority & Fairness?"
+  - "Which resource/verb is generating the errors or the load?"
+  - "Is slow etcd showing up as API server latency?"
+
+production_lessons: >-
+  Nearly every "the cluster feels slow" incident lands on the API server first,
+  because controllers, kubelets and kubectl all funnel through it. Averages hide the
+  problem, so this dashboard leads with the **5xx error ratio** and **read/write p99**
+  computed from native histograms, not means. The most common root cause is not the
+  API server itself but **etcd**: when WAL fsync or backend commit slows, LIST/WATCH
+  latency climbs and the apiserver starts shedding load via API Priority & Fairness —
+  so inflight saturation and APF rejections sit right next to latency here. WATCH and
+  CONNECT verbs are excluded from latency math because they are long-lived by design
+  and would otherwise poison the quantiles.
+
+data_sources:
+  - "`kube-apiserver` metrics endpoint (the `apiserver_request_total`,
+    `apiserver_request_duration_seconds_bucket`, `apiserver_current_inflight_requests`
+    and `apiserver_flowcontrol_rejected_requests_total` series)."
+  - "`etcd_request_duration_seconds_bucket` exported by the apiserver for the etcd
+    round-trip view."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(apiserver_request_total, job)
+    description: Prometheus scrape job for the kube-apiserver targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(apiserver_request_total{job="$job"}, instance)
+    description: API server instance(s); supports multi-select for HA control planes.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: SLO health — read these first
+    panels:
+      - type: stat
+        title: 5xx error ratio
+        description: Share of API requests returning a server error (code 5xx). The primary SLI.
+        unit: percent
+        min: 0
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum(rate(apiserver_request_total{job="$job", instance=~"$instance", code=~"5.."}[5m]))
+              / sum(rate(apiserver_request_total{job="$job", instance=~"$instance"}[5m]))
+            instant: true
+            legend: 5xx ratio
+      - type: stat
+        title: Read p99 latency
+        description: 99th percentile latency for GET/LIST requests (WATCH/CONNECT excluded).
+        unit: s
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.5}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(apiserver_request_duration_seconds_bucket{job="$job", instance=~"$instance", verb=~"GET|LIST"}[5m])))
+            instant: true
+            legend: read p99
+      - type: stat
+        title: Write p99 latency
+        description: 99th percentile latency for POST/PUT/PATCH/DELETE requests.
+        unit: s
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.5}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(apiserver_request_duration_seconds_bucket{job="$job", instance=~"$instance", verb=~"POST|PUT|PATCH|DELETE"}[5m])))
+            instant: true
+            legend: write p99
+      - type: stat
+        title: Inflight requests
+        description: Current concurrent requests in flight (mutating + read-only). Saturation signal.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 400}
+          - {color: red, value: 600}
+        targets:
+          - expr: sum(apiserver_current_inflight_requests{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: inflight
+      - type: stat
+        title: APF rejections
+        description: Requests dropped by API Priority & Fairness — the apiserver is shedding load.
+        unit: reqps
+        min: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.01}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(rate(apiserver_flowcontrol_rejected_requests_total{instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: rejected
+
+  - title: Latency
+    panels:
+      - type: timeseries
+        title: Request p99 latency by verb
+        description: Per-verb 99th percentile. Diverging verbs point at a specific access pattern (e.g. expensive LISTs).
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le, verb) (rate(apiserver_request_duration_seconds_bucket{job="$job", instance=~"$instance", verb!~"WATCH|CONNECT"}[5m])))
+            legend: "{{verb}}"
+      - type: timeseries
+        title: etcd request p99 (from apiserver)
+        description: Round-trip latency the apiserver sees talking to etcd, by operation. Slow etcd surfaces here first.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le, operation) (rate(etcd_request_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: "{{operation}}"
+
+  - title: Traffic and errors
+    panels:
+      - type: timeseries
+        title: Request rate by verb
+        description: Throughput per verb. A sudden LIST/WATCH spike is a classic controller hot-loop signature.
+        unit: reqps
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum by (verb) (rate(apiserver_request_total{job="$job", instance=~"$instance", verb!="WATCH"}[5m]))
+            legend: "{{verb}}"
+      - type: timeseries
+        title: Error rate by code class
+        description: 4xx (client) vs 5xx (server) request rates. 5xx is yours to fix; sustained 4xx points at a misbehaving client.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(apiserver_request_total{job="$job", instance=~"$instance", code=~"4.."}[5m]))
+            legend: 4xx client
+          - expr: sum(rate(apiserver_request_total{job="$job", instance=~"$instance", code=~"5.."}[5m]))
+            legend: 5xx server
+      - type: table
+        title: Top resources by 5xx rate
+        description: Which resource/verb pairs are throwing server errors — the place to start a root-cause hunt.
+        unit: reqps
+        targets:
+          - expr: >-
+              topk(10, sum by (resource, verb) (rate(apiserver_request_total{job="$job", instance=~"$instance", code=~"5.."}[5m])) > 0)
+            instant: true
+            format: table
+            legend: "{{resource}} {{verb}}"
+
+  - title: Saturation and flow control
+    panels:
+      - type: timeseries
+        title: Inflight requests by kind
+        description: Concurrent mutating vs read-only requests. Hitting the configured max-requests limit triggers APF rejections.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (request_kind) (apiserver_current_inflight_requests{instance=~"$instance"})
+            legend: "{{request_kind}}"
+      - type: timeseries
+        title: APF rejections by reason
+        description: Why requests are being dropped (queue full vs concurrency limit) and in which priority level.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (reason, priority_level) (rate(apiserver_flowcontrol_rejected_requests_total{instance=~"$instance"}[5m]))
+            legend: "{{priority_level}} / {{reason}}"
+      - type: timeseries
+        title: Controller workqueue depth
+        description: Backlog in apiserver-side workqueues. A growing depth means a controller can't keep up with events.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (name) (workqueue_depth{job="$job", instance=~"$instance"})
+            legend: "{{name}}"
+
+alerts:
+  - name: APIServerHighErrorRate
+    severity: critical
+    expr: >-
+      100 * sum by (job) (rate(apiserver_request_total{code=~"5.."}[5m]))
+      / sum by (job) (rate(apiserver_request_total[5m])) > 5
+    for: 5m
+    summary: "API server 5xx error ratio above 5% on {{ $labels.job }}"
+    why: A high server-error ratio means controllers, kubelets and operators are failing their API calls — the cluster stops converging.
+    investigate: "Open Kubernetes / API Server, check the error-rate-by-code panel and the Top resources by 5xx table to isolate the resource/verb."
+    runbook: "Correlate with etcd health (fsync/commit p99). If etcd is healthy, check apiserver logs for panics, admission webhook timeouts and authn/authz backends."
+    recovery: Clears when the 5xx ratio stays below 5% for 5m.
+    false_positives: A single failing admission webhook can spike 5xx briefly during a rollout; confirm it is sustained.
+  - name: APIServerHighReadLatency
+    severity: warning
+    expr: >-
+      histogram_quantile(0.99, sum by (le, job) (rate(apiserver_request_duration_seconds_bucket{verb=~"GET|LIST"}[5m]))) > 1
+    for: 10m
+    summary: "API server read p99 latency above 1s on {{ $labels.job }}"
+    why: Slow reads back up controllers and kubectl, and usually signal etcd pressure or an expensive unindexed LIST.
+    investigate: "Compare with the etcd request p99 panel; if etcd is slow the fix is on etcd, otherwise look for high-cardinality LISTs without field selectors."
+    runbook: "Identify the offending resource in the p99-by-verb panel; add pagination/field selectors to the client, or scale/repair etcd."
+    recovery: Clears when read p99 falls below 1s for 5m.
+    false_positives: Large one-off LISTs (backups, migrations) can lift p99 transiently.
+  - name: APIServerFlowControlRejecting
+    severity: warning
+    expr: sum by (job) (rate(apiserver_flowcontrol_rejected_requests_total[5m])) > 0
+    for: 10m
+    summary: "API server is rejecting requests via API Priority & Fairness on {{ $labels.job }}"
+    why: APF rejections mean the apiserver is at its concurrency limit and shedding load; some clients are getting 429s.
+    investigate: "Open the APF rejections by reason panel to see which priority level and reason (queue full vs concurrency limit) dominate."
+    runbook: "Identify the noisy client driving load; tune its request rate or adjust the FlowSchema/PriorityLevelConfiguration concurrency shares."
+    recovery: Clears when no rejections are seen for 5m.
+    false_positives: Brief rejections during a thundering-herd controller restart are expected and self-resolve.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: Wrong `$job`, or apiserver metrics not scraped (RBAC on /metrics).
+    action: "Check `up{job=\"$job\"}` in Explore and confirm the scrape target has a bearer token with the `nonResourceURLs: /metrics` permission."
+  - symptom: Latency quantiles look absurdly high (hundreds of seconds)
+    cause: WATCH/CONNECT verbs leaked into the histogram aggregation.
+    action: Keep the `verb!~"WATCH|CONNECT"` selector; those streams are long-lived by design.
+  - symptom: Error ratio panel is blank but traffic exists
+    cause: No 5xx in the window, so the numerator is empty and the division yields no series.
+    action: This is healthy — the ratio is effectively zero; widen the time range to confirm.
+
+performance: >-
+  All rates use a 5m window (>=4x a 30s scrape) so counters survive an apiserver
+  restart. Quantiles aggregate the histogram with `sum by (le, ...)` before
+  `histogram_quantile`, which is the only correct order and keeps series bounded. On
+  large clusters the request-rate-by-verb panel can be heavy; back it with a
+  `verb:apiserver_request_total:rate5m` recording rule if render time suffers.
+
+customization: >-
+  Tune the 1%/5% error and 0.5s/1s latency thresholds to your control-plane SLO. To
+  watch a single apiserver replica, deselect the others in `$instance`. If you run a
+  custom APF configuration, add a `$priority_level` variable and scope the saturation
+  row to the priority levels you care about.

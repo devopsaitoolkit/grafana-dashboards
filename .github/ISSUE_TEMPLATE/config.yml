@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Discussions
+    url: https://github.com/devopsaitoolkit/grafana-dashboards/discussions
+    about: Questions, ideas, and "how do I monitor X?" — start here.
+  - name: 📚 Advanced observability guides
+    url: https://devopsaitoolkit.com/guides/
+    about: Deeper tutorials on Grafana, Prometheus and PromQL.

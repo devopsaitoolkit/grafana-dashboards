@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-validate:
+    name: Build & validate dashboards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install --quiet pyyaml jsonschema
+      - name: Build dashboards from specs
+        run: python -m tools.dashgen.build
+      - name: Validate dashboards & alerts (strict)
+        run: python -m tools.dashgen.validate
+      - name: Ensure generated files are committed
+        run: |
+          if ! git diff --quiet -- dashboards docs screenshots alerts assets; then
+            echo "::error::Generated files are out of date. Run 'make build' and commit the result."
+            git --no-pager diff --stat -- dashboards docs screenshots alerts assets
+            exit 1
+          fi
+
+  json:
+    name: JSON well-formedness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every dashboard JSON parses
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if ! jq empty "$f" 2>/dev/null; then echo "invalid JSON: $f"; fail=1; fi
+          done < <(find dashboards -name '*.json')
+          exit $fail
+      - name: Datasource & catalog JSON parse
+        run: |
+          find datasources assets -name '*.json' -print0 2>/dev/null | xargs -0 -r -n1 jq empty
+
+  schema:
+    name: Grafana schema checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet pyyaml jsonschema
+      - name: Validate dashboard envelope against JSON Schema
+        run: python tools/dashgen/schema_check.py
+
+  yaml:
+    name: Spec & rules YAML lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet pyyaml yamllint
+      - name: yamllint specs, alerts, datasources, recording-rules
+        run: yamllint -c .yamllint tools/specs alerts datasources recording-rules

@@ -1,0 +1,225 @@
+title: OpenStack / RabbitMQ — Cluster Health
+description: >-
+  RabbitMQ cluster health for the OpenStack control plane: memory and disk against
+  their watermarks, active resource alarms, connection and channel counts, nodes
+  up and total queued messages. Answers "is the message bus about to block
+  publishers?" before Nova/Neutron RPC starts timing out.
+datasource: prometheus
+tags: [openstack, rabbitmq, messaging, oslo-messaging]
+seo_phrase: RabbitMQ cluster Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is any node over its memory or disk watermark (alarm active = publishers blocked)?"
+  - "How close is each node to its memory and free-disk limits right now?"
+  - "Are all expected RabbitMQ nodes up and clustered?"
+  - "Is the total queued backlog growing across the cluster?"
+
+production_lessons: >-
+  In OpenStack, RabbitMQ carries every RPC between control services, so when it
+  blocks, Nova schedules nothing and Neutron stops wiring ports — but the symptom
+  shows up as random API timeouts, not an obvious broker outage. The killer is the
+  memory/disk **watermark alarm**: once tripped, RabbitMQ stops accepting publishes
+  cluster-wide until the condition clears, so this dashboard leads with the alarm
+  state and how close each node is to its limit. The second most useful signal is a
+  steadily climbing total backlog, which means consumers (the agents) have died or
+  fallen behind well before memory actually fills.
+
+data_sources:
+  - "RabbitMQ with the built-in `rabbitmq_prometheus` plugin enabled (`rabbitmq-plugins
+    enable rabbitmq_prometheus`), exposing the `rabbitmq_*` series on each node."
+  - "Node count is derived from `rabbitmq_build_info` (one series per running node).
+    Memory/disk watermark alarms come from `rabbitmq_alarms_memory_used_watermark`
+    and `rabbitmq_alarms_free_disk_space_watermark` (1 = alarm active)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(rabbitmq_build_info, job)
+    description: Prometheus scrape job for your RabbitMQ nodes.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Node
+    query: label_values(rabbitmq_build_info{job="$job"}, instance)
+    description: RabbitMQ node endpoint(s); supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Cluster health — read these first
+    panels:
+      - type: stat
+        title: Memory alarms active
+        description: Number of nodes whose memory watermark alarm is set. Any value >0 means publishers are being blocked cluster-wide.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(rabbitmq_alarms_memory_used_watermark{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: mem alarms
+      - type: stat
+        title: Disk alarms active
+        description: Number of nodes whose free-disk watermark alarm is set. Non-zero blocks publishes until disk is reclaimed.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(rabbitmq_alarms_free_disk_space_watermark{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: disk alarms
+      - type: gauge
+        title: Max node memory used
+        description: Highest memory-used vs configured high-watermark limit across nodes. At 100% the memory alarm trips.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 70}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(100 * rabbitmq_node_mem_used{job="$job", instance=~"$instance"}
+                  / clamp_min(rabbitmq_node_mem_limit{job="$job", instance=~"$instance"}, 1)) or vector(0)
+            instant: true
+            legend: mem
+      - type: stat
+        title: Nodes up
+        description: Count of RabbitMQ nodes currently reporting (one series of build_info per node). Compare to your expected cluster size.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: count(rabbitmq_build_info{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: nodes
+      - type: stat
+        title: Total queued messages
+        description: Sum of all messages sitting in queues across the cluster. A rising backlog means consumers are behind.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10000}
+          - {color: red, value: 100000}
+        targets:
+          - expr: sum(rabbitmq_queue_messages{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: queued
+
+  - title: Memory & disk headroom
+    panels:
+      - type: timeseries
+        title: Memory used vs limit per node
+        description: Per-node memory used against the high-watermark limit. The gap is your headroom before publishes block.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: rabbitmq_node_mem_used{job="$job", instance=~"$instance"}
+            legend: "{{instance}} used"
+          - expr: rabbitmq_node_mem_limit{job="$job", instance=~"$instance"}
+            legend: "{{instance}} limit"
+      - type: timeseries
+        title: Free disk vs limit per node
+        description: Per-node free disk against the free-disk watermark. When free dips to the limit the disk alarm fires.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: rabbitmq_node_disk_free{job="$job", instance=~"$instance"}
+            legend: "{{instance}} free"
+          - expr: rabbitmq_node_disk_free_limit{job="$job", instance=~"$instance"}
+            legend: "{{instance}} limit"
+
+  - title: Connections, channels & backlog
+    panels:
+      - type: timeseries
+        title: Connections & channels
+        description: Open connections and channels per node. A leak (ever-climbing channels) eventually exhausts memory.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: rabbitmq_connections{job="$job", instance=~"$instance"}
+            legend: "{{instance}} connections"
+          - expr: rabbitmq_channels{job="$job", instance=~"$instance"}
+            legend: "{{instance}} channels"
+      - type: timeseries
+        title: Total queued messages
+        description: Cluster-wide queued message count over time — the single clearest sign that consumers are keeping up or not.
+        unit: short
+        min: 0
+        fillOpacity: 30
+        legend: list
+        targets:
+          - expr: sum(rabbitmq_queue_messages{job="$job", instance=~"$instance"})
+            legend: queued
+
+alerts:
+  - name: RabbitMQMemoryAlarmActive
+    severity: critical
+    expr: rabbitmq_alarms_memory_used_watermark == 1
+    for: 1m
+    summary: "RabbitMQ memory watermark alarm active on {{ $labels.instance }}"
+    why: When the memory alarm trips RabbitMQ blocks all publishing connections cluster-wide; OpenStack RPC stalls and Nova/Neutron operations start timing out.
+    investigate: "Open OpenStack / RabbitMQ — Cluster Health, check memory used vs limit and total queued messages; a backlog usually caused the spike."
+    runbook: "Find and restart the dead/stuck consumers (oslo.messaging agents) to drain the queues; if needed raise `vm_memory_high_watermark` temporarily, then add capacity."
+    recovery: Clears when memory falls back below the high watermark.
+    false_positives: A brief spike during a node restart or queue sync; the 1m `for` filters most of these.
+  - name: RabbitMQDiskAlarmActive
+    severity: critical
+    expr: rabbitmq_alarms_free_disk_space_watermark == 1
+    for: 1m
+    summary: "RabbitMQ free-disk watermark alarm active on {{ $labels.instance }}"
+    why: Below the free-disk watermark RabbitMQ blocks publishers to protect the broker from running the disk to zero, halting OpenStack messaging.
+    investigate: "Check free disk vs limit per node; identify what filled the volume (persistent messages, logs, mnesia)."
+    runbook: "Reclaim disk (rotate/ship logs, purge dead-letter queues), then grow the volume; review why the backlog persisted long enough to fill disk."
+    recovery: Clears when free disk rises above the configured limit.
+    false_positives: Log-rotation lag right after a burst; confirm against the disk panel before paging.
+  - name: RabbitMQNodeDown
+    severity: warning
+    expr: count(rabbitmq_build_info) < 3
+    for: 5m
+    summary: "RabbitMQ cluster has fewer than 3 nodes reporting"
+    why: A shrunken cluster loses quorum/mirroring headroom; one more failure can split-brain or lose mirrored queues used by OpenStack RPC.
+    investigate: "Confirm which node stopped reporting and check its rabbitmq-server service, Erlang cookie and network partition status."
+    runbook: "Restart the down node, heal any network partition (`rabbitmqctl cluster_status`), and re-sync mirrored queues."
+    recovery: Clears when the expected number of nodes report again.
+    false_positives: Rolling restarts/upgrades; adjust the threshold to your real cluster size or silence during maintenance.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The `rabbitmq_prometheus` plugin is not enabled or the metrics port (15692) is not scraped.
+    action: "Run `rabbitmq-plugins enable rabbitmq_prometheus` and add the `:15692/metrics` target to Prometheus."
+  - symptom: Memory % over 100
+    cause: A node reports used above its high-watermark limit momentarily during GC.
+    action: This is transient; watch the alarm panel rather than the exact percentage.
+  - symptom: Nodes-up is lower than expected but the cluster is fine
+    cause: One node's metrics endpoint is unreachable while the node itself is healthy.
+    action: Check the scrape target for that node; `count(rabbitmq_build_info)` counts reporting nodes, not cluster membership.
+
+performance: >-
+  All series are per node and low cardinality, so this dashboard is inexpensive at
+  30s refresh. The only `sum` across queues (`rabbitmq_queue_messages`) stays cheap
+  unless you have tens of thousands of queues — in which case prefer the per-node
+  aggregate and move per-queue detail to the Queue Depth dashboard.
+
+customization: >-
+  Tune the memory gauge thresholds to your `vm_memory_high_watermark` and the
+  node-down alert to your real cluster size. If you run RabbitMQ behind HAProxy for
+  OpenStack, pair this with the HAProxy backend dashboard to see broker health and
+  load-balancer health side by side.

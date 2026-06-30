@@ -1,0 +1,249 @@
+# HPA behaviour — current vs desired vs max, and saturation at the ceiling.
+uid: kubernetes-autoscaling
+title: Kubernetes / Autoscaling
+description: >-
+  HorizontalPodAutoscaler behaviour: current versus desired versus maximum
+  replicas, which HPAs are pinned at their ceiling (out of room to scale), and where
+  scaling is actively happening. Answers "is autoscaling keeping up, or has it
+  maxed out and started dropping load?" from kube-state-metrics.
+datasource: prometheus
+tags: [kubernetes, autoscaling, hpa, kube-state-metrics]
+seo_phrase: Kubernetes HPA autoscaling Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which HPAs are pinned at their maximum replicas right now?"
+  - "Is any HPA's desired count above its current — actively scaling up?"
+  - "How close to the ceiling is each autoscaled workload?"
+  - "Did a traffic spike push an HPA to max and hold it there?"
+
+production_lessons: >-
+  An HPA pinned at its maximum is the quiet failure of autoscaling: it has done all
+  it can and is now silently shedding load — latency and queue depth climb while the
+  HPA reports "working as configured". The number that matters is desired vs max, not
+  current vs target: once desired wants more than max allows, the cap is the
+  bottleneck and only a human raising the limit (or adding cluster capacity) helps.
+  This dashboard leads with the count of HPAs at their ceiling and how saturated each
+  is, so you catch a maxed-out autoscaler before users do. The second trap it covers:
+  an HPA that wants to scale up but cannot because the cluster has no schedulable
+  capacity — desired rises, current does not follow, and the pods sit Pending.
+
+data_sources:
+  - "`kube-state-metrics` for HPA state
+    (`kube_horizontalpodautoscaler_status_current_replicas`,
+    `kube_horizontalpodautoscaler_status_desired_replicas`,
+    `kube_horizontalpodautoscaler_spec_max_replicas`)."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(kube_node_info, cluster)
+    description: Cluster to scope to. Select All on single-cluster setups.
+    multi: false
+    includeAll: true
+  - name: namespace
+    label: Namespace
+    query: label_values(kube_horizontalpodautoscaler_spec_max_replicas{cluster=~"$cluster"}, namespace)
+    description: Namespace(s) to inspect; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Autoscaling health — read these first
+    panels:
+      - type: stat
+        title: HPAs at max (saturated)
+        description: HPAs whose current replicas have reached their configured maximum — out of room to scale up.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(
+                kube_horizontalpodautoscaler_status_current_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+                >= kube_horizontalpodautoscaler_spec_max_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: at_max
+      - type: stat
+        title: HPAs wanting more than max
+        description: HPAs whose desired replicas exceed their maximum — the cap is actively limiting them and shedding load.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(
+                kube_horizontalpodautoscaler_status_desired_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+                > kube_horizontalpodautoscaler_spec_max_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: over_max
+      - type: stat
+        title: HPAs scaling (desired ≠ current)
+        description: HPAs whose desired and current replica counts differ — a scale-up or scale-down is in progress.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+        targets:
+          - expr: >-
+              count(
+                kube_horizontalpodautoscaler_status_desired_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+                != kube_horizontalpodautoscaler_status_current_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: scaling
+      - type: gauge
+        title: Most saturated HPA
+        description: Highest current-vs-max ratio across all HPAs — the autoscaler closest to its ceiling.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 100}
+        targets:
+          - expr: >-
+              100 * max(
+                kube_horizontalpodautoscaler_status_current_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+                / clamp_min(kube_horizontalpodautoscaler_spec_max_replicas{cluster=~"$cluster", namespace=~"$namespace"}, 1)
+              ) or vector(0)
+            instant: true
+            legend: saturation
+
+  - title: Saturation detail
+    panels:
+      - type: bargauge
+        title: Saturation % by HPA (current / max)
+        description: How much of each HPA's replica budget is in use. At 100% the autoscaler has no room left.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 100}
+        targets:
+          - expr: >-
+              100
+              * kube_horizontalpodautoscaler_status_current_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+              / clamp_min(kube_horizontalpodautoscaler_spec_max_replicas{cluster=~"$cluster", namespace=~"$namespace"}, 1)
+            instant: true
+            legend: "{{namespace}}/{{horizontalpodautoscaler}}"
+      - type: table
+        title: HPAs at or above max
+        description: Autoscalers pinned at their ceiling — raise maxReplicas or add capacity, or accept that load is being shed here.
+        unit: short
+        targets:
+          - expr: >-
+              kube_horizontalpodautoscaler_status_current_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+              >= kube_horizontalpodautoscaler_spec_max_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{horizontalpodautoscaler}}"
+
+  - title: Replicas over time
+    panels:
+      - type: timeseries
+        title: Current vs desired vs max replicas (cluster total)
+        description: Aggregate autoscaled replicas. Desired riding the max line means HPAs collectively want more than the cap allows.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(kube_horizontalpodautoscaler_spec_max_replicas{cluster=~"$cluster", namespace=~"$namespace"})
+            legend: max
+          - expr: sum(kube_horizontalpodautoscaler_status_desired_replicas{cluster=~"$cluster", namespace=~"$namespace"})
+            legend: desired
+          - expr: sum(kube_horizontalpodautoscaler_status_current_replicas{cluster=~"$cluster", namespace=~"$namespace"})
+            legend: current
+      - type: timeseries
+        title: Current replicas by HPA
+        description: Per-HPA replica count over time — the shape of each autoscaler's scaling events. Flat-topped at max is a saturated HPA.
+        unit: short
+        min: 0
+        legend: table
+        drawStyle: line
+        targets:
+          - expr: kube_horizontalpodautoscaler_status_current_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+            legend: "{{namespace}}/{{horizontalpodautoscaler}}"
+
+  - title: Scaling activity
+    panels:
+      - type: timeseries
+        title: Scale-up pressure (desired − current) by HPA
+        description: Positive values mean the HPA wants more replicas than it currently has — actively scaling up or blocked from doing so.
+        unit: short
+        legend: table
+        drawStyle: bars
+        fillOpacity: 40
+        targets:
+          - expr: >-
+              (kube_horizontalpodautoscaler_status_desired_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+               - kube_horizontalpodautoscaler_status_current_replicas{cluster=~"$cluster", namespace=~"$namespace"}) != 0
+            legend: "{{namespace}}/{{horizontalpodautoscaler}}"
+      - type: table
+        title: HPA detail (current replicas)
+        description: Current replica count per HPA — the snapshot for capacity reviews and tuning maxReplicas.
+        unit: short
+        targets:
+          - expr: kube_horizontalpodautoscaler_status_current_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{horizontalpodautoscaler}}"
+
+alerts:
+  - name: KubeHPAMaxedOut
+    severity: warning
+    expr: >-
+      kube_horizontalpodautoscaler_status_current_replicas
+      >= kube_horizontalpodautoscaler_spec_max_replicas
+    for: 15m
+    summary: "HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} pinned at max replicas for 15m"
+    why: An HPA at its ceiling has exhausted its ability to scale — any further load increase is absorbed as higher latency or dropped requests, not more pods.
+    investigate: "Check the workload's latency and queue depth; confirm whether real demand has risen or a metric is mis-scaled, pushing the HPA up."
+    runbook: "Raise maxReplicas if cluster capacity allows, scale the cluster to make room, or fix the upstream cause of the load."
+    recovery: Clears when current replicas fall below max for 5m.
+    false_positives: Workloads where max is set deliberately as a hard cost ceiling and being capped is the intended behaviour.
+  - name: KubeHPADesiredAboveMax
+    severity: critical
+    expr: >-
+      kube_horizontalpodautoscaler_status_desired_replicas
+      > kube_horizontalpodautoscaler_spec_max_replicas
+    for: 10m
+    summary: "HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} wants more replicas than its max"
+    why: When desired exceeds max, the autoscaler is explicitly asking for capacity it is not allowed to create — the cap is now the direct cause of under-provisioning.
+    investigate: "This is unambiguous: the metric target says scale further but maxReplicas forbids it. Verify cluster headroom before raising the cap."
+    runbook: "Raise maxReplicas (and add nodes if the cluster is full), or reduce load; if the metric is wrong, fix the HPA target."
+    recovery: Clears when desired no longer exceeds max for 5m.
+    false_positives: Brief spikes during a sharp traffic burst that settle within minutes — raise `for` for very spiky workloads.
+
+troubleshooting:
+  - {symptom: Desired stays above current for a long time, cause: HPA wants to scale up but pods are Pending for lack of cluster capacity, action: Check Kubernetes / Cluster Capacity and Pods — add nodes or free capacity.}
+  - {symptom: Saturation panels empty, cause: No HorizontalPodAutoscaler objects in $namespace, action: Expected on clusters without HPAs; set $namespace to All to confirm.}
+  - {symptom: Current above max momentarily, cause: maxReplicas was just lowered below the running count, action: The HPA will scale down to the new max shortly; transient.}
+
+performance: >-
+  All panels read three kube-state-metrics gauges per HPA with no rate windows, so
+  cost scales only with the number of HPAs — trivial on almost any cluster. Tables
+  and the scale-pressure panel filter with comparisons (`>=`, `!= 0`) so only the
+  relevant HPAs render. `clamp_min(max, 1)` guards the saturation ratio against an
+  HPA with a zero or missing max.
+
+customization: >-
+  Tune the 80%/100% saturation bands to how much replica headroom you want before
+  paging. Add a `horizontalpodautoscaler=~"..."` selector to focus on one service.
+  To correlate scaling with the signal driving it, place this dashboard beside the
+  workload's own latency/throughput dashboard and align the time ranges.

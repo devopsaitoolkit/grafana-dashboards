@@ -1,0 +1,58 @@
+name: 📊 Dashboard request
+description: Request a new production-ready dashboard for a system or exporter.
+title: "[Dashboard] <system> — <what it should show>"
+labels: ["dashboard-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping grow the library! The more operational context you give,
+        the better the dashboard. Dashboards here **answer questions** — tell us the
+        questions you need answered.
+  - type: input
+    id: system
+    attributes:
+      label: System / exporter
+      description: What is being monitored, and which exporter exposes the metrics?
+      placeholder: "e.g. Kafka via kafka_exporter, or Ceph via the ceph mgr prometheus module"
+    validations:
+      required: true
+  - type: textarea
+    id: questions
+    attributes:
+      label: Questions it should answer
+      description: The operational questions an on-call engineer would ask.
+      placeholder: |
+        - Are any brokers under-replicated right now?
+        - Which topics have the most consumer lag?
+        - Is disk on any broker about to fill?
+    validations:
+      required: true
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Key metrics (if known)
+      description: Metric names / PromQL you already rely on.
+      render: text
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options:
+        - linux
+        - kubernetes
+        - docker
+        - openstack
+        - monitoring (prometheus/loki/tempo/mimir/vm)
+        - databases
+        - web (nginx/apache)
+        - cloud (aws/azure/gcp/vmware)
+        - other
+    validations:
+      required: true
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I'm willing to help author the spec (see docs/authoring-specs.md)

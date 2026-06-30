@@ -1,0 +1,274 @@
+# vSphere ESXi host capacity and connectivity from the pryorda vmware_exporter.
+title: vSphere / ESXi Hosts
+description: >-
+  CPU and memory pressure, power and connection state, and datastore headroom for
+  ESXi hosts scraped by the pryorda vmware_exporter. Answers "which host or
+  datastore is about to run out of room, and is anything disconnected?" rather
+  than dumping raw vCenter counters.
+datasource: prometheus
+tags: [vmware, vsphere, esxi, hypervisor, capacity]
+seo_phrase: vSphere ESXi hosts Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "Are any ESXi hosts disconnected or not powered on?"
+  - "Which host is the most CPU- or memory-pressured right now?"
+  - "Which datastore has the least free space?"
+  - "Is memory pressure trending toward ballooning/swapping?"
+  - "Do we have headroom to absorb a host failure (HA)?"
+
+production_lessons: >-
+  In a vSphere cluster the numbers that ruin your weekend are **a disconnected
+  host** (its VMs may be down or stranded) and **a datastore filling up** (VMs
+  pause or fail to power on, and snapshots can wedge the whole datastore). Host
+  CPU rarely causes incidents on its own, but memory does — once usage approaches
+  the host max, the hypervisor balloons and then swaps guest memory to disk and
+  everything on that host slows to a crawl. This dashboard leads with connectivity
+  and the single tightest host/datastore so you triage capacity before it bites,
+  and keeps enough headroom for HA to restart a failed host's VMs.
+
+data_sources:
+  - "`vmware_exporter` (pryorda) pointed at vCenter (`vmware_host_cpu_usage`,
+    `vmware_host_cpu_max`, `vmware_host_memory_usage`, `vmware_host_memory_max`,
+    `vmware_host_power_state`, `vmware_host_connection_state`,
+    `vmware_datastore_capacity_size`, `vmware_datastore_freespace_size`)."
+  - "Series carry `host_name`, `cluster_name` and `dc_name` labels; datastore
+    series carry `ds_name`. **State mapping assumption:** this dashboard treats
+    `vmware_host_connection_state == 1` as *connected* and
+    `vmware_host_power_state == 1` as *poweredOn*; if your exporter build uses a
+    different encoding, adjust the comparisons and value mappings."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(vmware_host_cpu_usage, cluster_name)
+    description: vSphere cluster(s) to display.
+    multi: true
+    includeAll: true
+  - name: host
+    label: Host
+    query: label_values(vmware_host_cpu_usage{cluster_name=~"$cluster"}, host_name)
+    description: ESXi host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Fleet health — read these first
+    panels:
+      - type: stat
+        title: Hosts disconnected
+        description: ESXi hosts whose connection state is not "connected" — their VMs may be stranded.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(vmware_host_connection_state{cluster_name=~"$cluster", host_name=~"$host"} != 1) or vector(0)
+            instant: true
+            legend: disconnected
+      - type: stat
+        title: Most-pressured host CPU
+        description: Highest host CPU utilisation (usage ÷ max) across the selection.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(
+                100 * vmware_host_cpu_usage{cluster_name=~"$cluster", host_name=~"$host"}
+                / clamp_min(vmware_host_cpu_max{cluster_name=~"$cluster", host_name=~"$host"}, 1)
+              ) or vector(0)
+            instant: true
+            legend: max cpu
+      - type: stat
+        title: Most-pressured host memory
+        description: Highest host memory utilisation (usage ÷ max). Approaching 100% means ballooning then swap.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              max(
+                100 * vmware_host_memory_usage{cluster_name=~"$cluster", host_name=~"$host"}
+                / clamp_min(vmware_host_memory_max{cluster_name=~"$cluster", host_name=~"$host"}, 1)
+              ) or vector(0)
+            instant: true
+            legend: max mem
+      - type: stat
+        title: Tightest datastore free
+        description: Lowest free-space percentage across all datastores. Below 10% risks VM stuns and failed power-ons.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 10}
+          - {color: green, value: 20}
+        targets:
+          - expr: >-
+              min(
+                100 * vmware_datastore_freespace_size
+                / clamp_min(vmware_datastore_capacity_size, 1)
+              ) or vector(0)
+            instant: true
+            legend: min free
+
+  - title: Host CPU & memory pressure
+    panels:
+      - type: timeseries
+        title: Host CPU utilisation
+        description: Per-host CPU usage as a percent of capacity. Sustained highs limit vMotion and HA headroom.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * vmware_host_cpu_usage{cluster_name=~"$cluster", host_name=~"$host"}
+              / clamp_min(vmware_host_cpu_max{cluster_name=~"$cluster", host_name=~"$host"}, 1)
+            legend: "{{host_name}}"
+      - type: timeseries
+        title: Host memory utilisation
+        description: Per-host memory usage as a percent of capacity — the panel that predicts ballooning and swap.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * vmware_host_memory_usage{cluster_name=~"$cluster", host_name=~"$host"}
+              / clamp_min(vmware_host_memory_max{cluster_name=~"$cluster", host_name=~"$host"}, 1)
+            legend: "{{host_name}}"
+
+  - title: Connectivity & power
+    panels:
+      - type: state-timeline
+        title: Host power state
+        description: Power state over time (1 = poweredOn). Unexpected transitions point at host failures or maintenance.
+        unit: short
+        mappings:
+          - {type: value, options: {"0": {text: off, color: red}, "1": {text: on, color: green}}}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: vmware_host_power_state{cluster_name=~"$cluster", host_name=~"$host"}
+            legend: "{{host_name}}"
+      - type: table
+        title: Host connection state
+        description: Current connection state per host (1 = connected). Anything else needs immediate attention.
+        unit: short
+        transformations:
+          - id: organize
+            options:
+              excludeByName: {Time: true, job: true, __name__: true}
+        targets:
+          - expr: vmware_host_connection_state{cluster_name=~"$cluster", host_name=~"$host"}
+            instant: true
+            legend: "{{host_name}}"
+
+  - title: Datastore headroom
+    panels:
+      - type: bargauge
+        title: Datastore free space
+        description: Free-space percentage per datastore — the lowest bars are your snapshot/clone risk.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 10}
+          - {color: green, value: 20}
+        targets:
+          - expr: >-
+              100 * vmware_datastore_freespace_size
+              / clamp_min(vmware_datastore_capacity_size, 1)
+            instant: true
+            legend: "{{ds_name}}"
+      - type: timeseries
+        title: Datastore free bytes
+        description: Absolute free space per datastore over time — projects the day you run out.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: vmware_datastore_freespace_size
+            legend: "{{ds_name}}"
+
+alerts:
+  - name: VsphereHostDisconnected
+    severity: critical
+    expr: vmware_host_connection_state != 1
+    for: 5m
+    summary: "ESXi host {{ $labels.host_name }} is not connected to vCenter"
+    why: A disconnected host means its VMs are unmanaged and possibly down; HA may not protect them and vMotion is impossible.
+    investigate: "Check the host in vCenter (notResponding vs disconnected); ping the management interface and the hostd/vpxa agents."
+    runbook: "Reconnect the host in vCenter; if it is notResponding, restart the management agents (`services.sh restart`) on the ESXi host or trigger HA failover."
+    recovery: Clears when the host's connection state returns to 1.
+    false_positives: Planned host maintenance — silence the rule for hosts you have intentionally placed in maintenance mode.
+  - name: VsphereHostMemoryPressure
+    severity: warning
+    expr: 100 * vmware_host_memory_usage / clamp_min(vmware_host_memory_max, 1) > 95
+    for: 15m
+    summary: "ESXi host {{ $labels.host_name }} memory >95% of capacity"
+    why: Above ~95% the hypervisor balloons and then swaps guest memory to disk, slowing every VM on the host and breaking HA headroom.
+    investigate: "Open vSphere / ESXi Hosts; identify the heaviest VMs on the host and check for memory overcommit across the cluster."
+    runbook: "vMotion VMs to a less-loaded host, set memory reservations on critical VMs, or add capacity; verify DRS is enabled and balancing."
+    recovery: Clears when host memory utilisation falls below 95% for 10m.
+    false_positives: Transient spikes during DRS migrations or backups — the 15m `for` filters most of them.
+  - name: VsphereDatastoreLow
+    severity: critical
+    expr: 100 * vmware_datastore_freespace_size / clamp_min(vmware_datastore_capacity_size, 1) < 10
+    for: 10m
+    summary: "Datastore {{ $labels.ds_name }} below 10% free"
+    why: A near-full datastore stuns running VMs, blocks power-ons and can wedge on a growing snapshot — a cluster-wide hazard.
+    investigate: "Find large/orphaned VMDKs and old snapshots on the datastore; check for runaway snapshot growth."
+    runbook: "Consolidate snapshots, storage-vMotion VMs off the datastore, delete orphaned files, or expand the datastore/LUN."
+    recovery: Clears when free space rises above 10% for 10m.
+    false_positives: Datastores intentionally run hot (scratch/temp) — exclude them by `ds_name`.
+
+troubleshooting:
+  - symptom: Utilisation panels show >100% or divide errors
+    cause: A `*_max` series briefly reported 0 during exporter startup.
+    action: The `clamp_min(..., 1)` guard handles this; if it persists, check the exporter's vCenter permissions for host stats.
+  - symptom: Disconnected count is non-zero but hosts look fine
+    cause: Your exporter encodes connection state differently (e.g. 0 = connected).
+    action: Verify the value mapping and adjust the `!= 1` comparison to match your build.
+  - symptom: No datastore panels
+    cause: The exporter's datastore collector is disabled.
+    action: Enable datastore collection in the vmware_exporter config and confirm `vmware_datastore_capacity_size` is scraped.
+
+performance: >-
+  vCenter performance counters update on ~20s/1m intervals, so a 1m refresh and a
+  6h window are plenty — scraping faster just hammers vCenter. Per-host series are
+  bounded by `cluster_name`/`host_name`; datastore panels are instant queries.
+  On large vCenters, scope `$cluster` to keep the host count manageable.
+
+customization: >-
+  Tune the 95% memory and 10% datastore thresholds to your overcommit and snapshot
+  policies. To reserve N+1 HA headroom, lower the host CPU/memory warning levels so
+  one host can absorb another's VMs. Add a `dc_name` template variable if you run
+  multiple datacenters behind one vCenter.

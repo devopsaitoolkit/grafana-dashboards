@@ -1,0 +1,274 @@
+title: OpenStack / Cinder — Storage Capacity
+description: >-
+  Block-storage capacity planning for an OpenStack deployment: per-pool free vs
+  total GB, used percentage, the tightest pool, quota headroom against limits, and a
+  linear projection of when each pool runs out. Leads with the tightest pool and
+  total free headroom so you act on the pool about to fill, not the average.
+datasource: prometheus
+tags: [openstack, cinder, capacity, storage, openstack-exporter]
+seo_phrase: OpenStack Cinder storage capacity Grafana dashboard
+
+refresh: 1m
+time_from: now-7d
+
+questions:
+  - "Which storage pool is the tightest right now (highest used %)?"
+  - "How much free capacity is left across all pools?"
+  - "How many pools are over the danger threshold?"
+  - "Given the current fill rate, when does each pool run out?"
+  - "Is tenant volume usage approaching the configured quota limit?"
+
+production_lessons: >-
+  Capacity averages lie. A deployment can sit at 60% used overall while one pool is
+  at 96% and about to reject every new volume scheduled to it — so this dashboard
+  leads with the **tightest pool**, not the mean. The second lesson is that Cinder
+  has two different ceilings that both cause "no space" errors: the **physical pool
+  capacity** (free vs total GB reported by the backend) and the **quota limit**
+  (allocated vs max GB Cinder will let a tenant use). Hitting either one fails
+  provisioning, and they fail for different reasons with different fixes, so both get
+  first-class panels here. The `predict_linear` projection turns a slow leak into a
+  dated deadline, which is the difference between a planned expansion and a 2am page.
+
+data_sources:
+  - "`openstack-exporter` with Cinder enabled — exposes
+    `openstack_cinder_pool_capacity_free_gb` and
+    `openstack_cinder_pool_capacity_total_gb` (per backend pool), plus
+    `openstack_cinder_limits_volume_used_gb` and
+    `openstack_cinder_limits_volume_max_gb` for quota headroom."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_cinder_pool_capacity_total_gb, job)
+    description: Prometheus scrape job for your openstack-exporter target(s).
+    multi: false
+    includeAll: false
+  - name: pool
+    label: Pool
+    query: label_values(openstack_cinder_pool_capacity_total_gb{job="$job"}, pool)
+    description: Backend storage pool(s) to display.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Capacity headroom — read these first
+    panels:
+      - type: stat
+        title: Tightest pool used
+        description: Highest used percentage across selected pools — the one that fills first.
+        unit: percent
+        decimals: 1
+        min: 0
+        max: 100
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(
+                100 * (1 - openstack_cinder_pool_capacity_free_gb{job="$job", pool=~"$pool"}
+                / clamp_min(openstack_cinder_pool_capacity_total_gb{job="$job", pool=~"$pool"}, 1))
+              ) or vector(0)
+            instant: true
+            legend: tightest
+      - type: stat
+        title: Total free
+        description: Aggregate free block-storage capacity across selected pools.
+        unit: decbytes
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 1099511627776}
+          - {color: green, value: 5497558138880}
+        targets:
+          - expr: sum(openstack_cinder_pool_capacity_free_gb{job="$job", pool=~"$pool"}) * 1073741824 or vector(0)
+            instant: true
+            legend: free
+      - type: gauge
+        title: Cluster used
+        description: Used capacity as a share of total across all selected pools.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 85}
+        targets:
+          - expr: >-
+              100 * (1 - sum(openstack_cinder_pool_capacity_free_gb{job="$job", pool=~"$pool"})
+              / clamp_min(sum(openstack_cinder_pool_capacity_total_gb{job="$job", pool=~"$pool"}), 1))
+            instant: true
+            legend: used
+      - type: stat
+        title: Pools over 90%
+        description: Pools past the act-now threshold — each one is about to reject new volumes.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(
+                100 * (1 - openstack_cinder_pool_capacity_free_gb{job="$job", pool=~"$pool"}
+                / clamp_min(openstack_cinder_pool_capacity_total_gb{job="$job", pool=~"$pool"}, 1)) > 90
+              ) or vector(0)
+            instant: true
+            legend: critical
+
+  - title: Per-pool capacity
+    panels:
+      - type: bargauge
+        title: Used % by pool
+        description: Every pool ranked by fill — the bars at the top are where to add capacity next.
+        unit: percent
+        decimals: 1
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * (1 - openstack_cinder_pool_capacity_free_gb{job="$job", pool=~"$pool"}
+              / clamp_min(openstack_cinder_pool_capacity_total_gb{job="$job", pool=~"$pool"}, 1))
+            instant: true
+            legend: "{{pool}}"
+      - type: table
+        title: Pool headroom (GB)
+        description: Free and total capacity per pool — the raw numbers behind the percentages.
+        unit: decgbytes
+        targets:
+          - expr: openstack_cinder_pool_capacity_free_gb{job="$job", pool=~"$pool"}
+            legend: "{{pool}}"
+            instant: true
+          - expr: openstack_cinder_pool_capacity_total_gb{job="$job", pool=~"$pool"}
+            legend: "{{pool}}"
+            instant: true
+
+  - title: Trend & projection
+    panels:
+      - type: timeseries
+        title: Free capacity per pool
+        description: Free GB per pool over a week — the slope is the fill rate; a steady decline is a dated deadline.
+        unit: decgbytes
+        min: 0
+        legend: table
+        targets:
+          - expr: openstack_cinder_pool_capacity_free_gb{job="$job", pool=~"$pool"}
+            legend: "{{pool}}"
+      - type: stat
+        title: Soonest pool exhaustion
+        description: Days until the fastest-filling pool reaches zero free, from the last 24h trend.
+        unit: dtdurations
+        decimals: 1
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 604800}
+          - {color: green, value: 2592000}
+        targets:
+          - expr: >-
+              min(
+                openstack_cinder_pool_capacity_free_gb{job="$job", pool=~"$pool"}
+                / clamp_min(-deriv(openstack_cinder_pool_capacity_free_gb{job="$job", pool=~"$pool"}[24h]), 0.0000001)
+              )
+            instant: true
+            legend: soonest
+
+  - title: Quota headroom
+    panels:
+      - type: gauge
+        title: Volume quota used
+        description: Allocated volume GB as a share of the configured Cinder quota limit.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * sum(openstack_cinder_limits_volume_used_gb{job="$job"})
+              / clamp_min(sum(openstack_cinder_limits_volume_max_gb{job="$job"}), 1)
+            instant: true
+            legend: quotaUsed
+      - type: timeseries
+        title: Allocated vs quota limit
+        description: Used GB against the quota ceiling — the gap is how much more tenants can provision before quota errors.
+        unit: decgbytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(openstack_cinder_limits_volume_used_gb{job="$job"})
+            legend: used
+          - expr: sum(openstack_cinder_limits_volume_max_gb{job="$job"})
+            legend: limit
+
+alerts:
+  - name: CinderPoolNearFull
+    severity: warning
+    expr: >-
+      100 * (1 - openstack_cinder_pool_capacity_free_gb
+      / clamp_min(openstack_cinder_pool_capacity_total_gb, 1)) > 85
+    for: 15m
+    summary: "Cinder pool {{ $labels.pool }} over 85% full"
+    why: Once a pool fills, every volume the scheduler places there fails; thin-provisioned backends can also start refusing writes to existing volumes.
+    investigate: "Open OpenStack / Cinder — Storage Capacity; check the per-pool trend to see how fast it is climbing."
+    runbook: "Add capacity to the backend, migrate volumes to a roomier pool, or prune unused volumes/snapshots on that pool."
+    recovery: Clears when used drops below 85%.
+    false_positives: Backends that are intentionally run hot — raise the threshold for those pools with a label selector.
+  - name: CinderPoolPredictedExhaustion
+    severity: critical
+    expr: >-
+      predict_linear(openstack_cinder_pool_capacity_free_gb[24h], 7 * 86400) < 0
+    for: 1h
+    summary: "Cinder pool {{ $labels.pool }} projected to exhaust within 7 days"
+    why: A dated deadline turns a slow capacity leak into a planned expansion instead of a midnight outage.
+    investigate: "Confirm the fill rate is organic demand versus a runaway snapshot or clone job."
+    runbook: "Schedule a capacity expansion or migrate workloads; throttle the source of growth to buy time."
+    recovery: Clears when the projection no longer crosses zero within the window.
+    false_positives: A one-off bulk import skews the linear fit — the 24h window and 1h `for` damp transient slopes.
+  - name: CinderVolumeQuotaNearLimit
+    severity: warning
+    expr: >-
+      100 * sum(openstack_cinder_limits_volume_used_gb)
+      / clamp_min(sum(openstack_cinder_limits_volume_max_gb), 1) > 90
+    for: 15m
+    summary: "Cinder volume quota over 90% used"
+    why: Hitting the quota limit fails provisioning with a quota error even when the backend has free space — a different fix from physical exhaustion.
+    investigate: "Identify which project is consuming the quota; decide whether to raise the limit or reclaim volumes."
+    runbook: "Increase the Cinder volume quota for the project, or reclaim unused volumes to free allocation."
+    recovery: Clears when quota usage falls below 90%.
+    false_positives: A project deliberately run at its quota ceiling — scope the alert per project and exclude those.
+
+troubleshooting:
+  - symptom: Used % is negative or above 100
+    cause: A pool reports free greater than total (thin provisioning over-commit) or stale capacity stats.
+    action: Confirm the backend's reported capacity; thin pools may legitimately over-commit — interpret used % accordingly.
+  - symptom: Exhaustion projection shows huge or negative durations
+    cause: Free capacity is flat or growing, so the fill rate is near zero.
+    action: This is healthy — the `clamp_min` guard keeps the math defined; ignore very large values.
+  - symptom: Quota panels empty
+    cause: "`openstack_cinder_limits_*` not exported or exporter lacks the limits scope."
+    action: Confirm the exporter version and that its credentials can read project limits.
+
+performance: >-
+  Per-pool panels emit one series per pool; aggregate (cluster used, total free,
+  quota) panels collapse to a single series with `sum`. `predict_linear`/`deriv` run
+  over a 24h window — on deployments with hundreds of pools, back the per-pool
+  used-% expression with a recording rule and widen the refresh to 1m+.
+
+customization: >-
+  Tune the 75/85/90% thresholds to your provisioning lead time and backend type
+  (thin pools tolerate higher fill). Adjust the `decbytes` thresholds on Total free
+  to your fleet size. For multi-region clouds, add a `region` variable so each region
+  gets its own tightest-pool reading.

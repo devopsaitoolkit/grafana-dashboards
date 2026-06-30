@@ -1,0 +1,234 @@
+title: OpenStack / Neutron — L3 Routing
+description: >-
+  Layer-3 routing health for an OpenStack deployment: router inventory, L3 agent
+  coverage and balance, ports per network, and security-group footprint. Leads with
+  router count and L3-agent coverage so you can see at a glance whether every router
+  is actually scheduled to an agent that can route its traffic.
+datasource: prometheus
+tags: [openstack, neutron, routers, l3, openstack-exporter]
+seo_phrase: OpenStack Neutron L3 router Grafana dashboard
+
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many routers exist, and are they all scheduled to an L3 agent?"
+  - "Are any routers unscheduled (no L3 agent can route them)?"
+  - "Is router load balanced across L3 agents or concentrated on one host?"
+  - "How many ports does each network carry — which segments are largest?"
+  - "Is the security-group count growing in a way that hints at sprawl?"
+
+production_lessons: >-
+  A router that exists in the database but isn't scheduled to a live L3 agent is the
+  quietest networking outage there is: the API shows the router as ACTIVE, but no
+  agent is forwarding its traffic, so the tenant just sees "the internet is down."
+  This dashboard leads with **coverage** — routers minus routers-with-an-agent — so
+  that gap is impossible to miss. The companion lesson is **balance**: L3 agents are
+  not interchangeable in capacity, and after a network node fails its routers pile
+  onto the survivors. Ports-per-network and security-group counts round out the
+  picture because runaway port or SG growth on one network is an early sign of a
+  misbehaving tenant or an automation loop.
+
+data_sources:
+  - "`openstack-exporter` with Neutron enabled — exposes
+    `openstack_neutron_routers`, `openstack_neutron_l3_agent_of_router`
+    (router-to-agent bindings), `openstack_neutron_ports`,
+    `openstack_neutron_networks` and `openstack_neutron_security_groups`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_neutron_routers, job)
+    description: Prometheus scrape job for your openstack-exporter target(s).
+    multi: false
+    includeAll: false
+
+rows:
+  - title: Routing health — read these first
+    panels:
+      - type: stat
+        title: Routers
+        description: Total Neutron routers in the deployment.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: sum(openstack_neutron_routers{job="$job"}) or vector(0)
+            instant: true
+            legend: routers
+      - type: stat
+        title: Unscheduled routers
+        description: Routers with no L3 agent binding — they exist but nothing is routing their traffic.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              clamp_min(
+                sum(openstack_neutron_routers{job="$job"})
+                - count(count by (router_id) (openstack_neutron_l3_agent_of_router{job="$job"})),
+                0
+              ) or vector(0)
+            instant: true
+            legend: unscheduled
+      - type: stat
+        title: L3 agents
+        description: Distinct L3 agent hosts currently carrying routers.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 1}
+          - {color: green, value: 2}
+        targets:
+          - expr: count(count by (l3_agent_host) (openstack_neutron_l3_agent_of_router{job="$job"})) or vector(0)
+            instant: true
+            legend: agents
+      - type: gauge
+        title: Router coverage
+        description: Share of routers that are scheduled to at least one L3 agent.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 99}
+          - {color: green, value: 100}
+        targets:
+          - expr: >-
+              100 * count(count by (router_id) (openstack_neutron_l3_agent_of_router{job="$job"}))
+              / clamp_min(sum(openstack_neutron_routers{job="$job"}), 1)
+            instant: true
+            legend: coverage
+
+  - title: L3 agent balance
+    panels:
+      - type: bargauge
+        title: Routers per L3 agent
+        description: Router load on each L3 agent host — spot the overloaded survivor after a node loss.
+        unit: short
+        decimals: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 50}
+          - {color: red, value: 100}
+        targets:
+          - expr: count by (l3_agent_host) (openstack_neutron_l3_agent_of_router{job="$job"})
+            instant: true
+            legend: "{{l3_agent_host}}"
+      - type: timeseries
+        title: Balance over time
+        description: Routers per agent through time — diverging lines mean the fleet drifted out of balance.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: count by (l3_agent_host) (openstack_neutron_l3_agent_of_router{job="$job"})
+            legend: "{{l3_agent_host}}"
+
+  - title: Network & port footprint
+    panels:
+      - type: timeseries
+        title: Networks, ports & routers
+        description: Inventory trend — watch for a sudden cliff (mass deletion) or a runaway climb.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(openstack_neutron_networks{job="$job"})
+            legend: networks
+          - expr: sum(openstack_neutron_ports{job="$job"})
+            legend: ports
+          - expr: sum(openstack_neutron_routers{job="$job"})
+            legend: routers
+      - type: stat
+        title: Ports per network (avg)
+        description: Mean ports per network — a proxy for segment density.
+        unit: short
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: >-
+              sum(openstack_neutron_ports{job="$job"})
+              / clamp_min(sum(openstack_neutron_networks{job="$job"}), 1)
+            instant: true
+            legend: portsPerNet
+      - type: stat
+        title: Security groups
+        description: Total security groups — sudden growth can signal tenant sprawl or an automation loop.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: sum(openstack_neutron_security_groups{job="$job"}) or vector(0)
+            instant: true
+            legend: secgroups
+
+alerts:
+  - name: NeutronRouterUnscheduled
+    severity: critical
+    expr: >-
+      sum(openstack_neutron_routers)
+      - count(count by (router_id) (openstack_neutron_l3_agent_of_router)) > 0
+    for: 10m
+    summary: "One or more Neutron routers are not scheduled to any L3 agent"
+    why: An unscheduled router is ACTIVE in the API but has no agent forwarding its traffic, so the tenant behind it loses external connectivity with no obvious error.
+    investigate: "Open OpenStack / Neutron — L3 Routing; cross-reference router IDs against L3 agent bindings to find the orphan."
+    runbook: "Bind the router to a live L3 agent with `neutron l3-agent-router-add`, or enable automatic rescheduling; confirm at least one L3 agent is alive."
+    recovery: Clears when every router has at least one agent binding.
+    false_positives: A router mid-reschedule is briefly unbound — the 10m `for` filters that transient.
+  - name: NeutronNoL3Agents
+    severity: critical
+    expr: count(count by (l3_agent_host) (openstack_neutron_l3_agent_of_router)) < 1
+    for: 5m
+    summary: "No L3 agents are carrying routers"
+    why: With zero L3 agents scheduling routers, all routed (non-DVR) traffic for the deployment is down.
+    investigate: "Check L3 agent state on the Agent Fleet dashboard and the Neutron server logs."
+    runbook: "Restart L3 agents and the Neutron server; verify the message bus so agents can re-register."
+    recovery: Clears when at least one L3 agent reports routers again.
+    false_positives: A fully DVR deployment with no centralised routers can legitimately read zero — disable this alert there.
+  - name: NeutronL3AgentImbalance
+    severity: warning
+    expr: >-
+      max(count by (l3_agent_host) (openstack_neutron_l3_agent_of_router))
+      > 3 * avg(count by (l3_agent_host) (openstack_neutron_l3_agent_of_router))
+    for: 30m
+    summary: "L3 router load is heavily skewed onto one agent"
+    why: A single agent carrying far more than its share is a fragile bottleneck whose failure reschedules a large blast radius.
+    investigate: "Compare routers-per-agent across hosts; look for a recent node loss that piled routers onto survivors."
+    runbook: "Rebalance routers across L3 agents, or enable L3 HA so they spread automatically."
+    recovery: Clears when the busiest agent falls back within 3× the mean.
+    false_positives: Tiny fleets (two or three agents) skew easily — raise the multiplier or disable on small deployments.
+
+troubleshooting:
+  - symptom: Coverage gauge reads above 100%
+    cause: HA routers bind to multiple agents, so distinct-router count can exceed naive expectations.
+    action: The `count by (router_id)` guard already de-duplicates; verify the exporter labels routers with `router_id`.
+  - symptom: Unscheduled count flickers
+    cause: Routers are being rescheduled between agents.
+    action: Confirm L3 agent stability on the Agent Fleet dashboard; rely on the 10m alert `for` to ignore transients.
+  - symptom: Balance panels empty
+    cause: "`openstack_neutron_l3_agent_of_router` not exposed or no routers scheduled."
+    action: Confirm the exporter version exports the binding series.
+
+performance: >-
+  Coverage and balance use nested `count by (...)` aggregations that collapse to a
+  handful of series regardless of router count, so the dashboard scales to thousands
+  of routers cheaply. The inventory timeseries are single-series sums.
+
+customization: >-
+  Tune the routers-per-agent thresholds (50/100) and the imbalance multiplier to your
+  L3 sizing and HA model. For DVR deployments, expect low centralised-router counts
+  and relax or disable the no-L3-agents alert. Add a `region` variable for
+  multi-region exporters.

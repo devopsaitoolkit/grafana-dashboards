@@ -1,0 +1,44 @@
+# Alerting rules for the tempo dashboards.
+# Generated from tools/specs/tempo/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: tempo.rules
+  rules:
+  - alert: TempoNoSpansReceived
+    expr: sum(rate(tempo_distributor_spans_received_total[5m])) == 0
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Tempo is receiving no spans
+      description: Zero span ingest means tracing has gone dark — either the collectors stopped sending
+        or the distributors are broken.
+      runbook: Verify the trace pipeline (agent/collector to distributor); restart wedged distributors;
+        confirm the receive ports are open.
+      dashboard: dashboards/tempo/overview.json
+  - alert: TempoBlocklistGrowing
+    expr: tempodb_blocklist_length > 5000
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Tempo blocklist on {{ $labels.instance }} above 5000 blocks
+      description: A growing blocklist means compaction cannot keep up, which slows every trace read and
+        inflates object-storage cost.
+      runbook: Scale the compactor, raise compaction concurrency, or reduce retention; confirm object
+        storage is responsive.
+      dashboard: dashboards/tempo/overview.json
+  - alert: TempoRequestLatencyHigh
+    expr: histogram_quantile(0.99, sum by (le, route) (rate(tempo_request_duration_seconds_bucket[5m])))
+      > 5
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Tempo route {{ $labels.route }} p99 latency above 5s
+      description: Slow requests degrade trace ingest or make trace lookups unusable when an engineer
+        is mid-incident.
+      runbook: Scale the component, tune querier concurrency, or improve object-storage performance /
+        caching.
+      dashboard: dashboards/tempo/overview.json

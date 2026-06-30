@@ -1,0 +1,301 @@
+# Single-pane cluster health — the landing dashboard for an on-call engineer.
+uid: kubernetes-cluster-overview
+title: Kubernetes / Cluster Overview
+description: >-
+  One screen that answers "is this cluster healthy right now?" — nodes ready,
+  pods running vs pending vs failed, how much CPU and memory is committed against
+  what the nodes can allocate, and whether containers are crash-looping. Built
+  from kube-state-metrics so it works on any conformant cluster.
+datasource: prometheus
+tags: [kubernetes, cluster, kube-state-metrics, overview]
+seo_phrase: Kubernetes cluster overview Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are all nodes Ready, or is the control plane hiding a down node?"
+  - "How many pods are Pending or Failed instead of Running right now?"
+  - "How much CPU and memory has the scheduler committed versus what nodes can allocate?"
+  - "Is anything crash-looping or restarting across the whole cluster?"
+
+production_lessons: >-
+  Most "the cluster is broken" pages are actually one of four things: a NotReady
+  node, a wave of Pending pods (no schedulable capacity), a Failed/CrashLoop
+  workload, or commitment creeping past allocatable so the scheduler quietly
+  stops placing pods. This dashboard leads with those four signals as headline
+  stats so an on-call engineer can triage in five seconds, then drills into phase
+  breakdown and resource commitment. The commitment gauges are the early warning
+  the others lack: once CPU or memory requests pass ~90% of allocatable, the next
+  Pending pod is inevitable.
+
+data_sources:
+  - "`kube-state-metrics` for node conditions, pod phases, container restarts and
+    resource requests/limits (`kube_node_*`, `kube_pod_*`)."
+  - "`cAdvisor`/kubelet is not required here — every panel is kube-state-metrics so
+    the dashboard renders even when node metrics are missing."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(kube_node_info, cluster)
+    description: Cluster to scope to. Select All on single-cluster setups (the label may be empty).
+    multi: false
+    includeAll: true
+
+rows:
+  - title: Cluster health — read these first
+    panels:
+      - type: stat
+        title: Nodes Ready
+        description: Nodes reporting the Ready condition as true.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: >-
+              sum(kube_node_status_condition{cluster=~"$cluster", condition="Ready", status="true"}) or vector(0)
+            instant: true
+            legend: ready
+      - type: stat
+        title: Nodes NotReady
+        description: Nodes that exist but are not reporting Ready — a down or cordoned-off kubelet.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(kube_node_info{cluster=~"$cluster"})
+              - sum(kube_node_status_condition{cluster=~"$cluster", condition="Ready", status="true"})
+              or vector(0)
+            instant: true
+            legend: notready
+      - type: stat
+        title: Pods Running
+        description: Pods currently in the Running phase across all namespaces.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              sum(kube_pod_status_phase{cluster=~"$cluster", phase="Running"}) or vector(0)
+            instant: true
+            legend: running
+      - type: stat
+        title: Pods Pending
+        description: Pods stuck in Pending — usually unschedulable for lack of CPU/memory or a missing volume.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 10}
+        targets:
+          - expr: >-
+              sum(kube_pod_status_phase{cluster=~"$cluster", phase="Pending"}) or vector(0)
+            instant: true
+            legend: pending
+      - type: stat
+        title: Pods Failed
+        description: Pods in the Failed phase — terminated with a non-zero exit and not restarted.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              sum(kube_pod_status_phase{cluster=~"$cluster", phase="Failed"}) or vector(0)
+            instant: true
+            legend: failed
+      - type: gauge
+        title: CPU committed (requests / allocatable)
+        description: Sum of pod CPU requests as a share of total allocatable CPU. Above ~90% the scheduler runs out of room.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100
+              * sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="cpu"})
+              / sum(kube_node_status_allocatable{cluster=~"$cluster", resource="cpu"})
+            instant: true
+            legend: cpu
+      - type: gauge
+        title: Memory committed (requests / allocatable)
+        description: Sum of pod memory requests as a share of total allocatable memory.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100
+              * sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="memory"})
+              / sum(kube_node_status_allocatable{cluster=~"$cluster", resource="memory"})
+            instant: true
+            legend: memory
+
+  - title: Pod phases over time
+    panels:
+      - type: piechart
+        title: Pods by phase (now)
+        description: Share of pods in each lifecycle phase. A healthy cluster is almost entirely Running.
+        unit: short
+        pieType: donut
+        targets:
+          - expr: sum by (phase) (kube_pod_status_phase{cluster=~"$cluster"})
+            instant: true
+            legend: "{{phase}}"
+      - type: timeseries
+        title: Pending and Failed pods
+        description: Trend of not-Running pods. A rising Pending line means the cluster is out of schedulable capacity.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(kube_pod_status_phase{cluster=~"$cluster", phase="Pending"})
+            legend: pending
+          - expr: sum(kube_pod_status_phase{cluster=~"$cluster", phase="Failed"})
+            legend: failed
+          - expr: sum(kube_pod_status_phase{cluster=~"$cluster", phase="Unknown"})
+            legend: unknown
+
+  - title: Resource commitment
+    panels:
+      - type: timeseries
+        title: CPU cores — requests vs limits vs allocatable
+        description: Cluster-wide CPU commitment. When requests meet allocatable, scheduling stalls; limits above allocatable risk node CPU contention.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(kube_node_status_allocatable{cluster=~"$cluster", resource="cpu"})
+            legend: allocatable
+          - expr: sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="cpu"})
+            legend: requests
+          - expr: sum(kube_pod_container_resource_limits{cluster=~"$cluster", resource="cpu"})
+            legend: limits
+      - type: timeseries
+        title: Memory — requests vs limits vs allocatable
+        description: Cluster-wide memory commitment in bytes.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(kube_node_status_allocatable{cluster=~"$cluster", resource="memory"})
+            legend: allocatable
+          - expr: sum(kube_pod_container_resource_requests{cluster=~"$cluster", resource="memory"})
+            legend: requests
+          - expr: sum(kube_pod_container_resource_limits{cluster=~"$cluster", resource="memory"})
+            legend: limits
+
+  - title: Stability
+    panels:
+      - type: stat
+        title: Container restarts (1h)
+        description: Total container restarts across the cluster in the last hour.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 25}
+        targets:
+          - expr: >-
+              sum(increase(kube_pod_container_status_restarts_total{cluster=~"$cluster"}[1h])) or vector(0)
+            instant: true
+            legend: restarts
+      - type: stat
+        title: Containers crash-looping
+        description: Containers currently waiting in CrashLoopBackOff.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              sum(kube_pod_container_status_waiting_reason{cluster=~"$cluster", reason="CrashLoopBackOff"}) or vector(0)
+            instant: true
+            legend: crashloop
+      - type: table
+        title: Top restarting pods (1h)
+        description: Pods accumulating the most container restarts in the last hour — start crash investigations here.
+        unit: short
+        targets:
+          - expr: >-
+              topk(15, sum by (namespace, pod) (increase(kube_pod_container_status_restarts_total{cluster=~"$cluster"}[1h])))
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{pod}}"
+
+alerts:
+  - name: KubeClusterNodeNotReady
+    severity: critical
+    expr: >-
+      count(kube_node_info) - sum(kube_node_status_condition{condition="Ready", status="true"}) > 0
+    for: 5m
+    summary: "{{ $value }} node(s) NotReady in the cluster"
+    why: A NotReady node has stopped scheduling and its pods will be evicted, shrinking capacity and risking cascading Pending pods.
+    investigate: "Open Kubernetes / Nodes, find the NotReady node, then check kubelet, container runtime and node pressure conditions."
+    runbook: "Restart kubelet/containerd or drain and replace the node; if many nodes flap together, suspect the control plane or network."
+    recovery: Clears when every node reports Ready for 5m.
+    false_positives: Brief NotReady during a planned reboot or autoscaler scale-down — raise `for` or exclude cordoned nodes.
+  - name: KubeClusterPodsPending
+    severity: warning
+    expr: sum(kube_pod_status_phase{phase="Pending"}) > 10
+    for: 15m
+    summary: "{{ $value }} pods Pending cluster-wide for 15m"
+    why: Sustained Pending pods mean the scheduler cannot place work — usually exhausted CPU/memory allocatable or unsatisfiable affinity.
+    investigate: "Check the CPU/memory committed gauges; if near 100%, the cluster is full. Otherwise inspect pod events for taints/affinity/volume errors."
+    runbook: "Add nodes (or let the cluster autoscaler), lower requests, or fix the scheduling constraint the events report."
+    recovery: Clears when Pending falls to 10 or fewer for 5m.
+    false_positives: Large rollouts or batch jobs that briefly queue before nodes scale up.
+  - name: KubeClusterCPUOvercommitted
+    severity: warning
+    expr: >-
+      100 * sum(kube_pod_container_resource_requests{resource="cpu"})
+      / sum(kube_node_status_allocatable{resource="cpu"}) > 90
+    for: 15m
+    summary: "Cluster CPU requests at {{ $value | printf \"%.0f\" }}% of allocatable"
+    why: With requests above 90% of allocatable there is almost no room for the next pod, restart or rolling update — the cluster is one deploy from Pending.
+    investigate: "Open the resource commitment row; identify namespaces with oversized requests in Kubernetes / Namespaces."
+    runbook: "Right-size requests to actual usage, add capacity, or enforce quotas on the heaviest namespaces."
+    recovery: Clears when committed CPU drops below 90% for 5m.
+    false_positives: Intentionally densely packed clusters running with headroom reserved elsewhere.
+
+troubleshooting:
+  - {symptom: All stats show "No data", cause: kube-state-metrics is not scraped or the `cluster` label differs, action: "Verify `up{job=~\".*kube-state-metrics.*\"}` in Explore and set $cluster to All."}
+  - {symptom: Committed % above 100, cause: Limits or requests defined larger than node allocatable (overcommit), action: Expected in burstable clusters — compare requests (scheduling) with usage in Kubernetes / Workload Resources.}
+  - {symptom: Nodes Ready is 0 but pods run, cause: "`kube_node_status_condition` collapsed by a recording rule that dropped the status label", action: Point the dashboard at raw kube-state-metrics series.}
+
+performance: >-
+  Every panel aggregates with `sum`/`count` so series count stays tiny regardless
+  of cluster size — this dashboard is cheap even at thousands of pods. The restart
+  table uses `topk(15, ...)` to cap rows. Restart counters use `increase(...[1h])`
+  so a single counter reset across a pod restart does not distort the total.
+
+customization: >-
+  Tune the 75/90% commitment thresholds to your packing target. To watch a single
+  team, swap the cluster-wide sums for `sum by (namespace)` and add a namespace
+  variable. On multi-cluster Thanos/Mimir setups, set $cluster to the external
+  label your federation adds.

@@ -1,0 +1,205 @@
+title: OpenStack / Heat — Orchestration Stacks
+description: >-
+  Heat orchestration health by stack status: how many stacks are complete, failed
+  or in a transitional state, a table of the failed stacks to act on, and the
+  status mix over time. Answers "did orchestration break, and which stacks are
+  stuck or failed?" so failed deployments do not sit unnoticed.
+datasource: prometheus
+tags: [openstack, heat, orchestration, openstack-exporter]
+seo_phrase: OpenStack Heat stacks Grafana dashboard
+refresh: 1m
+time_from: now-24h
+
+questions:
+  - "How many stacks are in a *_FAILED state right now?"
+  - "How many stacks are mid-operation (CREATE/UPDATE/DELETE_IN_PROGRESS)?"
+  - "Which specific stacks failed (name and status) so I can act?"
+  - "Is the failed/in-progress mix trending worse over time?"
+
+production_lessons: >-
+  Heat failures are silent: a `CREATE_FAILED` or `UPDATE_FAILED` stack just sits
+  there, so unless someone watches the status mix a broken template or an exhausted
+  quota can fail every new deployment for hours before anyone notices. The single
+  most useful signal is a simple count of `*_FAILED` stacks, backed by a table that
+  names them — that turns "orchestration seems flaky" into a concrete list to fix.
+  Tracking stacks stuck `*_IN_PROGRESS` for a long time catches the other failure
+  mode, where an operation hangs waiting on a dependency (Nova capacity, Neutron
+  quota) rather than failing outright.
+
+data_sources:
+  - "`openstack-exporter` with the `orchestration` (heat) collector enabled,
+    exposing `openstack_heat_stack_status` — one series per stack, labelled with the
+    stack `id`/`name` and a `status` label such as CREATE_COMPLETE, CREATE_FAILED or
+    UPDATE_FAILED."
+  - "Counts use `count by (status)` over `openstack_heat_stack_status`; the failed
+    table groups by stack name and status. Available stack labels depend on your
+    exporter version."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_heat_stack_status, job)
+    description: Prometheus scrape job for your openstack-exporter target(s).
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Exporter
+    query: label_values(openstack_heat_stack_status{job="$job"}, instance)
+    description: openstack-exporter instance(s) — one per cloud/region.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Orchestration health — read these first
+    panels:
+      - type: stat
+        title: Failed stacks
+        description: Stacks in any *_FAILED state (CREATE/UPDATE/DELETE). Each one is a broken deployment waiting on a human.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(openstack_heat_stack_status{job="$job", instance=~"$instance", status=~".*FAILED"}) or vector(0)
+            instant: true
+            legend: failed
+      - type: stat
+        title: In progress
+        description: Stacks currently mid-operation (*_IN_PROGRESS). A few are normal; many or long-lived ones suggest a stuck dependency.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 20}
+        targets:
+          - expr: count(openstack_heat_stack_status{job="$job", instance=~"$instance", status=~".*IN_PROGRESS"}) or vector(0)
+            instant: true
+            legend: in progress
+      - type: stat
+        title: Complete
+        description: Stacks in a *_COMPLETE state — the healthy baseline.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: count(openstack_heat_stack_status{job="$job", instance=~"$instance", status=~".*COMPLETE"}) or vector(0)
+            instant: true
+            legend: complete
+      - type: stat
+        title: Total stacks
+        description: All stacks known to Heat across the selected exporters.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: count(openstack_heat_stack_status{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: total
+
+  - title: Status breakdown
+    panels:
+      - type: piechart
+        title: Stacks by status
+        description: Share of stacks in each status. A growing failed/in-progress slice is the at-a-glance health of orchestration.
+        unit: short
+        pieType: donut
+        targets:
+          - expr: count by (status) (openstack_heat_stack_status{job="$job", instance=~"$instance"})
+            instant: true
+            legend: "{{status}}"
+      - type: table
+        title: Failed stacks
+        description: Every stack in a failed state, by name and exact status — the worklist for fixing broken deployments.
+        unit: short
+        filterable: true
+        transformations:
+          - id: organize
+            options:
+              renameByName:
+                name: Stack
+                status: Status
+                project_id: Project
+                Value: Metric
+        targets:
+          - expr: openstack_heat_stack_status{job="$job", instance=~"$instance", status=~".*FAILED"}
+            instant: true
+            format: table
+            legend: "{{name}}"
+
+  - title: Trends
+    panels:
+      - type: timeseries
+        title: Stacks by status over time
+        description: How the status mix evolves. A rising FAILED or IN_PROGRESS line flags a template or capacity problem before it spreads.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: count by (status) (openstack_heat_stack_status{job="$job", instance=~"$instance"})
+            legend: "{{status}}"
+      - type: timeseries
+        title: Failed stacks over time
+        description: Just the failed count, isolated so a slow climb is obvious — the single line to alert on.
+        unit: short
+        min: 0
+        drawStyle: bars
+        fillOpacity: 50
+        legend: list
+        targets:
+          - expr: count(openstack_heat_stack_status{job="$job", instance=~"$instance", status=~".*FAILED"}) or vector(0)
+            legend: failed
+
+alerts:
+  - name: HeatStacksFailed
+    severity: warning
+    expr: count(openstack_heat_stack_status{status=~".*FAILED"}) > 0
+    for: 10m
+    summary: "{{ $value }} Heat stack(s) in a FAILED state"
+    why: A failed stack is a broken deployment that will not self-heal; if a template or quota issue is the cause, every new stack of that kind keeps failing until it is fixed.
+    investigate: "Open OpenStack / Heat — Orchestration Stacks, read the failed-stacks table for the names, then `openstack stack failures list <stack>` to get the resource and reason."
+    runbook: "Fix the root cause (template error, exhausted Nova/Neutron quota, missing image/flavor), then update or delete-and-recreate the affected stacks."
+    recovery: Clears when no stacks remain in a *_FAILED state.
+    false_positives: Old failed stacks left around deliberately for forensics; clean them up or scope the rule to recent stacks.
+  - name: HeatStackStuckInProgress
+    severity: warning
+    expr: count(openstack_heat_stack_status{status=~".*IN_PROGRESS"}) > 20
+    for: 30m
+    summary: "More than 20 Heat stacks stuck in progress for 30m"
+    why: A pile-up of long-running in-progress stacks usually means heat-engine is wedged or a dependency (Nova capacity, Neutron quota) is blocking, stalling all orchestration.
+    investigate: "Check heat-engine health and logs, and the Nova/Neutron capacity and quota dashboards for the dependency that operations are waiting on."
+    runbook: "Restart heat-engine if it is wedged; relieve the blocking dependency (add capacity or raise quota), then let the stuck operations complete or roll back."
+    recovery: Clears when in-progress stacks drain below the threshold.
+    false_positives: A legitimate bulk deployment in flight; raise the threshold or silence during planned mass provisioning.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The orchestration (heat) collector is disabled or the exporter account cannot list stacks.
+    action: "Enable the heat collector in openstack-exporter and grant the account stack-list rights; confirm `openstack_heat_stack_status` in Explore."
+  - symptom: Counts look low vs the dashboard/CLI
+    cause: The exporter account is scoped to one project, so only that project's stacks are listed.
+    action: Use an admin-scoped account so the exporter sees stacks across all projects.
+  - symptom: The failed table is empty during an incident
+    cause: Stacks failed and were auto-deleted (rollback on failure), so they no longer appear.
+    action: Check the failed-over-time panel and heat-engine logs; enable retention of failed stacks for forensics.
+
+performance: >-
+  One series per stack means cardinality scales with stack count; on clouds with
+  thousands of stacks prefer `count by (status)` aggregates (as used here) over
+  per-stack panels, and keep the failed table scoped to `*_FAILED` so it stays
+  small. A 1m refresh is plenty — stack status changes on the order of minutes.
+
+customization: >-
+  Tune the in-progress thresholds to your normal concurrency and add a `project`
+  template variable if your exporter labels stacks by project. To catch stacks that
+  have been failing for a while specifically, combine the failed count with a time
+  filter in your alerting layer.

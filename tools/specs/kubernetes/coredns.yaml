@@ -1,0 +1,247 @@
+# CoreDNS dashboard — cluster DNS is the dependency every other service shares.
+# Leads with SERVFAIL rate, query p99 latency and cache hit ratio, because slow or
+# failing DNS shows up as "random" timeouts everywhere else first.
+title: Kubernetes / CoreDNS
+description: >-
+  Query rate by type, response codes (SERVFAIL/NXDOMAIN), request latency (p99),
+  cache hit ratio and panics for CoreDNS. Answers "is cluster DNS healthy and fast?"
+  so you can rule DNS in or out of a service incident in seconds.
+datasource: prometheus
+tags: [kubernetes, dns, coredns, networking]
+seo_phrase: CoreDNS Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are queries failing with SERVFAIL right now?"
+  - "What is DNS query p99 latency?"
+  - "Is the cache hitting often enough, or is every lookup going upstream?"
+  - "Which query types and zones drive the load?"
+  - "Has any CoreDNS instance panicked?"
+
+production_lessons: >-
+  "Intermittent timeouts across half our services" is, more often than anyone admits,
+  a CoreDNS problem — so this dashboard leads with the three signals that prove it:
+  **SERVFAIL rate** (real resolution failures), **p99 latency** (the tail that turns
+  into app timeouts) and **cache hit ratio** (the lever that protects upstream
+  resolvers). A collapsing cache hit ratio means more traffic to upstream DNS and a
+  latency cliff; a rising SERVFAIL usually means upstream resolvers or the forward
+  plugin are unhealthy. NXDOMAIN is shown separately because it is normal background
+  noise (search-domain expansion) and should not be mistaken for failure. Panics are
+  rare but fatal to that instance, so they sit in the lead row too.
+
+data_sources:
+  - "`coredns` metrics endpoint (the `coredns_dns_requests_total`,
+    `coredns_dns_responses_total`, `coredns_dns_request_duration_seconds_bucket`,
+    `coredns_cache_hits_total`, `coredns_cache_misses_total` and
+    `coredns_panics_total` series)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(coredns_dns_requests_total, job)
+    description: Prometheus scrape job for the CoreDNS pods.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(coredns_dns_requests_total{job="$job"}, instance)
+    description: CoreDNS instance(s); supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: DNS health — read these first
+    panels:
+      - type: stat
+        title: SERVFAIL rate
+        description: Responses returning SERVFAIL — genuine resolution failures (not NXDOMAIN). The primary DNS error signal.
+        unit: reqps
+        min: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 10}
+        targets:
+          - expr: sum(rate(coredns_dns_responses_total{job="$job", instance=~"$instance", rcode="SERVFAIL"}[5m])) or vector(0)
+            instant: true
+            legend: servfail
+      - type: stat
+        title: Query p99 latency
+        description: 99th percentile request duration. The tail that becomes application timeouts.
+        unit: s
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.05}
+          - {color: red, value: 0.1}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(coredns_dns_request_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            instant: true
+            legend: p99
+      - type: stat
+        title: Cache hit ratio
+        description: Share of queries answered from cache. A low ratio pushes load onto upstream resolvers and raises latency.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 50}
+          - {color: green, value: 80}
+        targets:
+          - expr: >-
+              100 * sum(rate(coredns_cache_hits_total{job="$job", instance=~"$instance"}[5m]))
+              / (sum(rate(coredns_cache_hits_total{job="$job", instance=~"$instance"}[5m])) + sum(rate(coredns_cache_misses_total{job="$job", instance=~"$instance"}[5m])))
+            instant: true
+            legend: hit ratio
+      - type: stat
+        title: Panics (5m)
+        description: CoreDNS panics in the last 5 minutes. Any panic kills that instance's serving until it restarts.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(increase(coredns_panics_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: panics
+
+  - title: Latency and throughput
+    panels:
+      - type: timeseries
+        title: Query rate by type
+        description: Requests per second by record type (A/AAAA/SRV/PTR...). A surge in one type points at a specific client behaviour.
+        unit: reqps
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum by (type) (rate(coredns_dns_requests_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{type}}"
+      - type: timeseries
+        title: Request latency p50/p99
+        description: Median vs tail latency. A widening gap means cache misses or a slow upstream forwarder.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(coredns_dns_request_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: p99
+          - expr: >-
+              histogram_quantile(0.50, sum by (le) (rate(coredns_dns_request_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: p50
+      - type: timeseries
+        title: Responses by rcode
+        description: Response code mix. NOERROR is healthy, NXDOMAIN is usually benign search-domain noise, SERVFAIL is the one to chase.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (rcode) (rate(coredns_dns_responses_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{rcode}}"
+
+  - title: Cache and forwarding
+    panels:
+      - type: timeseries
+        title: Cache hits vs misses
+        description: Absolute cache hit and miss rates. Misses are the traffic that reaches upstream resolvers.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(coredns_cache_hits_total{job="$job", instance=~"$instance"}[5m]))
+            legend: hits
+          - expr: sum(rate(coredns_cache_misses_total{job="$job", instance=~"$instance"}[5m]))
+            legend: misses
+      - type: gauge
+        title: Cache hit ratio
+        description: Cache effectiveness right now. Below ~70% the upstream forwarder usually becomes the latency bottleneck.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 50}
+          - {color: green, value: 80}
+        targets:
+          - expr: >-
+              100 * sum(rate(coredns_cache_hits_total{job="$job", instance=~"$instance"}[5m]))
+              / (sum(rate(coredns_cache_hits_total{job="$job", instance=~"$instance"}[5m])) + sum(rate(coredns_cache_misses_total{job="$job", instance=~"$instance"}[5m])))
+            instant: true
+            legend: hit ratio
+      - type: timeseries
+        title: Forward request rate
+        description: Queries CoreDNS forwarded upstream. Tracks cache misses and exposes upstream dependency load.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (rate(coredns_forward_requests_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{instance}}"
+
+alerts:
+  - name: CoreDNSHighServfailRate
+    severity: critical
+    expr: >-
+      100 * sum by (job) (rate(coredns_dns_responses_total{rcode="SERVFAIL"}[5m]))
+      / sum by (job) (rate(coredns_dns_responses_total[5m])) > 2
+    for: 5m
+    summary: "CoreDNS SERVFAIL ratio above 2% on {{ $labels.job }}"
+    why: SERVFAIL means real resolution failures; clients across the cluster will see intermittent connection errors and timeouts.
+    investigate: "Open Kubernetes / CoreDNS, check responses-by-rcode and the forward request rate to see if upstream resolvers are the cause."
+    runbook: "Verify upstream DNS reachability and the forward plugin config; check for a recent Corefile change; confirm upstream resolvers aren't rate-limiting."
+    recovery: Clears when the SERVFAIL ratio stays below 2% for 5m.
+    false_positives: A transient upstream blip during a resolver failover can spike SERVFAIL briefly.
+  - name: CoreDNSHighLatency
+    severity: warning
+    expr: >-
+      histogram_quantile(0.99, sum by (le, job) (rate(coredns_dns_request_duration_seconds_bucket[5m]))) > 0.1
+    for: 10m
+    summary: "CoreDNS query p99 latency above 100ms on {{ $labels.job }}"
+    why: Slow DNS turns into application-level timeouts and retries everywhere, since almost every connection starts with a lookup.
+    investigate: "Check the cache hit ratio and forward latency — a dropped cache hit ratio usually explains a latency climb."
+    runbook: "Scale CoreDNS replicas, raise cache TTL/size, and verify upstream resolver latency; check node CPU on the CoreDNS pods."
+    recovery: Clears when p99 falls below 100ms for 5m.
+    false_positives: A cold cache right after a CoreDNS rollout briefly raises latency until it warms.
+  - name: CoreDNSPanicking
+    severity: critical
+    expr: increase(coredns_panics_total[5m]) > 0
+    for: 0m
+    summary: "CoreDNS panic on {{ $labels.instance }}"
+    why: A panic crashes the CoreDNS process; that replica stops answering until it restarts, shrinking DNS capacity.
+    investigate: "Check the pod's logs and recent restarts; correlate with any Corefile/plugin change."
+    runbook: "Roll back the most recent Corefile/plugin change; if it recurs, capture logs and open an upstream issue, and ensure enough replicas to absorb one crashing."
+    recovery: Clears when no further panics occur for 5m.
+    false_positives: Essentially none — a panic is always worth investigating.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The CoreDNS `prometheus` plugin isn't enabled, or the wrong `$job`.
+    action: "Add `prometheus :9153` to the Corefile and scrape it; confirm `up{job=\"$job\"}` is 1."
+  - symptom: Cache hit ratio panel is blank
+    cause: The `cache` plugin isn't configured, so no hit/miss series exist.
+    action: Add the `cache` plugin to the Corefile; without it every query forwards upstream.
+  - symptom: NXDOMAIN rate looks alarmingly high
+    cause: ndots search-domain expansion tries several suffixes per lookup, producing benign NXDOMAINs.
+    action: This is usually normal; tune pod `dnsConfig` ndots if the extra lookups add latency.
+
+performance: >-
+  All rates use a 5m window (>=4x a 30s scrape). Latency quantiles aggregate the
+  histogram with `sum by (le)` before `histogram_quantile`. Per-type and per-rcode
+  panels bound cardinality with `by (...)`. On very large clusters, back the query-rate
+  panel with a recording rule if it renders slowly.
+
+customization: >-
+  Tune the 50ms/100ms latency and 2% SERVFAIL thresholds to your DNS SLO, and the
+  cache-hit-ratio bands to your workload's repeat-query profile. Add a `$zone`
+  variable to scope the query-rate panel to a single zone, and scope `$instance` to a
+  single replica to debug an outlier.

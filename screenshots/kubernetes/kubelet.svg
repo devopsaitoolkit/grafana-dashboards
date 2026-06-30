@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1404" height="1152" viewBox="0 0 1404 1152" font-family="Inter, Roboto, Arial, sans-serif">
+<rect width="1404" height="1152" fill="#0b0c0e"/>
+<text x="16" y="30" fill="#d8d9da" font-size="16" font-weight="600">Kubernetes / Kubelet</text>
+<text x="16" y="48" fill="#8e8e8e" font-size="11">Schematic layout · datasource: prometheus · uid: kubernetes-kubelet</text>
+<rect x="16" y="56" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="75" fill="#d8d9da" font-size="12" font-weight="600">▾ Node agent health — read these first</text>
+<rect x="18" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="88" width="260" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="106" fill="#d8d9da" font-size="11" font-weight="500">Nodes with config error</text>
+<text x="26" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="148" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="282" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="282" y="88" width="260" height="3" fill="#3274d9" rx="2"/>
+<text x="290" y="106" fill="#d8d9da" font-size="11" font-weight="500">PLEG relist p99</text>
+<text x="290" y="120" fill="#8e8e8e" font-size="9">stat · s</text>
+<text x="412" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="546" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="88" width="260" height="3" fill="#3274d9" rx="2"/>
+<text x="554" y="106" fill="#d8d9da" font-size="11" font-weight="500">Pod worker p99</text>
+<text x="554" y="120" fill="#8e8e8e" font-size="9">stat · s</text>
+<text x="676" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="810" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="810" y="88" width="260" height="3" fill="#3274d9" rx="2"/>
+<text x="818" y="106" fill="#d8d9da" font-size="11" font-weight="500">Runtime error rate</text>
+<text x="818" y="120" fill="#8e8e8e" font-size="9">stat · ops</text>
+<text x="940" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="16" y="326" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="345" fill="#d8d9da" font-size="12" font-weight="600">▾ Workload footprint</text>
+<rect x="18" y="358" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="358" width="524" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="376" fill="#d8d9da" font-size="11" font-weight="500">Running pods per node</text>
+<text x="26" y="390" fill="#8e8e8e" font-size="9">timeseries · short</text>
+<polyline points="28,488 112,474 196,488 280,474 364,488 448,474 532,488" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="546" y="358" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="358" width="524" height="3" fill="#3274d9" rx="2"/>
+<text x="554" y="376" fill="#d8d9da" font-size="11" font-weight="500">Running containers per node</text>
+<text x="554" y="390" fill="#8e8e8e" font-size="9">timeseries · short</text>
+<polyline points="556,488 640,474 724,488 808,474 892,488 976,474 1060,488" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="16" y="596" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="615" fill="#d8d9da" font-size="12" font-weight="600">▾ Latency</text>
+<rect x="18" y="628" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="628" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="646" fill="#d8d9da" font-size="11" font-weight="500">PLEG relist p99 by node</text>
+<text x="26" y="660" fill="#8e8e8e" font-size="9">timeseries · s</text>
+<polyline points="28,758 83,744 137,758 192,744 247,758 301,744 356,758" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="370" y="628" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="370" y="628" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="378" y="646" fill="#d8d9da" font-size="11" font-weight="500">Pod worker p99 by node</text>
+<text x="378" y="660" fill="#8e8e8e" font-size="9">timeseries · s</text>
+<polyline points="380,758 435,744 489,758 544,744 599,758 653,744 708,758" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="722" y="628" width="348" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="722" y="628" width="348" height="3" fill="#3274d9" rx="2"/>
+<text x="730" y="646" fill="#d8d9da" font-size="11" font-weight="500">Storage operation p99</text>
+<text x="730" y="660" fill="#8e8e8e" font-size="9">timeseries · s</text>
+<polyline points="732,758 787,744 841,758 896,744 951,758 1005,744 1060,758" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="16" y="866" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="885" fill="#d8d9da" font-size="12" font-weight="600">▾ Errors</text>
+<rect x="18" y="898" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="898" width="524" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="916" fill="#d8d9da" font-size="11" font-weight="500">Runtime operation errors by type</text>
+<text x="26" y="930" fill="#8e8e8e" font-size="9">timeseries · ops</text>
+<polyline points="28,1028 112,1014 196,1028 280,1014 364,1028 448,1014 532,1028" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="546" y="898" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="898" width="524" height="3" fill="#8e8e8e" rx="2"/>
+<text x="554" y="916" fill="#d8d9da" font-size="11" font-weight="500">Nodes reporting config errors</text>
+<text x="554" y="930" fill="#8e8e8e" font-size="9">table · short</text>
+<rect x="556" y="1016" width="252" height="5" fill="#8e8e8e" opacity="0.70" rx="2"/>
+<rect x="556" y="1025" width="328" height="5" fill="#8e8e8e" opacity="0.55" rx="2"/>
+<rect x="556" y="1034" width="403" height="5" fill="#8e8e8e" opacity="0.40" rx="2"/>
+<rect x="1088" y="56" width="284" height="1080" fill="#181b1f" stroke="#2c3235" rx="4"/>
+<text x="1100" y="78" fill="#d8d9da" font-size="12" font-weight="700">What to look for</text>
+<circle cx="1106" cy="94" r="4" fill="#3274d9"/>
+<text x="1118" y="98" fill="#8e8e8e" font-size="10">Does any node have a kubelet config</text>
+<text x="1118" y="111" fill="#8e8e8e" font-size="10">error right now?</text>
+<circle cx="1106" cy="128" r="4" fill="#3274d9"/>
+<text x="1118" y="132" fill="#8e8e8e" font-size="10">Is PLEG relist latency healthy, or is a</text>
+<text x="1118" y="145" fill="#8e8e8e" font-size="10">node about to flip NotReady?</text>
+<circle cx="1106" cy="162" r="4" fill="#3274d9"/>
+<text x="1118" y="166" fill="#8e8e8e" font-size="10">How long is the pod worker taking to</text>
+<text x="1118" y="179" fill="#8e8e8e" font-size="10">sync pods?</text>
+<circle cx="1106" cy="196" r="4" fill="#3274d9"/>
+<text x="1118" y="200" fill="#8e8e8e" font-size="10">Are container runtime operations</text>
+<text x="1118" y="213" fill="#8e8e8e" font-size="10">erroring?</text>
+<circle cx="1106" cy="230" r="4" fill="#73bf69"/>
+<text x="1118" y="234" fill="#8e8e8e" font-size="10">Green: within expected range</text>
+<circle cx="1106" cy="251" r="4" fill="#f2cc0c"/>
+<text x="1118" y="255" fill="#8e8e8e" font-size="10">Yellow: investigate — approaching a</text>
+<text x="1118" y="268" fill="#8e8e8e" font-size="10">limit</text>
+<circle cx="1106" cy="285" r="4" fill="#e02f44"/>
+<text x="1118" y="289" fill="#8e8e8e" font-size="10">Red: act now — threshold breached</text>
+</svg>

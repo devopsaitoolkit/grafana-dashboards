@@ -1,0 +1,24 @@
+# Grafana datasource provisioning — Prometheus.
+# Place at /etc/grafana/provisioning/datasources/prometheus.yaml
+# The `uid` here (DS_PROMETHEUS) matches the input these dashboards prompt for, so
+# provisioned dashboards bind automatically. Change `url` to your Prometheus.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: DS_PROMETHEUS
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      manageAlerts: true
+      prometheusType: Prometheus
+      prometheusVersion: 2.51.0
+      timeInterval: 15s
+      # Exemplars -> Tempo (uncomment if you provision Tempo):
+      # exemplarTraceIdDestinations:
+      #   - name: trace_id
+      #     datasourceUid: DS_TEMPO
+    editable: true

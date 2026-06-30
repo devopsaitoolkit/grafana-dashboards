@@ -1,0 +1,284 @@
+# Placement resource providers. Leads with how many providers have no headroom left and
+# which resource class (VCPU / MEMORY_MB / DISK_GB) is tightest across the fleet.
+title: OpenStack / Placement Resource Providers
+description: >-
+  Placement-level capacity for an OpenStack cloud from openstack-exporter: per-provider
+  inventory vs usage for VCPU, MEMORY_MB and DISK_GB, providers that have run out of a
+  resource class, and the allocation ratios in effect. Answers "which providers can still
+  accept a claim, and which resource runs out first?" — the same question the scheduler's
+  placement step asks on every build.
+datasource: prometheus
+tags: [openstack, placement, capacity, resource-provider, openstack-exporter]
+seo_phrase: OpenStack Placement Grafana dashboard
+refresh: 1m
+time_from: now-24h
+
+questions:
+  - "How many resource providers have no headroom left in some resource class?"
+  - "Which resource — VCPU, MEMORY_MB or DISK_GB — is tightest fleet-wide?"
+  - "Which providers are closest to exhausting a resource class?"
+  - "What allocation ratios are actually in effect per provider?"
+  - "Is usage trending toward exhaustion on any resource class?"
+
+production_lessons: >-
+  Placement is the source of truth the scheduler actually queries, so when builds fail
+  with "no valid host" the answer is almost always here, not in nova-compute: a provider
+  whose VCPU or MEMORY_MB inventory is fully claimed simply stops being returned as a
+  candidate. This dashboard leads with the count of exhausted providers and the tightest
+  resource class because a single saturated class blocks placement even when the other
+  two look roomy — a host full of MEMORY_MB is useless however many free vCPUs it has.
+  The allocation-ratio panel earns its place during incident review: a provider quietly
+  reset to ratio 1.0 (after a redeploy or a config drift) loses most of its effective
+  capacity overnight and looks "full" long before the hardware is, and only the ratio
+  view explains why.
+
+data_sources:
+  - "`openstack-exporter` (github.com/openstack-exporter/openstack-exporter) scraping the
+    Placement API: `openstack_placement_resource_provider_capacity`,
+    `openstack_placement_resource_provider_usage` and
+    `openstack_placement_resource_provider_allocation_ratio`, labelled by `hostname` and
+    `resourcetype` (VCPU, MEMORY_MB, DISK_GB)."
+  - "If your exporter build lacks the placement collector, derive equivalent VCPU usage
+    from `openstack_nova_vcpus_used` / `openstack_nova_vcpus` per `hostname` on the Nova
+    capacity dashboard."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_placement_resource_provider_capacity, job)
+    description: Prometheus scrape job for your openstack-exporter target.
+    multi: false
+    includeAll: false
+  - name: resourcetype
+    label: Resource class
+    query: label_values(openstack_placement_resource_provider_capacity{job="$job"}, resourcetype)
+    description: Placement resource class(es) to scope the per-provider panels to.
+    multi: true
+    includeAll: true
+  - name: hostname
+    label: Provider
+    query: label_values(openstack_placement_resource_provider_capacity{job="$job"}, hostname)
+    description: Resource provider (compute host) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Provider headroom — read these first
+    panels:
+      - type: stat
+        title: Exhausted providers
+        description: >-
+          Providers with at least one resource class above 90% claimed — the scheduler
+          will skip these for anything needing that class.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: >-
+              count(
+                max by (hostname) (
+                  openstack_placement_resource_provider_usage{job="$job"}
+                  / openstack_placement_resource_provider_capacity{job="$job"}
+                ) > 0.9
+              ) or vector(0)
+            instant: true
+            legend: providers
+      - type: gauge
+        title: VCPU claimed (fleet)
+        description: Sum of VCPU usage ÷ capacity across providers. Red means little VCPU inventory left to place.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * sum(openstack_placement_resource_provider_usage{job="$job", resourcetype="VCPU"})
+              / sum(openstack_placement_resource_provider_capacity{job="$job", resourcetype="VCPU"}) or vector(0)
+            instant: true
+            legend: vcpu
+      - type: gauge
+        title: MEMORY_MB claimed (fleet)
+        description: Sum of MEMORY_MB usage ÷ capacity. Usually the tightest class on general-purpose clouds.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * sum(openstack_placement_resource_provider_usage{job="$job", resourcetype="MEMORY_MB"})
+              / sum(openstack_placement_resource_provider_capacity{job="$job", resourcetype="MEMORY_MB"}) or vector(0)
+            instant: true
+            legend: memory
+      - type: gauge
+        title: DISK_GB claimed (fleet)
+        description: Sum of DISK_GB usage ÷ capacity. The binding class on local-storage clouds.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * sum(openstack_placement_resource_provider_usage{job="$job", resourcetype="DISK_GB"})
+              / sum(openstack_placement_resource_provider_capacity{job="$job", resourcetype="DISK_GB"}) or vector(0)
+            instant: true
+            legend: disk
+
+  - title: Per-provider claim & ratios
+    panels:
+      - type: bargauge
+        title: Claimed % per provider
+        description: Highest claimed resource class per provider, ranked. The top bars are about to stop accepting builds.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * max by (hostname) (
+                openstack_placement_resource_provider_usage{job="$job", resourcetype=~"$resourcetype", hostname=~"$hostname"}
+                / openstack_placement_resource_provider_capacity{job="$job", resourcetype=~"$resourcetype", hostname=~"$hostname"}
+              )
+            instant: true
+            legend: "{{hostname}}"
+      - type: table
+        title: Provider inventory vs usage
+        description: Capacity, usage and effective allocation ratio per provider and resource class.
+        unit: short
+        filterable: true
+        sortBy:
+          - {displayName: usage, desc: true}
+        targets:
+          - expr: openstack_placement_resource_provider_capacity{job="$job", resourcetype=~"$resourcetype", hostname=~"$hostname"}
+            instant: true
+            format: table
+            legend: capacity
+          - expr: openstack_placement_resource_provider_usage{job="$job", resourcetype=~"$resourcetype", hostname=~"$hostname"}
+            instant: true
+            format: table
+            legend: usage
+          - expr: openstack_placement_resource_provider_allocation_ratio{job="$job", resourcetype=~"$resourcetype", hostname=~"$hostname"}
+            instant: true
+            format: table
+            legend: ratio
+
+  - title: Trend toward exhaustion
+    panels:
+      - type: timeseries
+        title: Fleet claimed % by resource class
+        description: VCPU, MEMORY_MB and DISK_GB claimed over time. The line nearing 100% is the next thing to run out.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * sum(openstack_placement_resource_provider_usage{job="$job", resourcetype="VCPU"})
+              / sum(openstack_placement_resource_provider_capacity{job="$job", resourcetype="VCPU"})
+            legend: VCPU
+          - expr: >-
+              100 * sum(openstack_placement_resource_provider_usage{job="$job", resourcetype="MEMORY_MB"})
+              / sum(openstack_placement_resource_provider_capacity{job="$job", resourcetype="MEMORY_MB"})
+            legend: MEMORY_MB
+          - expr: >-
+              100 * sum(openstack_placement_resource_provider_usage{job="$job", resourcetype="DISK_GB"})
+              / sum(openstack_placement_resource_provider_capacity{job="$job", resourcetype="DISK_GB"})
+            legend: DISK_GB
+      - type: timeseries
+        title: Providers without headroom
+        description: Count of providers above 90% on any resource class. Climbing means the cloud is filling up.
+        unit: short
+        min: 0
+        legend: hidden
+        targets:
+          - expr: >-
+              count(
+                max by (hostname) (
+                  openstack_placement_resource_provider_usage{job="$job"}
+                  / openstack_placement_resource_provider_capacity{job="$job"}
+                ) > 0.9
+              ) or vector(0)
+            legend: exhausted
+
+alerts:
+  - name: PlacementProviderExhausted
+    severity: warning
+    expr: >-
+      max by (hostname, resourcetype) (
+        openstack_placement_resource_provider_usage
+        / openstack_placement_resource_provider_capacity
+      ) > 0.95
+    for: 15m
+    summary: "Provider {{ $labels.hostname }} has {{ $labels.resourcetype }} above 95% claimed"
+    why: A resource class above 95% claimed means the scheduler will skip this provider for any new claim of that class — the direct cause of "no valid host".
+    investigate: "Open Placement Resource Providers; check whether the host's allocation_ratio is correct and whether instances can be rebalanced off it."
+    runbook: "Migrate workloads off the provider, raise the allocation ratio if hardware allows, or add providers; verify the ratio was not reset to 1.0 by a redeploy."
+    recovery: Clears when the resource class drops below 95% claimed for 5m.
+    false_positives: Intentionally packed providers in a dedicated tier — scope the rule by resourcetype or aggregate.
+  - name: PlacementResourceClassNearlyFull
+    severity: warning
+    expr: >-
+      100 * sum by (resourcetype) (openstack_placement_resource_provider_usage)
+      / sum by (resourcetype) (openstack_placement_resource_provider_capacity) > 90
+    for: 30m
+    summary: "Placement {{ $labels.resourcetype }} {{ $value | printf \"%.0f\" }}% claimed fleet-wide"
+    why: When a whole resource class is over 90% claimed across the fleet there is almost nowhere left to place work needing it — capacity action is overdue.
+    investigate: "Identify which providers dominate the usage; decide between adding capacity and rebalancing."
+    runbook: "Bring providers online for the tight class, or shift demand (flavours/aggregates) toward the class with headroom."
+    recovery: Clears when the class falls below 90% claimed for 10m.
+    false_positives: A deliberately near-full economy tier — raise the threshold for that resourcetype.
+  - name: PlacementAllocationRatioCollapsed
+    severity: critical
+    expr: >-
+      openstack_placement_resource_provider_allocation_ratio{resourcetype="VCPU"} <= 1
+    for: 10m
+    summary: "Provider {{ $labels.hostname }} VCPU allocation ratio reset to {{ $value }}"
+    why: A VCPU allocation ratio that drops to 1.0 (often after a redeploy or config drift) silently strips most of a provider's effective capacity, making it look full long before the hardware is.
+    investigate: "Compare the ratio against peer providers in the inventory table; check the compute node's nova.conf / placement aggregate settings."
+    runbook: "Restore the intended cpu_allocation_ratio on the host and confirm placement picks up the new inventory; re-check failed builds afterward."
+    recovery: Clears when the provider's VCPU ratio is restored above 1.0 for 5m.
+    false_positives: Pinned/dedicated CPU providers legitimately run at ratio 1.0 — exclude them by hostname or aggregate.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The exporter build lacks the placement collector, or it cannot reach the Placement API.
+    action: "Enable the placement collector (or confirm the endpoint/credentials); otherwise use the Nova capacity dashboard's per-host vCPU derivation."
+  - symptom: Claimed % exceeds 100
+    cause: Usage is measured against base inventory while the effective capacity includes the allocation ratio.
+    action: Read the inventory table's ratio column; multiply capacity by ratio for the true ceiling, or rely on the per-class fleet gauges.
+  - symptom: A provider shows "full" but the host has free hardware
+    cause: Its allocation_ratio was reset to 1.0, collapsing effective capacity.
+    action: Restore the intended ratio; the AllocationRatioCollapsed alert is designed to catch exactly this.
+
+performance: >-
+  Placement metrics are one series per (provider × resource class), a small, bounded set,
+  so even `max by (hostname)` across all providers is cheap. Fleet gauges are simple
+  `sum() / sum()` per resource class. A 1m refresh and 24h window match how slowly
+  inventory and claims move; nothing here needs faster sampling.
+
+customization: >-
+  Adjust the exhaustion thresholds (90/95%) to your placement headroom policy, and exclude
+  dedicated/pinned providers from the ratio alert by hostname. To plan one resource class,
+  select it in the `resourcetype` variable. If your exporter exposes
+  `..._reserved`, subtract it from capacity for an exact effective-capacity calculation.

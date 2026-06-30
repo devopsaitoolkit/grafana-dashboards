@@ -1,0 +1,111 @@
+# Alerting rules for the mysql dashboards.
+# Generated from tools/specs/mysql/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: mysql.rules
+  rules:
+  - alert: MySQLInnoDBBufferPoolHitLow
+    expr: 100 * (1 - sum by (instance) (rate(mysql_global_status_innodb_buffer_pool_reads[5m])) / clamp_min(sum
+      by (instance) (rate(mysql_global_status_innodb_buffer_pool_read_requests[5m])), 1)) < 99
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: MySQL {{ $labels.instance }} InnoDB buffer pool hit ratio below 99%
+      description: Reads are falling through to disk, so query latency has already risen — the working
+        set no longer fits in RAM.
+      runbook: Increase innodb_buffer_pool_size (up to ~70% of RAM), or add the missing index causing
+        the scan.
+      dashboard: dashboards/mysql/innodb.json
+  - alert: MySQLInnoDBRowLockWaitsHigh
+    expr: sum by (instance) (rate(mysql_global_status_innodb_row_lock_waits[5m])) > 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: MySQL {{ $labels.instance }} InnoDB row-lock waits above 10/s
+      description: Hot rows are serialising concurrent writers, increasing latency and risking lock-wait
+        timeouts.
+      runbook: Shorten transactions, batch or shard the hot row, or move the counter to a different store.
+      dashboard: dashboards/mysql/innodb.json
+  - alert: MySQLInnoDBBufferPoolExhausted
+    expr: mysql_global_status_innodb_buffer_pool_pages_free / clamp_min(mysql_global_status_innodb_buffer_pool_pages_total,
+      1) < 0.02
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: MySQL {{ $labels.instance }} InnoDB buffer pool has <2% free pages
+      description: With almost no free pages, InnoDB evicts on every new read; combined with a low hit
+        ratio this means memory pressure.
+      runbook: Increase innodb_buffer_pool_size if the host has RAM, or reduce the working set.
+      dashboard: dashboards/mysql/innodb.json
+  - alert: MySQLInstanceDown
+    expr: mysql_up == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: MySQL {{ $labels.instance }} is down
+      description: The exporter cannot reach the server — application queries are likely failing too.
+      runbook: Restart mysqld if crashed; on a host failure, promote a replica and repoint the application.
+      dashboard: dashboards/mysql/overview.json
+  - alert: MySQLConnectionSaturationHigh
+    expr: 100 * mysql_global_status_threads_connected / on (instance) mysql_global_variables_max_connections
+      > 85
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: MySQL {{ $labels.instance }} using >85% of max_connections
+      description: At 100% the server returns "Too many connections" and the whole application fails,
+        even with spare CPU.
+      runbook: Add ProxySQL or a connection pool, cut per-app pool sizes, and kill stuck sleeping threads.
+      dashboard: dashboards/mysql/overview.json
+  - alert: MySQLSlowQueryRateHigh
+    expr: sum by (instance) (rate(mysql_global_status_slow_queries[5m])) > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: MySQL {{ $labels.instance }} slow-query rate above 1/s
+      description: A rising slow-query rate ties up threads and is the usual precursor to connection exhaustion.
+      runbook: Add the missing index, rewrite the offending query, or raise the buffer pool if reads are
+        hitting disk.
+      dashboard: dashboards/mysql/overview.json
+  - alert: MySQLReplicationLagHigh
+    expr: mysql_slave_status_seconds_behind_master > 30
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: MySQL replica {{ $labels.instance }} lagging >30s behind master
+      description: A replica 30s behind serves stale reads and would lose that window of writes on failover.
+      runbook: Enable parallel replication (slave_parallel_workers), relieve the write burst, or give
+        the replica faster storage.
+      dashboard: dashboards/mysql/replication.json
+  - alert: MySQLReplicationIOStopped
+    expr: mysql_slave_status_slave_io_running == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: MySQL replica {{ $labels.instance }} IO thread stopped
+      description: The replica is no longer pulling the binlog from the master, so it has stopped receiving
+        changes entirely.
+      runbook: Fix connectivity/credentials, then START SLAVE IO_THREAD; re-point to a valid binlog position
+        if it was purged.
+      dashboard: dashboards/mysql/replication.json
+  - alert: MySQLReplicationSQLStopped
+    expr: mysql_slave_status_slave_sql_running == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: MySQL replica {{ $labels.instance }} SQL thread stopped
+      description: The replica has stopped applying the relay log — it is silently diverging from the
+        master and is unsafe to read.
+      runbook: Resolve the conflicting statement, then START SLAVE SQL_THREAD; skip the event only as
+        a last resort.
+      dashboard: dashboards/mysql/replication.json

@@ -1,0 +1,208 @@
+title: OpenStack / HAProxy — Frontend Traffic
+description: >-
+  HAProxy frontend traffic for the OpenStack API edge: request rate per frontend,
+  current sessions against a configured limit, and throughput. Answers "where is the
+  load arriving, and is any frontend close to its session limit?" so you size the
+  edge before clients see connection refusals.
+datasource: prometheus
+tags: [openstack, haproxy, load-balancer, frontends]
+seo_phrase: HAProxy frontend Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which frontend is busiest right now (sessions and request rate)?"
+  - "How close is any frontend to its configured session limit (maxconn)?"
+  - "What is the request rate per frontend, and is it spiking?"
+  - "How much traffic (bytes) is flowing through the edge?"
+
+production_lessons: >-
+  Frontend session exhaustion is the OpenStack edge failure that looks like a
+  network problem: once a frontend hits its `maxconn`, HAProxy quietly queues or
+  refuses new connections and clients see timeouts, while backends and CPU all look
+  healthy. Because HAProxy does not export the configured limit as a metric, this
+  dashboard takes the limit as a dashboard variable and shows live sessions as a
+  percent of it — the single number that tells you whether to raise `maxconn` or add
+  an edge node. Request rate per frontend is the companion signal that tells you
+  which API (and which client) is driving the load.
+
+data_sources:
+  - "`haproxy_exporter` or HAProxy's native Prometheus endpoint exposing
+    `haproxy_frontend_current_sessions`, `haproxy_frontend_http_requests_total` and
+    `haproxy_backend_bytes_in_total`."
+  - "HAProxy does not export the configured `maxconn` as a metric, so the session
+    saturation panel divides live sessions by the `maxconn` dashboard variable —
+    set it to your frontend's configured limit."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(haproxy_frontend_current_sessions, job)
+    description: Prometheus scrape job for your HAProxy exporter/endpoint.
+    multi: false
+    includeAll: false
+  - name: frontend
+    label: Frontend
+    query: label_values(haproxy_frontend_current_sessions{job="$job"}, frontend)
+    description: HAProxy frontend(s) — the public API listeners.
+    multi: true
+    includeAll: true
+  - name: maxconn
+    label: Frontend maxconn
+    type: constant
+    value: "2000"
+    description: Configured maxconn per frontend, used for the session-saturation gauge (HAProxy does not export this).
+
+rows:
+  - title: Edge load — read these first
+    panels:
+      - type: stat
+        title: Busiest frontend sessions
+        description: Highest current session count on any single frontend — where the edge load is concentrated.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1000}
+          - {color: red, value: 1800}
+        targets:
+          - expr: max(haproxy_frontend_current_sessions{job="$job", frontend=~"$frontend"}) or vector(0)
+            instant: true
+            legend: max sessions
+      - type: gauge
+        title: Session saturation
+        description: Busiest frontend's current sessions as a percent of the configured maxconn variable. Near 100% the frontend refuses new connections.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: max(100 * haproxy_frontend_current_sessions{job="$job", frontend=~"$frontend"} / $maxconn) or vector(0)
+            instant: true
+            legend: saturation
+      - type: stat
+        title: Request rate
+        description: Total HTTP requests per second arriving across selected frontends.
+        unit: reqps
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(haproxy_frontend_http_requests_total{job="$job", frontend=~"$frontend"}[5m])) or vector(0)
+            instant: true
+            legend: req/s
+      - type: stat
+        title: Total sessions
+        description: Current sessions summed across selected frontends — the edge concurrency baseline.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(haproxy_frontend_current_sessions{job="$job", frontend=~"$frontend"}) or vector(0)
+            instant: true
+            legend: sessions
+
+  - title: Request rate & sessions
+    panels:
+      - type: timeseries
+        title: Request rate per frontend
+        description: Per-frontend HTTP request rate. Spot which API listener (Keystone, Nova, Neutron…) is taking the load.
+        unit: reqps
+        min: 0
+        legend: table
+        fillOpacity: 20
+        targets:
+          - expr: sum by (frontend) (rate(haproxy_frontend_http_requests_total{job="$job", frontend=~"$frontend"}[5m]))
+            legend: "{{frontend}}"
+      - type: timeseries
+        title: Current sessions per frontend
+        description: Per-frontend live sessions with the maxconn line for reference — watch any frontend approaching the limit.
+        unit: short
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1800}
+        targets:
+          - expr: haproxy_frontend_current_sessions{job="$job", frontend=~"$frontend"}
+            legend: "{{frontend}}"
+
+  - title: Throughput
+    panels:
+      - type: timeseries
+        title: Inbound throughput
+        description: Bytes per second received by backends behind these frontends — overall edge ingress traffic.
+        unit: Bps
+        min: 0
+        legend: table
+        fillOpacity: 20
+        targets:
+          - expr: sum(rate(haproxy_backend_bytes_in_total{job="$job"}[5m]))
+            legend: bytes in/s
+      - type: stat
+        title: Peak frontend req/s
+        description: Highest single-frontend request rate in the window — the busiest individual listener.
+        unit: reqps
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: max(sum by (frontend) (rate(haproxy_frontend_http_requests_total{job="$job", frontend=~"$frontend"}[5m]))) or vector(0)
+            instant: true
+            legend: peak req/s
+
+alerts:
+  - name: HAProxyFrontendSessionSaturation
+    severity: warning
+    expr: haproxy_frontend_current_sessions / 2000 > 0.9
+    for: 5m
+    summary: "HAProxy frontend {{ $labels.frontend }} above 90% of maxconn"
+    why: Near maxconn the frontend queues or refuses new connections, so OpenStack clients see timeouts while backends and CPU still look healthy.
+    investigate: "Open OpenStack / HAProxy — Frontend Traffic, check sessions per frontend and request rate to see whether it is real load or a client connection leak."
+    runbook: "Raise the frontend `maxconn` (and the global one and OS file-descriptor limits) if it is genuine load, or add an edge node; if a client is leaking connections, fix or rate-limit it."
+    recovery: Clears when sessions fall back below 90% of the limit.
+    false_positives: The hardcoded 2000 here must match your real `maxconn`; adjust the expression to your configured limit to avoid false alerts.
+  - name: HAProxyFrontendTrafficSpike
+    severity: info
+    expr: >-
+      sum by (frontend, job) (rate(haproxy_frontend_http_requests_total[5m]))
+      > 3 * sum by (frontend, job) (rate(haproxy_frontend_http_requests_total[5m] offset 1h))
+    for: 10m
+    summary: "Frontend {{ $labels.frontend }} request rate 3x its level an hour ago"
+    why: A sudden 3x jump in request rate is worth a look — a client retry storm, a runaway script, or a real traffic event that may need capacity.
+    investigate: "Identify the source by correlating the frontend with client IPs/logs; check whether backends are keeping up on the backend dashboard."
+    runbook: "If abusive, rate-limit or block the source; if legitimate, confirm backend and database capacity can absorb the new baseline."
+    recovery: Clears when the request rate returns to its normal range.
+    false_positives: Normal diurnal ramp-up from a low overnight baseline; tune the multiplier or compare to the same time yesterday.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The HAProxy Prometheus endpoint/exporter is not scraped or frontend stats are disabled.
+    action: "Enable HAProxy's native Prometheus endpoint (or haproxy_exporter) and add the target; confirm `haproxy_frontend_current_sessions` appears in Explore."
+  - symptom: Saturation gauge looks wrong
+    cause: The `maxconn` variable does not match the frontend's configured limit.
+    action: Set the `Frontend maxconn` variable to your real per-frontend `maxconn`.
+  - symptom: Throughput panel is flat at zero
+    cause: The `haproxy_backend_bytes_in_total` series is not exported by your exporter version.
+    action: Use HAProxy's native Prometheus output, which exports byte counters, or remove the throughput panel.
+
+performance: >-
+  Frontend series are bounded by your number of listeners, so this dashboard is
+  light at 30s refresh. Rates use a 5m window. Because HAProxy does not export
+  `maxconn`, the saturation math uses a dashboard constant — keep it in sync with
+  your config (or template it per environment) so the gauge stays meaningful.
+
+customization: >-
+  Set the `Frontend maxconn` variable and the session thresholds to your configured
+  limits, and update the alert's hardcoded divisor to match. Pair this with the
+  HAProxy Backends dashboard to see arriving load and backend health together, and
+  add a `bytes_out` panel if your exporter version exposes it.

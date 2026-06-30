@@ -1,0 +1,229 @@
+title: OpenStack / Neutron — Floating IPs
+description: >-
+  Floating IP capacity and health for an OpenStack deployment: how many addresses
+  are still free, how many are dangling (associated to a down port), and when the
+  pool is projected to run out. Leads with free and dangling FIPs so you catch
+  exhaustion before tenants stop being able to expose workloads.
+datasource: prometheus
+tags: [openstack, neutron, floating-ips, capacity, openstack-exporter]
+seo_phrase: OpenStack floating IP Grafana dashboard
+
+refresh: 30s
+time_from: now-24h
+
+questions:
+  - "How many floating IPs are still free in the pool?"
+  - "Are there dangling FIPs — associated but pointing at an inactive port?"
+  - "What percentage of the floating IP pool is allocated?"
+  - "Given the current trend, when will the pool be exhausted?"
+  - "Is FIP allocation growing steadily or did it just spike?"
+
+production_lessons: >-
+  Floating IPs are the OpenStack resource most likely to silently run out: nothing
+  fails until the day a tenant's `floatingip-create` returns a quota/pool error, and
+  by then there is no headroom to give yourself room to react. The exporter reports
+  the *count of allocated* FIPs, not the pool size, so this dashboard takes the
+  allocatable pool size as a template variable and computes free headroom and a
+  `predict_linear` exhaustion estimate from it. The second silent killer is
+  **dangling** FIPs — addresses billed and counted as in-use but associated with a
+  port that is down, so they neither work nor free up. They inflate utilisation and
+  are pure waste until someone reclaims them.
+
+data_sources:
+  - "`openstack-exporter` with Neutron enabled — exposes
+    `openstack_neutron_floating_ips` (total allocated) and
+    `openstack_neutron_floating_ips_associated_not_active` (dangling: associated
+    to a non-active port). Set `$pool_size` to your external network's allocatable
+    address count."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_neutron_floating_ips, job)
+    description: Prometheus scrape job for your openstack-exporter target(s).
+    multi: false
+    includeAll: false
+  - name: pool_size
+    label: Pool size
+    type: textbox
+    default: "256"
+    description: Total allocatable floating IPs in the external network pool (used to compute free headroom and exhaustion).
+
+rows:
+  - title: Capacity — read these first
+    panels:
+      - type: stat
+        title: Free floating IPs
+        description: Allocatable addresses still available, based on the configured pool size.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 10}
+          - {color: green, value: 25}
+        targets:
+          - expr: $pool_size - sum(openstack_neutron_floating_ips{job="$job"})
+            instant: true
+            legend: free
+      - type: stat
+        title: Dangling FIPs
+        description: Floating IPs associated to an inactive port — billed and counted but not working.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: sum(openstack_neutron_floating_ips_associated_not_active{job="$job"}) or vector(0)
+            instant: true
+            legend: dangling
+      - type: gauge
+        title: Pool used
+        description: Allocated floating IPs as a share of the configured pool size.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: 100 * sum(openstack_neutron_floating_ips{job="$job"}) / $pool_size
+            instant: true
+            legend: used
+      - type: stat
+        title: Allocated FIPs
+        description: Total floating IPs currently allocated.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: sum(openstack_neutron_floating_ips{job="$job"}) or vector(0)
+            instant: true
+            legend: allocated
+
+  - title: Allocation trend & exhaustion
+    panels:
+      - type: timeseries
+        title: Allocated vs pool capacity
+        description: Allocated FIPs against the pool ceiling — the gap is your real headroom.
+        unit: short
+        min: 0
+        fillOpacity: 20
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0}
+        targets:
+          - expr: sum(openstack_neutron_floating_ips{job="$job"})
+            legend: allocated
+          - expr: vector($pool_size)
+            legend: pool size
+      - type: stat
+        title: Projected free in 7 days
+        description: Linear projection of free addresses one week out from the last 6h trend. Negative means exhaustion.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 1}
+          - {color: green, value: 20}
+        targets:
+          - expr: $pool_size - predict_linear(sum(openstack_neutron_floating_ips{job="$job"})[6h:], 7 * 86400)
+            instant: true
+            legend: projectedFree
+
+  - title: Health & waste
+    panels:
+      - type: timeseries
+        title: Dangling FIPs over time
+        description: Associated-but-inactive FIPs — a rising line is accumulating waste to reclaim.
+        unit: short
+        min: 0
+        fillOpacity: 30
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5}
+        targets:
+          - expr: sum(openstack_neutron_floating_ips_associated_not_active{job="$job"})
+            legend: dangling
+      - type: stat
+        title: Wasted on dangling
+        description: Share of allocated FIPs that are dangling — money and addresses spent on nothing.
+        unit: percent
+        decimals: 1
+        min: 0
+        max: 100
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 15}
+        targets:
+          - expr: >-
+              100 * sum(openstack_neutron_floating_ips_associated_not_active{job="$job"})
+              / clamp_min(sum(openstack_neutron_floating_ips{job="$job"}), 1)
+            instant: true
+            legend: wasted
+
+alerts:
+  - name: FloatingIPPoolNearExhaustion
+    severity: warning
+    expr: 100 * sum(openstack_neutron_floating_ips) / 256 > 90
+    for: 10m
+    summary: "Floating IP pool over 90% allocated"
+    why: When the external pool fills, new `floatingip-create` calls fail and tenants can no longer expose workloads — a hard, tenant-visible wall.
+    investigate: "Open OpenStack / Neutron — Floating IPs; check the free count and whether dangling FIPs are inflating usage."
+    runbook: "Reclaim dangling/unused FIPs, or extend the external network's allocation pool / add an external subnet."
+    recovery: Clears when allocation drops below 90% of the pool.
+    false_positives: The hardcoded 256 must match your real pool size — edit the alert (and the `$pool_size` variable) to your external network.
+  - name: FloatingIPsDangling
+    severity: warning
+    expr: sum(openstack_neutron_floating_ips_associated_not_active) > 5
+    for: 30m
+    summary: "More than 5 dangling floating IPs for 30m"
+    why: Dangling FIPs are associated to inactive ports — billed and counted against the pool but not routing traffic, so they waste capacity and money.
+    investigate: "List FIPs whose port is down; correlate with deleted/stopped instances that didn't release their address."
+    runbook: "Disassociate and release the orphaned FIPs, or fix the down ports they point at."
+    recovery: Clears when dangling FIPs fall to 5 or fewer.
+    false_positives: Brief windows during instance reboot leave a FIP transiently inactive — the 30m `for` rides those out.
+  - name: FloatingIPPoolPredictedExhaustion
+    severity: critical
+    expr: predict_linear(sum(openstack_neutron_floating_ips)[6h:], 7 * 86400) > 256
+    for: 1h
+    summary: "Floating IP pool projected to exhaust within 7 days"
+    why: Catching exhaustion a week out leaves time to reclaim addresses or grow the pool instead of fighting an outage.
+    investigate: "Confirm the growth is organic (real tenant demand) versus a runaway automation creating FIPs."
+    runbook: "Plan a pool extension or enforce per-tenant FIP quotas; clean up dangling addresses to buy time."
+    recovery: Clears when the projection no longer crosses the pool ceiling.
+    false_positives: A short allocation burst skews the linear fit — the 1h `for` and 6h window damp transient spikes.
+
+troubleshooting:
+  - symptom: Free count is negative
+    cause: "`$pool_size` is set lower than the real allocatable pool."
+    action: Set the Pool size variable (and the alert constants) to your external network's true address count.
+  - symptom: Used % never moves
+    cause: Exporter scoped to one project, so it only sees that tenant's FIPs.
+    action: Re-scope the exporter to an admin role to count the whole deployment.
+  - symptom: Projection swings wildly
+    cause: Bursty allocation makes the linear fit unstable.
+    action: Widen the `predict_linear` range window or rely on the used-% gauge for steady-state.
+
+performance: >-
+  All panels aggregate with `sum`, producing a single series each, so the dashboard
+  is trivially cheap regardless of FIP count. `predict_linear` over a 6h subquery is
+  evaluated once and refreshed on the panel interval.
+
+customization: >-
+  The single most important knob is `$pool_size` — set it to your external network's
+  allocatable count, and update the same constant inside the alert expressions
+  (alerts can't read dashboard variables). Tighten the 80/90% gauge thresholds if
+  your FIP turnover is slow and you need more lead time.

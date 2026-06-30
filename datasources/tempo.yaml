@@ -1,0 +1,21 @@
+# Grafana datasource provisioning — Tempo (traces).
+# Place at /etc/grafana/provisioning/datasources/tempo.yaml
+apiVersion: 1
+
+datasources:
+  - name: Tempo
+    uid: DS_TEMPO
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      # Trace -> logs (Loki) and trace -> metrics (Prometheus) correlation:
+      tracesToLogsV2:
+        datasourceUid: DS_LOKI
+      tracesToMetrics:
+        datasourceUid: DS_PROMETHEUS
+      serviceMap:
+        datasourceUid: DS_PROMETHEUS
+      nodeGraph:
+        enabled: true
+    editable: true

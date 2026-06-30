@@ -1,0 +1,215 @@
+# Deployment rollout health — available vs desired replicas.
+uid: kubernetes-deployments
+title: Kubernetes / Deployments
+description: >-
+  Rollout and availability health for Deployments: which ones have fewer available
+  replicas than desired, how many replicas are unavailable, and which rollouts are
+  still in progress. Answers "did my deploy land, and is anything degraded?" from
+  kube-state-metrics.
+datasource: prometheus
+tags: [kubernetes, deployments, kube-state-metrics, rollout]
+seo_phrase: Kubernetes deployment health Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which deployments have fewer available replicas than they should?"
+  - "How many replicas are unavailable across the cluster right now?"
+  - "Which rollouts are still in progress versus fully settled?"
+  - "Is a deployment stuck — desired set but availability never catching up?"
+
+production_lessons: >-
+  A deployment that reports the right *spec* replica count can still be serving
+  from a fraction of them: a bad image, a failing readiness probe, or insufficient
+  capacity leaves replicas unavailable while `kubectl get deploy` looks fine to the
+  untrained eye. This dashboard leads with the count of degraded deployments and
+  total unavailable replicas, so you see at a glance whether a rollout succeeded.
+  The trap it prevents: declaring a deploy "done" because the new ReplicaSet exists,
+  when availability is still climbing — or worse, permanently stuck because the new
+  pods never pass readiness.
+
+data_sources:
+  - "`kube-state-metrics` for deployment replica state
+    (`kube_deployment_spec_replicas`, `kube_deployment_status_replicas`,
+    `kube_deployment_status_replicas_available`,
+    `kube_deployment_status_replicas_unavailable`)."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(kube_node_info, cluster)
+    description: Cluster to scope to. Select All on single-cluster setups.
+    multi: false
+    includeAll: true
+  - name: namespace
+    label: Namespace
+    query: label_values(kube_deployment_spec_replicas{cluster=~"$cluster"}, namespace)
+    description: Namespace(s) to inspect; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Rollout health — read these first
+    panels:
+      - type: stat
+        title: Deployments degraded
+        description: Deployments with fewer available replicas than desired — actively serving below capacity.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(
+                kube_deployment_status_replicas_available{cluster=~"$cluster", namespace=~"$namespace"}
+                < kube_deployment_spec_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: degraded
+      - type: stat
+        title: Unavailable replicas (total)
+        description: Sum of unavailable replicas across all deployments — the missing serving capacity.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              sum(kube_deployment_status_replicas_unavailable{cluster=~"$cluster", namespace=~"$namespace"}) or vector(0)
+            instant: true
+            legend: unavailable
+      - type: stat
+        title: Rollouts in progress
+        description: Deployments whose available replicas have not yet caught up to desired — a rollout is mid-flight.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+        targets:
+          - expr: >-
+              count(
+                (kube_deployment_spec_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+                 - kube_deployment_status_replicas_available{cluster=~"$cluster", namespace=~"$namespace"}) > 0
+              ) or vector(0)
+            instant: true
+            legend: rolling
+      - type: stat
+        title: Deployments fully available
+        description: Deployments where every desired replica is available and serving.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              count(
+                kube_deployment_status_replicas_available{cluster=~"$cluster", namespace=~"$namespace"}
+                >= kube_deployment_spec_replicas{cluster=~"$cluster", namespace=~"$namespace"}
+              ) or vector(0)
+            instant: true
+            legend: healthy
+
+  - title: Availability over time
+    panels:
+      - type: timeseries
+        title: Unavailable replicas by deployment
+        description: Per-deployment unavailable replica count. A line that does not return to zero is a stuck rollout.
+        unit: short
+        min: 0
+        legend: table
+        drawStyle: bars
+        targets:
+          - expr: >-
+              kube_deployment_status_replicas_unavailable{cluster=~"$cluster", namespace=~"$namespace"} > 0
+            legend: "{{namespace}}/{{deployment}}"
+      - type: timeseries
+        title: Available vs desired replicas (cluster total)
+        description: Aggregate desired and available replicas. A persistent gap is degraded capacity.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(kube_deployment_spec_replicas{cluster=~"$cluster", namespace=~"$namespace"})
+            legend: desired
+          - expr: sum(kube_deployment_status_replicas_available{cluster=~"$cluster", namespace=~"$namespace"})
+            legend: available
+
+  - title: Per-deployment detail
+    panels:
+      - type: bargauge
+        title: Availability % by deployment
+        description: Available replicas as a share of desired, per deployment. Below 100% means at least one replica is down.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 67}
+          - {color: green, value: 100}
+        targets:
+          - expr: >-
+              100
+              * kube_deployment_status_replicas_available{cluster=~"$cluster", namespace=~"$namespace"}
+              / clamp_min(kube_deployment_spec_replicas{cluster=~"$cluster", namespace=~"$namespace"}, 1)
+            instant: true
+            legend: "{{namespace}}/{{deployment}}"
+      - type: table
+        title: Degraded deployments
+        description: Deployments running below their desired replica count — the worklist for a degraded-rollout incident.
+        unit: short
+        targets:
+          - expr: >-
+              kube_deployment_status_replicas_unavailable{cluster=~"$cluster", namespace=~"$namespace"} > 0
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{deployment}}"
+
+alerts:
+  - name: KubeDeploymentReplicasMismatch
+    severity: warning
+    expr: >-
+      kube_deployment_status_replicas_available
+      < kube_deployment_spec_replicas
+    for: 15m
+    summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} below desired replicas for 15m"
+    why: A deployment short of replicas for 15 minutes is not a slow rollout — it is stuck, serving below capacity and one failure away from an outage.
+    investigate: "Open Kubernetes / Pods for this namespace; check whether the new pods are CrashLooping, failing readiness, or unschedulable."
+    runbook: "Fix the underlying pod failure (image, config, probe, capacity) or roll back the deployment to the last healthy revision."
+    recovery: Clears when available replicas reach desired for 5m.
+    false_positives: A long, deliberately paused canary or a deploy with maxUnavailable set high during a large rollout.
+  - name: KubeDeploymentUnavailableReplicas
+    severity: critical
+    expr: kube_deployment_status_replicas_unavailable > 0 and kube_deployment_spec_replicas <= 2
+    for: 10m
+    summary: "Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has unavailable replicas (low replica count)"
+    why: On a small deployment a single unavailable replica is a large fraction of capacity — for a 1- or 2-replica service it may be a full or half outage.
+    investigate: "Check the pod's status and events; for a single-replica deployment this is effectively downtime."
+    runbook: "Restore the replica (fix the pod or reschedule it); consider raising the replica count so one failure is not a half outage."
+    recovery: Clears when no replicas are unavailable for 5m.
+    false_positives: Intentional single-replica batch/utility deployments during a restart.
+
+troubleshooting:
+  - {symptom: Availability % shows over 100, cause: Surge replicas during a rolling update (maxSurge), action: Transient during deploys — it settles to 100% when the rollout completes.}
+  - {symptom: Degraded count never returns to zero, cause: New ReplicaSet pods fail readiness or cannot schedule, action: Drill into Kubernetes / Pods; fix the probe, image or capacity issue.}
+  - {symptom: A deployment is missing, cause: It has zero spec replicas (scaled to 0), action: Scaled-to-zero deployments are excluded from the availability ratio by design.}
+
+performance: >-
+  All panels read kube-state-metrics gauges directly with no rate windows, so this
+  dashboard is inexpensive. Tables and the bargauge use `> 0` / per-object series so
+  only relevant deployments render. `clamp_min(spec, 1)` guards the availability
+  ratio against divide-by-zero on scaled-to-zero deployments.
+
+customization: >-
+  To gate a release pipeline, alert on `KubeDeploymentReplicasMismatch` scoped to
+  your app's namespace with a shorter `for`. Raise the low-replica threshold in
+  `KubeDeploymentUnavailableReplicas` if most of your services run many replicas.
+  Add a `deployment=~"..."` selector to focus on one application family.

@@ -1,0 +1,216 @@
+title: OpenStack / Cinder — Service Health
+description: >-
+  Block-storage control-plane health for an OpenStack deployment scraped by
+  openstack-exporter: are the cinder-volume, cinder-scheduler and cinder-backup
+  services up, and are any volumes stuck in error or creating? Leads with services
+  down and volumes in error — the two signals that mean tenants can't get storage.
+datasource: prometheus
+tags: [openstack, cinder, block-storage, openstack-exporter, control-plane]
+seo_phrase: OpenStack Cinder Grafana dashboard
+
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are any Cinder services (volume / scheduler / backup) down right now?"
+  - "How many volumes are stuck in the error state?"
+  - "Are volumes hanging in creating (a wedged scheduler or backend)?"
+  - "Is the deployment still answering — are Cinder metrics being scraped at all?"
+  - "Which storage host owns the failing service?"
+
+production_lessons: >-
+  Cinder fails in two distinct ways and they need different responders. A
+  **cinder-scheduler** outage means new volumes never get placed — they pile up in
+  `creating` and every `volume-create` eventually times out. A **cinder-volume**
+  backend outage means existing volumes can't be attached, extended or deleted, and
+  new ones land in `error`. This dashboard leads with services-down and volumes-in-
+  error precisely so you can tell those apart in five seconds. The most common false
+  alarm is a single backend reporting down because its driver lost the storage
+  array; the fix is on the array, not in OpenStack — which is why the per-service,
+  per-host state timeline matters more than a global "Cinder is unhealthy" light.
+
+data_sources:
+  - "`openstack-exporter` with Cinder enabled and admin credentials — exposes
+    `openstack_cinder_service_state` (labels `service`, `hostname`; 1 = up),
+    `openstack_cinder_volume_status` (label `status`), and
+    `openstack_cinder_volumes`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_cinder_service_state, job)
+    description: Prometheus scrape job for your openstack-exporter target(s).
+    multi: false
+    includeAll: false
+  - name: service
+    label: Service
+    query: label_values(openstack_cinder_service_state{job="$job"}, service)
+    description: Cinder service (cinder-volume, cinder-scheduler, cinder-backup).
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Health — read these first
+    panels:
+      - type: stat
+        title: Services down
+        description: Cinder services reporting down across selected types.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(openstack_cinder_service_state{job="$job", service=~"$service"} == 0) or vector(0)
+            instant: true
+            legend: down
+      - type: stat
+        title: Volumes in error
+        description: Volumes in the error state — failed create, attach, extend or delete.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: sum(openstack_cinder_volume_status{job="$job", status="error"}) or vector(0)
+            instant: true
+            legend: error
+      - type: stat
+        title: Volumes creating
+        description: Volumes currently in creating — should clear in seconds; a growing count means a wedged scheduler or backend.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 3}
+          - {color: red, value: 10}
+        targets:
+          - expr: sum(openstack_cinder_volume_status{job="$job", status="creating"}) or vector(0)
+            instant: true
+            legend: creating
+      - type: gauge
+        title: Service availability
+        description: Share of selected Cinder services currently up.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 95}
+          - {color: green, value: 100}
+        targets:
+          - expr: 100 * avg(openstack_cinder_service_state{job="$job", service=~"$service"}) or vector(0)
+            instant: true
+            legend: available
+
+  - title: Service state
+    panels:
+      - type: state-timeline
+        title: Service state (1 = up, 0 = down)
+        description: Up/down history per service and storage host — pinpoint which backend lost which service.
+        unit: short
+        mappings:
+          - {type: value, options: {"0": {text: down, color: red}, "1": {text: up, color: green}}}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: openstack_cinder_service_state{job="$job", service=~"$service"}
+            legend: "{{service}} @ {{hostname}}"
+      - type: bargauge
+        title: Down services by type
+        description: Which service is failing — scheduler vs volume vs backup demand different responders.
+        unit: short
+        decimals: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count by (service) (openstack_cinder_service_state{job="$job", service=~"$service"} == 0)
+            instant: true
+            legend: "{{service}}"
+
+  - title: Volume states
+    panels:
+      - type: timeseries
+        title: Volumes by status over time
+        description: Status mix through time — a rising error or creating line is the leading edge of an incident.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum by (status) (openstack_cinder_volume_status{job="$job"})
+            legend: "{{status}}"
+      - type: stat
+        title: Total volumes
+        description: All Cinder volumes in the deployment.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: sum(openstack_cinder_volumes{job="$job"}) or vector(0)
+            instant: true
+            legend: volumes
+
+alerts:
+  - name: CinderServiceDown
+    severity: critical
+    expr: openstack_cinder_service_state == 0
+    for: 5m
+    summary: "Cinder {{ $labels.service }} on {{ $labels.hostname }} is down"
+    why: A down cinder-volume backend blocks attach/extend/delete; a down cinder-scheduler blocks all new volume placement.
+    investigate: "Open OpenStack / Cinder — Service Health, identify the service and host on the state timeline, then check the service log and storage backend."
+    runbook: "Restart the affected service; for cinder-volume verify the storage array/driver connectivity, for cinder-scheduler check RabbitMQ and the database."
+    recovery: Clears when the service reports up for 5m.
+    false_positives: A backend drained for maintenance reports down — disable it in Cinder or silence the host first.
+  - name: CinderVolumesInError
+    severity: warning
+    expr: sum(openstack_cinder_volume_status{status="error"}) > 5
+    for: 15m
+    summary: "More than 5 Cinder volumes are in the error state"
+    why: Volumes in error mean failed create/attach/delete operations — tenant-visible storage failures that won't self-heal.
+    investigate: "Cross-check cinder-volume backend state; read the cinder-volume log for the driver error behind the failures."
+    runbook: "Fix the backend cause (array capacity, driver auth, connectivity), then reset the stuck volumes' state and retry the operation."
+    recovery: Clears when the error count falls back to 5 or fewer.
+    false_positives: A batch of intentionally aborted test volumes inflates this — clean them up or scope the alert by project.
+  - name: CinderExporterDown
+    severity: critical
+    expr: absent(openstack_cinder_service_state)
+    for: 5m
+    summary: "Cinder metrics absent — openstack-exporter not scraping Cinder"
+    why: With no service metrics you can't distinguish a healthy block-storage plane from a dead one.
+    investigate: "Check the openstack-exporter target in Prometheus and the exporter logs for Keystone/Cinder endpoint errors."
+    runbook: "Restart openstack-exporter; verify the Cinder endpoint, admin credentials and project scope."
+    recovery: Clears once the series returns.
+    false_positives: A planned exporter redeploy briefly trips this — 5m `for` absorbs restarts.
+
+troubleshooting:
+  - symptom: Volumes pile up in creating
+    cause: cinder-scheduler is down or no backend has capacity for the request.
+    action: Check scheduler state and per-pool free capacity on the Storage Capacity dashboard.
+  - symptom: Service shows down but the process runs
+    cause: Heartbeats are late due to a slow message bus or clock skew.
+    action: Sync NTP across storage hosts and check RabbitMQ queue depth.
+  - symptom: Error count never drops
+    cause: Volumes left in error after a past incident were never reset.
+    action: "Reset state with `cinder reset-state --state available <id>` once the backend is healthy."
+
+performance: >-
+  Service and status panels aggregate with `count`/`sum by`, so cardinality is one
+  series per service type or status regardless of volume count. Only the state
+  timeline is per-host; scope it with `$service` on large multi-backend clouds.
+
+customization: >-
+  Tune the error/creating thresholds to your provisioning rate. To watch a single
+  backend, add a `hostname` selector. Update the alert constants if you operate at a
+  scale where 5 errors is normal background noise.

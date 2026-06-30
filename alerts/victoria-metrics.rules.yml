@@ -1,0 +1,79 @@
+# Alerting rules for the victoria-metrics dashboards.
+# Generated from tools/specs/victoria-metrics/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: victoria-metrics.rules
+  rules:
+  - alert: VictoriaMetricsLowDisk
+    expr: vm_free_disk_space_bytes < 53687091200
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: VictoriaMetrics {{ $labels.instance }} below 50 GiB free disk
+      description: When free disk runs out VictoriaMetrics stops accepting writes and you lose ingestion
+        until space is recovered.
+      runbook: Lower retention (-retentionPeriod), add disk, or scale out vmstorage nodes; in an emergency,
+        drop low-value series.
+      dashboard: dashboards/victoria-metrics/cluster.json
+  - alert: VictoriaMetricsInsertSaturation
+    expr: vm_concurrent_insert_current / clamp_min(vm_concurrent_insert_capacity, 1) > 0.9
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: VictoriaMetrics {{ $labels.instance }} insert pool >90% saturated
+      description: A saturated insert limiter queues writers and pushes backpressure to remote_write upstreams,
+        risking dropped samples there.
+      runbook: Scale vminsert/vmstorage, raise -insert.maxQueueDuration headroom, or reduce the write
+        rate at the source.
+      dashboard: dashboards/victoria-metrics/cluster.json
+  - alert: VictoriaMetricsHTTPErrors
+    expr: sum by (instance, job) (rate(vm_http_request_errors_total[5m])) > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: VictoriaMetrics {{ $labels.instance }} HTTP errors above 1/s
+      description: Sustained HTTP errors mean writes are being rejected or reads are failing, so data
+        is lost or queries break.
+      runbook: Fix the rejected-write cause (bad labels, out-of-retention timestamps) or relieve the resource
+        pressure causing 5xx.
+      dashboard: dashboards/victoria-metrics/cluster.json
+  - alert: VMAgentRemoteWriteErrors
+    expr: rate(vmagent_remotewrite_errors_total[5m]) > 0
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: vmagent {{ $labels.instance }} failing remote-write to {{ $labels.url }}
+      description: Failed remote-write means scraped metrics are buffering and, once the buffer caps,
+        being dropped — a pipeline-wide blind spot.
+      runbook: Fix the upstream (auth/TLS, capacity) or repoint vmagent; confirm the on-disk persistent
+        queue has room.
+      dashboard: dashboards/victoria-metrics/vmagent.json
+  - alert: VMAgentBackpressure
+    expr: vmagent_remotewrite_pending_data_bytes > 1073741824
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: vmagent {{ $labels.instance }} buffering >1 GiB to {{ $labels.url }}
+      description: A large pending buffer means the upstream cannot keep up; if it reaches the cap, the
+        oldest data is discarded.
+      runbook: Scale or speed up the upstream, raise -remoteWrite.maxDiskUsagePerURL, or shed low-value
+        series via relabeling.
+      dashboard: dashboards/victoria-metrics/vmagent.json
+  - alert: VMAgentNoConnections
+    expr: sum by (instance, job) (vmagent_remotewrite_conn) == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: vmagent {{ $labels.instance }} has no remote-write connections
+      description: With zero connections the agent cannot ship anything, so all scraped data is held locally
+        and will eventually be lost.
+      runbook: Restore connectivity / fix the URL or firewall; restart vmagent if the connection pool
+        is wedged.
+      dashboard: dashboards/victoria-metrics/vmagent.json

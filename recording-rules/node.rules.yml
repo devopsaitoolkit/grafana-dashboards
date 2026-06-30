@@ -1,0 +1,51 @@
+# Recording rules for the Linux / node_exporter dashboards.
+# Precompute the expensive per-instance aggregations so large-fleet dashboards
+# render instantly. Load via Prometheus `rule_files:` (or as a Mimir/VM ruleset).
+#
+# Naming follows the level:metric:operation convention.
+groups:
+  - name: node.recording
+    interval: 30s
+    rules:
+      - record: instance:node_cpu_utilisation:rate5m
+        expr: 1 - avg without (cpu, mode) (rate(node_cpu_seconds_total{mode="idle"}[5m]))
+
+      - record: instance:node_cpu_saturation_load1:ratio
+        expr: >-
+          node_load1
+          / count without (cpu, mode) (node_cpu_seconds_total{mode="idle"})
+
+      - record: instance:node_memory_utilisation:ratio
+        expr: >-
+          1 - (
+            node_memory_MemAvailable_bytes
+            / node_memory_MemTotal_bytes
+          )
+
+      - record: instance:node_memory_swap_used:ratio
+        expr: >-
+          1 - (
+            node_memory_SwapFree_bytes
+            / clamp_min(node_memory_SwapTotal_bytes, 1)
+          )
+
+      - record: instance_device:node_disk_io_utilisation:rate5m
+        expr: rate(node_disk_io_time_seconds_total[5m])
+
+      - record: instance_device:node_disk_io_await_seconds:rate5m
+        expr: >-
+          rate(node_disk_io_time_weighted_seconds_total[5m])
+          / clamp_min(rate(node_disk_reads_completed_total[5m]) + rate(node_disk_writes_completed_total[5m]), 1)
+
+      - record: instance_device:node_network_receive_bytes:rate5m
+        expr: rate(node_network_receive_bytes_total{device!~"lo|veth.*|docker.*"}[5m])
+
+      - record: instance_device:node_network_transmit_bytes:rate5m
+        expr: rate(node_network_transmit_bytes_total{device!~"lo|veth.*|docker.*"}[5m])
+
+      - record: instance_mountpoint:node_filesystem_used:ratio
+        expr: >-
+          1 - (
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}
+          )

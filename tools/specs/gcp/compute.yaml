@@ -1,0 +1,231 @@
+# GCP Compute Engine health from Cloud Monitoring via stackdriver_exporter.
+title: GCP / Compute Engine
+description: >-
+  CPU utilisation, network ingress and disk read throughput for Compute Engine
+  instances exported from Cloud Monitoring (Stackdriver). Answers "which instances
+  are running hottest and how is utilisation distributed across the fleet?" rather
+  than charting one raw counter.
+datasource: prometheus
+tags: [gcp, gce, compute, stackdriver, capacity]
+seo_phrase: GCP Compute Engine Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "Which instances are the busiest on CPU right now?"
+  - "How many instances are above my utilisation threshold?"
+  - "How is CPU utilisation distributed across the fleet (a few hot, or all warm)?"
+  - "Which instances are pulling the most network traffic?"
+  - "Is disk read throughput spiking anywhere?"
+
+production_lessons: >-
+  Cloud Monitoring reports GCE CPU utilisation as a **fraction (0–1)**, and the
+  network/disk metrics are **delta counters** sampled on a delay — so this
+  dashboard converts CPU to a percentage and uses `rate()` on the `_count` series
+  rather than plotting raw deltas. The useful question on a fleet isn't "what's the
+  average" (a few hot instances hide in a calm mean) but "how is utilisation
+  distributed" — so we lead with a top-N and a distribution heatmap. That combo
+  catches the classic case where the autoscaler looks healthy on average while a
+  handful of instances are pinned and dropping requests.
+
+data_sources:
+  - "`stackdriver_exporter` scraping `compute.googleapis.com` instance metrics
+    (`stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization`,
+    `stackdriver_gce_instance_compute_googleapis_com_instance_network_received_bytes_count`,
+    `stackdriver_gce_instance_compute_googleapis_com_instance_disk_read_bytes_count`)."
+  - "**Naming/label assumption:** series carry `instance_name`, `zone` and
+    `project_id` labels. CPU utilisation is a fraction (0–1) — multiply by 100 for
+    percent. The `_count` metrics are DELTA types; use `rate()` to get bytes/sec.
+    Cloud Monitoring sampling lags 1–4 minutes."
+
+templating:
+  - name: zone
+    label: Zone
+    query: label_values(stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization, zone)
+    description: GCE zone(s) to display.
+    multi: true
+    includeAll: true
+  - name: instance_name
+    label: Instance
+    query: label_values(stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization{zone=~"$zone"}, instance_name)
+    description: Compute Engine instance(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Fleet health — read these first
+    panels:
+      - type: stat
+        title: Busiest instance CPU
+        description: Highest CPU utilisation across the selection (fraction shown as percent).
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: 100 * max(stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization{zone=~"$zone", instance_name=~"$instance_name"}) or vector(0)
+            instant: true
+            legend: max cpu
+      - type: stat
+        title: Instances over 80%
+        description: Count of instances with CPU utilisation above 80% right now.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: count(stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization{zone=~"$zone", instance_name=~"$instance_name"} > 0.8) or vector(0)
+            instant: true
+            legend: hot
+      - type: gauge
+        title: Fleet mean CPU
+        description: Mean CPU utilisation across the selection — context for the top-N.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 70}
+          - {color: red, value: 85}
+        targets:
+          - expr: 100 * avg(stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization{zone=~"$zone", instance_name=~"$instance_name"}) or vector(0)
+            instant: true
+            legend: mean
+      - type: stat
+        title: Instances reporting
+        description: Number of instances currently emitting CPU metrics.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: count(stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization{zone=~"$zone", instance_name=~"$instance_name"}) or vector(0)
+            instant: true
+            legend: instances
+
+  - title: CPU distribution
+    panels:
+      - type: bargauge
+        title: Top 10 instances by CPU
+        description: The hottest instances right now — your scaling and right-sizing candidates.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: 100 * topk(10, stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization{zone=~"$zone", instance_name=~"$instance_name"})
+            instant: true
+            legend: "{{instance_name}}"
+      - type: heatmap
+        title: CPU utilisation distribution
+        description: How instances are spread across utilisation bands over time — a hot tail with a calm mean is the danger pattern.
+        unit: percentunit
+        targets:
+          - expr: stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization{zone=~"$zone", instance_name=~"$instance_name"}
+            legend: "{{instance_name}}"
+
+  - title: CPU trend
+    panels:
+      - type: timeseries
+        title: CPU utilisation per instance
+        description: Per-instance CPU over time — find the instance pulling away from the pack.
+        unit: percentunit
+        min: 0
+        max: 1
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.9}
+        targets:
+          - expr: stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization{zone=~"$zone", instance_name=~"$instance_name"}
+            legend: "{{instance_name}}"
+
+  - title: Network & disk
+    panels:
+      - type: timeseries
+        title: Network received per instance
+        description: Inbound network throughput (rate of the delta counter) per instance.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(stackdriver_gce_instance_compute_googleapis_com_instance_network_received_bytes_count{zone=~"$zone", instance_name=~"$instance_name"}[5m])
+            legend: "{{instance_name}}"
+      - type: timeseries
+        title: Disk read per instance
+        description: Disk read throughput (rate of the delta counter) per instance — correlate with CPU spikes.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(stackdriver_gce_instance_compute_googleapis_com_instance_disk_read_bytes_count{zone=~"$zone", instance_name=~"$instance_name"}[5m])
+            legend: "{{instance_name}}"
+
+alerts:
+  - name: GceInstanceHighCPU
+    severity: warning
+    expr: stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization > 0.9
+    for: 15m
+    summary: "GCE instance {{ $labels.instance_name }} CPU >90%"
+    why: A pinned instance drops or delays work even when the fleet average looks healthy — autoscaling on the mean misses it.
+    investigate: "Open GCP / Compute Engine; check whether the instance is part of a MIG and whether the autoscaler is reacting."
+    runbook: "Scale the managed instance group out, raise the autoscaler target lower, or move to a larger machine type."
+    recovery: Clears when utilisation falls below 90% for 10m.
+    false_positives: Batch/render instances meant to run pinned — scope by instance_name or label.
+  - name: GceFleetCPUSaturated
+    severity: warning
+    expr: avg(stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization) by (zone) > 0.85
+    for: 15m
+    summary: "GCE fleet in {{ $labels.zone }} averaging >85% CPU"
+    why: When the whole zone's average is high there is no headroom to absorb a failure or a traffic spike.
+    investigate: "Check the distribution heatmap — is it broadly hot or a few extreme outliers dragging the mean?"
+    runbook: "Add capacity to the managed instance groups in the zone, or shift load to another zone/region."
+    recovery: Clears when the zone average falls below 85% for 10m.
+    false_positives: Small fleets where one busy instance swings the average — raise the threshold for tiny groups.
+  - name: GceMetricsMissing
+    severity: critical
+    expr: absent(stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization)
+    for: 10m
+    summary: "No GCE CPU metrics from Cloud Monitoring"
+    why: Missing metrics mean the exporter, its service-account credentials, or the Cloud Monitoring API is broken — you are blind to the fleet.
+    investigate: "Check the stackdriver_exporter logs for auth/quota errors and verify the service account's monitoring.viewer role."
+    runbook: "Restart the exporter, rotate/repair the service-account key, and confirm the Monitoring API quota isn't exhausted."
+    recovery: Clears when CPU metrics resume for 10m.
+    false_positives: A scrape gap during an exporter redeploy — the 10m `for` covers routine restarts.
+
+troubleshooting:
+  - symptom: CPU panels show 0–1 instead of 0–100%
+    cause: The metric is a fraction; a panel used a raw value without ×100.
+    action: Multiply by 100 for percent panels (as the headline panels do) or use the `percentunit` unit (as the trend panel does).
+  - symptom: Network/disk lines are flat or spiky-zero
+    cause: Plotting the raw delta counter instead of its rate.
+    action: Wrap the `_count` metric in `rate(...[5m])`; these are DELTA metrics.
+  - symptom: All panels "No data"
+    cause: Wrong metric prefix or the exporter isn't configured for compute.googleapis.com.
+    action: Confirm the long metric name in Explore; stackdriver_exporter names vary with its `monitoring.metrics-prefixes` config.
+
+performance: >-
+  Cloud Monitoring data is 1-minute granularity with a few-minute delay, so a 1m
+  refresh matches it and avoids extra API cost — each scrape calls the Monitoring
+  API, so don't over-refresh. Top-N and counts bound the series; the heatmap reads
+  the raw gauge. Narrow `monitoring.metrics-prefixes` in the exporter and scope
+  `$zone` to control API quota on large projects.
+
+customization: >-
+  Adjust the 0.8/0.9 utilisation thresholds to your autoscaler targets. To track a
+  single managed instance group, scope `$instance_name` with a regex on its name
+  prefix. Add per-project `project_id` filtering if one exporter serves multiple
+  projects.

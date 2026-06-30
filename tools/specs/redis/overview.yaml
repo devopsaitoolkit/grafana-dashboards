@@ -1,0 +1,255 @@
+# Redis fleet health overview. Leads with liveness, memory used against maxmemory, and
+# the keyspace hit ratio — the three signals that predict eviction storms and cache
+# misses before they page you.
+uid: redis-overview
+title: Redis / Overview
+description: >-
+  Top-level health for Redis instances scraped by redis_exporter: liveness, memory used
+  against maxmemory, keyspace hit ratio, throughput, connected and blocked clients, and
+  evictions. Answers "is this Redis healthy, and is it about to start evicting or
+  rejecting?".
+datasource: prometheus
+tags: [redis, cache, redis-exporter, overview]
+seo_phrase: Redis Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is Redis up and responding right now?"
+  - "How close is memory used to maxmemory?"
+  - "What is the keyspace hit ratio (cache effectiveness)?"
+  - "How many clients are connected, and are any blocked?"
+  - "Is Redis evicting keys under memory pressure?"
+
+production_lessons: >-
+  Redis is single-threaded for command execution, so its health is dominated by memory
+  and latency, not CPU. The number that predicts an incident is **memory used vs
+  maxmemory**: cross the limit and, depending on the policy, Redis either starts
+  evicting keys (cache misses spike downstream) or rejects writes outright. This
+  dashboard leads with that ratio, the **hit ratio** (is the cache still earning its
+  keep) and **blocked clients** (commands like BLPOP waiting, often a sign of a stuck
+  consumer). A note on memory: when maxmemory is 0 the instance is unlimited and the
+  percentage is meaningless — track absolute bytes against the host's RAM instead.
+
+data_sources:
+  - "`redis_exporter` pointed at each instance (the `redis_up`, `redis_memory_used_bytes`,
+    `redis_memory_max_bytes`, `redis_keyspace_hits_total`, `redis_keyspace_misses_total`,
+    `redis_connected_clients` and `redis_evicted_keys_total` series)."
+
+templating:
+  - name: instance
+    label: Instance
+    query: label_values(redis_up, instance)
+    description: Redis instance(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Health — read these first
+    panels:
+      - type: stat
+        title: Redis up
+        description: Liveness from redis_exporter. 1 = the exporter reached the instance.
+        unit: short
+        decimals: 0
+        colorMode: background
+        mappings:
+          - type: value
+            options:
+              "0": {text: DOWN, color: red, index: 0}
+              "1": {text: UP, color: green, index: 1}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: min(redis_up{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: up
+      - type: gauge
+        title: Memory used vs maxmemory
+        description: Worst instance's memory as a percentage of its maxmemory. Meaningless when maxmemory is 0 (unlimited).
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(
+                100 * redis_memory_used_bytes{instance=~"$instance"}
+                / clamp_min(redis_memory_max_bytes{instance=~"$instance"}, 1)
+              ) or vector(0)
+            instant: true
+            legend: memory %
+      - type: gauge
+        title: Keyspace hit ratio
+        description: Share of key lookups that hit over 5m. A low ratio means the cache is cold or under-sized.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 80}
+          - {color: green, value: 90}
+        targets:
+          - expr: >-
+              100 * sum(rate(redis_keyspace_hits_total{instance=~"$instance"}[5m]))
+              / clamp_min(
+                  sum(rate(redis_keyspace_hits_total{instance=~"$instance"}[5m]))
+                  + sum(rate(redis_keyspace_misses_total{instance=~"$instance"}[5m])), 1)
+            instant: true
+            legend: hit ratio
+      - type: stat
+        title: Operations per second
+        description: Commands processed per second across selected instances — the throughput baseline.
+        unit: ops
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(redis_instantaneous_ops_per_sec{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: ops/s
+
+  - title: Throughput
+    panels:
+      - type: timeseries
+        title: Operations per second
+        description: Instantaneous ops/s per instance — the live command rate.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: redis_instantaneous_ops_per_sec{instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Keyspace hits vs misses
+        description: Lookup outcomes per second. A rising miss line is a cold or under-sized cache.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(redis_keyspace_hits_total{instance=~"$instance"}[5m]))
+            legend: hits/s
+          - expr: sum(rate(redis_keyspace_misses_total{instance=~"$instance"}[5m]))
+            legend: misses/s
+      - type: timeseries
+        title: Commands processed
+        description: Total commands per second from the cumulative counter — a smoother view than instantaneous ops.
+        unit: ops
+        min: 0
+        targets:
+          - expr: sum(rate(redis_commands_processed_total{instance=~"$instance"}[5m]))
+            legend: commands/s
+
+  - title: Clients
+    panels:
+      - type: timeseries
+        title: Connected clients
+        description: Open client connections per instance. A sudden climb can exhaust maxclients.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: redis_connected_clients{instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Blocked clients
+        description: Clients blocked on BLPOP/BRPOP/WAIT and similar. Persistent blocking points at a stuck consumer.
+        unit: short
+        min: 0
+        drawStyle: bars
+        fillOpacity: 50
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+        targets:
+          - expr: redis_blocked_clients{instance=~"$instance"}
+            legend: "{{instance}}"
+
+  - title: Memory and evictions
+    panels:
+      - type: timeseries
+        title: Memory used vs maxmemory
+        description: Memory consumed against the configured ceiling per instance. The gap is your headroom before eviction.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: redis_memory_used_bytes{instance=~"$instance"}
+            legend: "{{instance}} used"
+          - expr: redis_memory_max_bytes{instance=~"$instance"} > 0
+            legend: "{{instance}} max"
+      - type: timeseries
+        title: Evictions and expirations
+        description: Keys evicted under memory pressure vs keys expired by TTL. Evictions above zero mean you are over maxmemory.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(redis_evicted_keys_total{instance=~"$instance"}[5m]))
+            legend: evicted/s
+          - expr: sum(rate(redis_expired_keys_total{instance=~"$instance"}[5m]))
+            legend: expired/s
+
+alerts:
+  - name: RedisInstanceDown
+    severity: critical
+    expr: redis_up == 0
+    for: 1m
+    summary: "Redis {{ $labels.instance }} is down"
+    why: The exporter cannot reach the instance — dependent services losing their cache or queue are likely failing.
+    investigate: "Check the redis-server process and host; confirm the exporter address and that Redis accepts connections."
+    runbook: "Restart redis-server if crashed; on a Sentinel/Cluster setup confirm a failover promoted a replica."
+    recovery: Clears once redis_up reports 1 again.
+    false_positives: Exporter restart can briefly trip this — keep `for` at 1m.
+  - name: RedisMemoryHigh
+    severity: warning
+    expr: >-
+      100 * redis_memory_used_bytes
+      / clamp_min(redis_memory_max_bytes, 1) > 90
+    for: 5m
+    summary: "Redis {{ $labels.instance }} memory above 90% of maxmemory"
+    why: Past maxmemory Redis either evicts keys (cache misses spike) or rejects writes, depending on the policy.
+    investigate: "Open Redis / Keyspace & Memory; check key growth, large keys and whether a TTL is missing."
+    runbook: "Raise maxmemory if RAM allows, add TTLs to unbounded keys, or shard the keyspace."
+    recovery: Clears when memory falls below 90% of maxmemory for 5m.
+    false_positives: Instances with maxmemory=0 (unlimited) make this ratio meaningless — scope the rule to instances with a limit.
+  - name: RedisLowHitRatio
+    severity: warning
+    expr: >-
+      100 * sum by (instance) (rate(redis_keyspace_hits_total[5m]))
+      / clamp_min(
+          sum by (instance) (rate(redis_keyspace_hits_total[5m]))
+          + sum by (instance) (rate(redis_keyspace_misses_total[5m])), 1) < 80
+    for: 15m
+    summary: "Redis {{ $labels.instance }} keyspace hit ratio below 80%"
+    why: A low hit ratio means most lookups miss, pushing load onto the backing database the cache was meant to protect.
+    investigate: "Check whether the cache is cold after a restart, undersized, or being used as a primary store."
+    runbook: "Increase capacity, warm the cache, lengthen TTLs, or fix the application's cache-key strategy."
+    recovery: Clears when the hit ratio recovers above 80% for 5m.
+    false_positives: Write-heavy or queue workloads have naturally low hit ratios; scope this to read-cache instances.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: redis_exporter not scraped or wrong `$instance`.
+    action: "Check `redis_up` in Explore and confirm the instance label matches your scrape config."
+  - symptom: Memory percentage reads 0 or a huge number
+    cause: maxmemory is 0 (unlimited), so the ratio is undefined and dominated by the clamp.
+    action: Track absolute redis_memory_used_bytes against host RAM instead, or set maxmemory.
+  - symptom: Hit ratio is 100% with no traffic
+    cause: Hit and miss rates are both ~0, so the clamp dominates.
+    action: Read it alongside ops/s; the ratio is only meaningful under load.
+
+performance: >-
+  Rates use a 5m window so a restart never spikes them, and hit-ratio/memory ratios
+  clamp their denominator with `clamp_min(...,1)` to stay defined at zero traffic or
+  unlimited memory. Per-instance aggregation keeps series count proportional to nodes.
+
+customization: >-
+  Tune the 80%/90% memory and hit-ratio thresholds to your role — a queue broker is not
+  a read cache. If you run many DB indexes, pair this with Redis / Keyspace & Memory for
+  per-db key counts.

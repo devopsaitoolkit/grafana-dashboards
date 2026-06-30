@@ -1,0 +1,227 @@
+title: OpenStack / Keystone — API & Inventory
+description: >-
+  Keystone identity service availability and the size of your identity estate:
+  is the API answering, and how many projects, users, domains and groups exist?
+  Answers "can tenants authenticate right now, and is the directory the size I
+  expect?" rather than dumping raw counters.
+datasource: prometheus
+tags: [openstack, keystone, identity, openstack-exporter]
+seo_phrase: OpenStack Keystone Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "Is the Keystone API reachable from the exporter right now?"
+  - "How many projects, users, domains and groups exist in the cloud?"
+  - "Did the user or project count just jump or collapse (bad sync / mass delete)?"
+  - "Are all Keystone scrape targets up, or is one region's identity endpoint dark?"
+
+production_lessons: >-
+  Keystone is the single point every other OpenStack service authenticates
+  against, so when it is slow or down the whole control plane looks broken at
+  once — Nova, Neutron and Cinder all start returning 401/503. The standard
+  openstack-exporter does not expose token-issuance latency, so the honest health
+  signal is the per-service scrape success (`openstack_identity_up`) plus the
+  inventory gauges: a sudden drop in user or project count almost always means a
+  failed LDAP/Keystone sync or an accidental bulk delete, not real churn. Lead
+  with up/down and totals so on-call can tell an outage from a data problem in
+  five seconds.
+
+data_sources:
+  - "`openstack-exporter` (the OpenStack Cloud Exporter) configured with the
+    `identity` collector enabled and a service account that can list projects,
+    users, domains and groups."
+  - "Health here is the exporter's `openstack_identity_up` (1 when the Keystone
+    API answered the last scrape). The standard exporter exposes **no** token
+    issuance latency metric; if you need real auth latency, add a blackbox/probe
+    against the v3 token endpoint and graph `probe_duration_seconds` alongside."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_identity_up, job)
+    description: Prometheus scrape job for your openstack-exporter target(s).
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Exporter
+    query: label_values(openstack_identity_up{job="$job"}, instance)
+    description: openstack-exporter instance(s) — one per cloud/region.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Identity health — read these first
+    panels:
+      - type: stat
+        title: Keystone API up
+        description: 1 when the exporter successfully queried the Keystone identity API on the last scrape.
+        unit: short
+        decimals: 0
+        colorMode: background
+        mappings:
+          - type: value
+            options:
+              "0": {text: DOWN}
+              "1": {text: UP}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: min(openstack_identity_up{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: up
+      - type: stat
+        title: Projects
+        description: Total Keystone projects (tenants) in the cloud.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(openstack_identity_projects{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: projects
+      - type: stat
+        title: Users
+        description: Total Keystone user accounts (local plus federated/LDAP-mapped).
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(openstack_identity_users{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: users
+      - type: stat
+        title: Domains
+        description: Total Keystone domains — top-level isolation boundaries for projects and users.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(openstack_identity_domains{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: domains
+      - type: stat
+        title: Groups
+        description: Total Keystone groups used for role assignment at scale.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(openstack_identity_groups{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: groups
+
+  - title: Scrape & endpoint reachability
+    panels:
+      - type: state-timeline
+        title: Keystone reachability per exporter
+        description: Up/down history of the identity API as seen by each exporter — find the exact minute a region went dark.
+        unit: short
+        legend: hidden
+        mappings:
+          - type: value
+            options:
+              "0": {text: DOWN, color: red}
+              "1": {text: UP, color: green}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: openstack_identity_up{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: stat
+        title: Exporters reporting Keystone down
+        description: Count of exporter instances whose last identity scrape failed. Non-zero means an auth outage somewhere.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(openstack_identity_up{job="$job", instance=~"$instance"} == 0) or vector(0)
+            instant: true
+            legend: down
+
+  - title: Inventory over time
+    panels:
+      - type: timeseries
+        title: Projects, users, groups & domains
+        description: Identity inventory trended together. Flat lines are normal; cliffs or spikes mean a sync or bulk operation.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(openstack_identity_projects{job="$job", instance=~"$instance"})
+            legend: projects
+          - expr: sum(openstack_identity_users{job="$job", instance=~"$instance"})
+            legend: users
+          - expr: sum(openstack_identity_groups{job="$job", instance=~"$instance"})
+            legend: groups
+          - expr: sum(openstack_identity_domains{job="$job", instance=~"$instance"})
+            legend: domains
+      - type: timeseries
+        title: Users added/removed per hour
+        description: Hourly change in user count. Large negative swings are the early warning for a broken directory sync.
+        unit: short
+        legend: table
+        drawStyle: bars
+        fillOpacity: 40
+        targets:
+          - expr: delta(sum(openstack_identity_users{job="$job", instance=~"$instance"})[1h:5m])
+            legend: user delta/h
+
+alerts:
+  - name: KeystoneAPIDown
+    severity: critical
+    expr: openstack_identity_up == 0
+    for: 2m
+    summary: "Keystone identity API down on {{ $labels.instance }}"
+    why: Every OpenStack service authenticates against Keystone; while it is down, Nova/Neutron/Cinder calls fail with 401/503 and the whole control plane is effectively offline.
+    investigate: "Open OpenStack / Keystone — API & Inventory and check reachability per exporter; then curl the v3 endpoint and check the keystone/apache (wsgi) logs and the backing database connection."
+    runbook: "Restart the keystone API/apache workers, confirm the identity backend (SQL/LDAP) is reachable, and verify the Fernet keys are present and in sync across nodes."
+    recovery: Clears when the exporter scrapes the identity API successfully for 1m.
+    false_positives: A restart of openstack-exporter or its service account losing list permissions reports down without a real Keystone outage — verify with a direct token request.
+  - name: KeystoneUserCountCollapsed
+    severity: warning
+    expr: >-
+      sum(openstack_identity_users) < 0.5 * sum(openstack_identity_users offset 1h)
+    for: 10m
+    summary: "Keystone user count dropped >50% in the last hour"
+    why: A sudden collapse in the user (or project) inventory almost always means a failed LDAP/identity sync or an accidental bulk delete rather than real attrition.
+    investigate: "Compare the projects/users/groups trend panel against change tickets; check the identity backend sync job and recent admin API audit logs."
+    runbook: "Pause the sync job, restore the directory source of truth, and re-run a controlled sync; if it was a delete, restore from the identity database backup."
+    recovery: Clears once the inventory returns to within 50% of the prior hour.
+    false_positives: Legitimate large cleanups of stale accounts; raise the threshold or add a maintenance silence window.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The `identity` collector is disabled or the exporter service account lacks list rights.
+    action: "Enable the identity collector in the exporter config and grant the account `reader`/`admin` on the `identity` API; confirm with `openstack_identity_up` in Explore."
+  - symptom: Up is green but counts are zero
+    cause: The exporter authenticated but the account cannot list across all domains.
+    action: Use a domain-scoped admin or the `cloud_admin` role so list calls return every domain's objects.
+  - symptom: User/project counts look doubled
+    cause: Two exporters scraping the same cloud are both summed by the `sum(...)`.
+    action: Scope `$instance` to a single exporter per cloud, or filter the job to one collector.
+
+performance: >-
+  Inventory gauges are cheap (a handful of series per exporter) so this dashboard
+  is light even at 1m refresh. The user-delta panel uses a 1h subquery; widen its
+  step on very large clouds if the panel renders slowly. Keep one exporter per
+  cloud to avoid double-counting when you `sum`.
+
+customization: >-
+  Add a `cloud`/`region` template variable if your exporter labels series that
+  way, and split the inventory panel per region. If you run the enhanced exporter
+  build that exposes token issuance, add a stat for issuance rate and a blackbox
+  probe panel for v3 token latency to turn this into a true SLO dashboard.

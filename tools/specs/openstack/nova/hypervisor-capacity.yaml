@@ -1,0 +1,287 @@
+# THE Nova capacity dashboard. Leads with the single most-full hypervisor and the
+# fleet-wide vCPU / memory / disk headroom that decides whether you can still grow.
+title: OpenStack / Nova Hypervisor Capacity
+description: >-
+  Capacity planning for an OpenStack Nova fleet from openstack-exporter: vCPU,
+  memory and disk allocation per hypervisor, fleet headroom, hosts approaching
+  their limits, and a simple time-to-exhaustion projection. Answers "how much
+  room is left, where will we run out first, and when?".
+datasource: prometheus
+tags: [openstack, nova, capacity, hypervisor, openstack-exporter]
+seo_phrase: OpenStack Nova capacity Grafana dashboard
+refresh: 1m
+time_from: now-24h
+
+questions:
+  - "Which hypervisor is closest to full right now?"
+  - "How much vCPU, memory and disk headroom does the fleet have left?"
+  - "Which resource — vCPU, memory or disk — will we exhaust first?"
+  - "How many hosts are within a few percent of their allocation limit?"
+  - "At the current growth rate, how long until memory runs out?"
+
+production_lessons: >-
+  Capacity is not the fleet average — it is the *tightest* host and the *tightest*
+  resource, because Nova cannot split one instance across machines. This dashboard
+  leads with the single most-full hypervisor and reports headroom separately for
+  vCPU, memory and disk, since they exhaust at wildly different rates: on most clouds
+  memory fills first, on dense-storage clouds it is local disk. The projection panel
+  exists because "we have 20% headroom" is meaningless without a slope — 20% with
+  flat growth is months away, 20% growing 1%/hour is a same-shift page. Always plan to
+  the resource that runs out first, and keep at least one host's worth of slack so you
+  can still live-migrate during maintenance.
+
+data_sources:
+  - "`openstack-exporter` (github.com/openstack-exporter/openstack-exporter) scraping
+    the Nova hypervisor-stats API: `openstack_nova_vcpus` / `openstack_nova_vcpus_used`,
+    `openstack_nova_memory_mb` / `openstack_nova_memory_used_mb`,
+    `openstack_nova_local_storage_gb` / `openstack_nova_local_storage_used_gb`, all
+    labelled by `hostname` and `aggregate`."
+  - "Projection panels read 6h of history, so keep at least a day of retention in
+    Prometheus for stable slopes."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_nova_vcpus, job)
+    description: Prometheus scrape job for your openstack-exporter target.
+    multi: false
+    includeAll: false
+  - name: aggregate
+    label: Aggregate
+    query: label_values(openstack_nova_vcpus{job="$job"}, aggregate)
+    description: Host aggregate / availability zone to plan capacity for; All for the whole fleet.
+    multi: false
+    includeAll: true
+  - name: hostname
+    label: Hypervisor
+    query: label_values(openstack_nova_vcpus{job="$job", aggregate=~"$aggregate"}, hostname)
+    description: Compute host(s) to include; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Fleet headroom — read these first
+    panels:
+      - type: stat
+        title: Most-full hypervisor
+        description: Highest single-host allocation across vCPU, memory and disk — your real capacity ceiling.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              max(
+                100 * openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"} / openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+                or 100 * openstack_nova_local_storage_used_gb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"} / openstack_nova_local_storage_gb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+              ) or vector(0)
+            instant: true
+            legend: max
+      - type: gauge
+        title: Fleet vCPU headroom
+        description: Percent of physical vCPU capacity still unallocated across the fleet (before overcommit).
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 15}
+          - {color: green, value: 30}
+        targets:
+          - expr: >-
+              100 * (1 -
+                sum(openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+                / sum(openstack_nova_vcpus{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+              )
+            instant: true
+            legend: vcpu
+      - type: gauge
+        title: Fleet memory headroom
+        description: Percent of fleet memory still unallocated — usually the first resource to run out.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 15}
+          - {color: green, value: 30}
+        targets:
+          - expr: >-
+              100 * (1 -
+                sum(openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+                / sum(openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+              )
+            instant: true
+            legend: memory
+      - type: gauge
+        title: Fleet disk headroom
+        description: Percent of fleet local ephemeral storage still unallocated.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 15}
+          - {color: green, value: 30}
+        targets:
+          - expr: >-
+              100 * (1 -
+                sum(openstack_nova_local_storage_used_gb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+                / sum(openstack_nova_local_storage_gb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+              )
+            instant: true
+            legend: disk
+
+  - title: Per-host allocation & exhaustion risk
+    panels:
+      - type: bargauge
+        title: Memory allocated per host
+        description: Percent of each host's memory committed. Hosts near 100% can no longer take builds or migration targets.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              100 * openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+              / openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            instant: true
+            legend: "{{hostname}}"
+      - type: table
+        title: Hosts approaching limits
+        description: Per-host vCPU/memory/disk allocation, sorted to surface the tightest hosts first.
+        unit: percent
+        filterable: true
+        sortBy:
+          - {displayName: memory %, desc: true}
+        targets:
+          - expr: >-
+              100 * openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"} / openstack_nova_vcpus{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            instant: true
+            format: table
+            legend: vcpu %
+          - expr: >-
+              100 * openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"} / openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            instant: true
+            format: table
+            legend: memory %
+          - expr: >-
+              100 * openstack_nova_local_storage_used_gb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"} / openstack_nova_local_storage_gb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}
+            instant: true
+            format: table
+            legend: disk %
+
+  - title: Fleet trend & projection
+    panels:
+      - type: timeseries
+        title: Fleet allocation over time
+        description: vCPU, memory and disk allocated as a percent of capacity. Watch the slope, not just the level.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * sum(openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}) / sum(openstack_nova_vcpus{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+            legend: vcpu
+          - expr: >-
+              100 * sum(openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}) / sum(openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+            legend: memory
+          - expr: >-
+              100 * sum(openstack_nova_local_storage_used_gb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"}) / sum(openstack_nova_local_storage_gb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+            legend: disk
+      - type: stat
+        title: Time to memory exhaustion
+        description: >-
+          Hours until fleet memory is fully allocated at the last 6h growth rate.
+          Reads "infinite" (very large) when allocation is flat or shrinking.
+        unit: h
+        decimals: 1
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 24}
+          - {color: green, value: 168}
+        targets:
+          - expr: >-
+              (
+                sum(openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+                - sum(openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})
+              )
+              / clamp_min(deriv(sum(openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate", hostname=~"$hostname"})[6h:30m]), 0.001)
+              / 3600
+            instant: true
+            legend: hours
+
+alerts:
+  - name: NovaFleetMemoryHeadroomLow
+    severity: warning
+    expr: >-
+      100 * (1 - sum(openstack_nova_memory_used_mb) / sum(openstack_nova_memory_mb)) < 15
+    for: 30m
+    summary: "Nova fleet memory headroom below 15%"
+    why: Below ~15% headroom you can no longer evacuate a host during maintenance, and a single large flavour request starts failing with "no valid host".
+    investigate: "Open Nova Hypervisor Capacity; read the fleet trend slope and the time-to-exhaustion stat to judge urgency."
+    runbook: "Add compute capacity, reclaim ERROR/shutoff instances, or rebalance flavours; raise allocation ratios only with steal-time headroom to spare."
+    recovery: Clears when fleet memory headroom rises back above 15% for 10m.
+    false_positives: A cloud intentionally run near-full on cheap memory tiers — lower the threshold for that aggregate.
+  - name: NovaHypervisorNearlyFull
+    severity: warning
+    expr: >-
+      100 * openstack_nova_memory_used_mb / openstack_nova_memory_mb > 95
+    for: 15m
+    summary: "Hypervisor {{ $labels.hostname }} at {{ $value | printf \"%.0f\" }}% memory"
+    why: A host above 95% allocation is effectively full — no new builds and no room as a live-migration target.
+    investigate: "Find the host in the per-host bargauge / table; check its instance and flavour mix."
+    runbook: "Migrate a few instances off, stop scheduling to the host, or add RAM; keep at least one host's slack for maintenance."
+    recovery: Clears when the host drops below 95% allocated for 5m.
+    false_positives: Deliberately packed batch hosts — scope the rule by aggregate.
+  - name: NovaMemoryExhaustionImminent
+    severity: critical
+    expr: >-
+      (sum(openstack_nova_memory_mb) - sum(openstack_nova_memory_used_mb))
+      / clamp_min(deriv(sum(openstack_nova_memory_used_mb)[6h:30m]), 0.001) / 3600 < 24
+    for: 30m
+    summary: "Nova memory projected to exhaust within 24h"
+    why: At the current allocation growth rate the fleet runs out of memory within a day, after which all new launches fail cloud-wide.
+    investigate: "Confirm the slope on the fleet trend panel; identify what is driving growth (a tenant ramp, a runaway autoscaler)."
+    runbook: "Bring capacity online now or throttle the growth source; this is a same-shift action, not a backlog item."
+    recovery: Clears when the projection exceeds 24h (growth slows or capacity is added) for 10m.
+    false_positives: A short provisioning burst inflates the slope; the 6h window and 30m `for` absorb most spikes, but verify on the trend panel.
+
+troubleshooting:
+  - symptom: Time-to-exhaustion shows a huge number
+    cause: Allocation is flat or shrinking, so the projected slope is ~0 — there is effectively unlimited runway.
+    action: This is the healthy case; the stat is clamped to avoid divide-by-zero, not broken.
+  - symptom: Headroom looks fine but builds still fail
+    cause: A single host is full while the fleet average is comfortable, or a non-resource filter (aggregate/affinity) is blocking placement.
+    action: Use the most-full host stat and per-host table; cross-check the scheduler dashboard.
+  - symptom: vCPU headroom is negative or zero but the cloud is fine
+    cause: vcpus_used reflects overcommitted allocation past physical cores; headroom here is measured against physical, not allocatable.
+    action: Interpret vCPU against your cpu_allocation_ratio; treat memory/disk headroom as the hard limits.
+
+performance: >-
+  All fleet panels are `sum()` of one-series-per-host gauges, so cost scales linearly
+  with host count and stays cheap even on large clouds. The projection uses
+  `deriv(...[6h:30m])`, a subquery — keep the inner range at 6h so it is not
+  recomputed over excessive samples. Refresh is set to 1m and the default window to 24h
+  because capacity moves slowly; there is no value in a 30s refresh here.
+
+customization: >-
+  Set the headroom thresholds (15/30%) to leave at least one host's worth of slack for
+  maintenance. Change the projection horizon by editing the `< 24` in the alert and the
+  yellow/green stat thresholds. To plan a single tier, scope `$aggregate`; to model a
+  different overcommit, compare `vcpus_used` against `vcpus * ratio` instead of physical.

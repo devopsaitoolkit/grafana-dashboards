@@ -1,0 +1,232 @@
+# Meta-monitoring: will Alertmanager actually deliver the page when it matters?
+uid: prometheus-alertmanager
+title: Prometheus / Alertmanager
+description: >-
+  Delivery health for Alertmanager: notification success vs failure, end-to-end
+  notify latency, cluster gossip membership, active vs suppressed alerts and
+  silences. Answers "if something pages tonight, will the notification actually
+  get out?"
+datasource: prometheus
+tags: [prometheus, alertmanager, alerting, meta-monitoring]
+seo_phrase: Alertmanager Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are notifications failing to any integration right now?"
+  - "Is the Alertmanager cluster fully formed (all members gossiping)?"
+  - "How many alerts are active vs suppressed?"
+  - "Is notification latency within the receiver's expectations?"
+  - "How many silences are active, and could one be hiding a real alert?"
+
+production_lessons: >-
+  The cruellest failure in monitoring is an alert that fires correctly and never
+  reaches a human. We lead with notification failures and cluster membership
+  because those are the two ways delivery breaks: a dead integration (bad token,
+  receiver down) or a split-brain cluster that dedupes itself into silence. Active
+  vs suppressed alerts and silence counts come next — a forgotten broad silence is
+  the most common reason a real incident goes unpaged.
+
+data_sources:
+  - "`alertmanager` exposing `/metrics` (the `alertmanager_alerts`,
+    `alertmanager_notifications_total`, `alertmanager_notifications_failed_total`,
+    `alertmanager_notification_latency_seconds_bucket`, `alertmanager_silences`
+    and `alertmanager_cluster_members` series)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(alertmanager_alerts, job)
+    description: Scrape job for your Alertmanager targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(alertmanager_alerts{job="$job"}, instance)
+    description: Alertmanager instance(s); keep All for clustered deployments.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Delivery — read these first
+    panels:
+      - type: stat
+        title: Notification failures per second
+        description: Rate of failed notifications across all integrations. Anything sustained above zero means pages may not be landing.
+        unit: ops
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.001}
+        targets:
+          - expr: sum(rate(alertmanager_notifications_failed_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: failed
+      - type: stat
+        title: Cluster members
+        description: Peers visible in the gossip cluster. A drop below your replica count risks split-brain dedup.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: max(alertmanager_cluster_members{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: members
+      - type: stat
+        title: Active alerts
+        description: Alerts currently firing into Alertmanager.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+        targets:
+          - expr: sum(alertmanager_alerts{job="$job", instance=~"$instance", state="active"}) or vector(0)
+            instant: true
+            legend: active
+      - type: stat
+        title: Suppressed alerts
+        description: Alerts held back by a silence or inhibition — a high count can mean a real alert is being masked.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10}
+        targets:
+          - expr: sum(alertmanager_alerts{job="$job", instance=~"$instance", state="suppressed"}) or vector(0)
+            instant: true
+            legend: suppressed
+
+  - title: Notifications
+    panels:
+      - type: timeseries
+        title: Notification rate by integration
+        description: Successful notifications per second per receiver type — confirms the path is alive.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (integration) (rate(alertmanager_notifications_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{integration}}"
+      - type: timeseries
+        title: Notification failures by integration
+        description: Failures per second per receiver — pinpoints which channel (email, webhook, pager) is broken.
+        unit: ops
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.001}
+        targets:
+          - expr: sum by (integration) (rate(alertmanager_notifications_failed_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{integration}}"
+
+  - title: Latency & silences
+    panels:
+      - type: timeseries
+        title: Notification latency p99 by integration
+        description: End-to-end notify time at the 99th percentile — rising latency on a pager integration delays response.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: histogram_quantile(0.99, sum by (le, integration) (rate(alertmanager_notification_latency_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: "{{integration}}"
+      - type: timeseries
+        title: Active silences
+        description: Silences in effect — a sudden jump can explain why expected alerts went quiet.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (alertmanager_silences{job="$job", instance=~"$instance", state="active"})
+            legend: "{{instance}}"
+
+  - title: Cluster & alert mix
+    panels:
+      - type: timeseries
+        title: Cluster members over time
+        description: Gossip membership trend — flapping here means peers can't reach each other and dedup is unreliable.
+        unit: short
+        min: 0
+        legend: table
+        drawStyle: bars
+        fillOpacity: 40
+        targets:
+          - expr: alertmanager_cluster_members{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Active vs suppressed alerts
+        description: The alert mix over time — a growing suppressed band warrants a silence audit.
+        unit: short
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum(alertmanager_alerts{job="$job", instance=~"$instance", state="active"})
+            legend: active
+          - expr: sum(alertmanager_alerts{job="$job", instance=~"$instance", state="suppressed"})
+            legend: suppressed
+
+alerts:
+  - name: AlertmanagerNotificationsFailing
+    severity: critical
+    expr: >-
+      rate(alertmanager_notifications_failed_total[5m]) > 0
+    for: 5m
+    summary: "Alertmanager {{ $labels.instance }} failing {{ $labels.integration }} notifications"
+    why: A failing integration means alerts are firing but the notification never reaches the on-call — the worst kind of silent failure.
+    investigate: "Open Prometheus / Alertmanager, find the failing integration, and check its credentials/endpoint and the Alertmanager log."
+    runbook: "Fix the receiver config (token, URL, TLS); test with amtool; if a downstream provider is down, fail over to a secondary receiver."
+    recovery: Clears when no failures occur for 5m on that integration.
+    false_positives: A brief provider outage can trip this; pair with a route that has a backup receiver.
+  - name: AlertmanagerClusterDegraded
+    severity: warning
+    expr: alertmanager_cluster_members < 3
+    for: 10m
+    summary: "Alertmanager cluster on {{ $labels.instance }} has fewer than 3 members"
+    why: A shrunken gossip cluster risks duplicate or dropped notifications because peers can no longer coordinate dedup.
+    investigate: "Check connectivity on the gossip port between peers and whether a replica crashed or was descheduled."
+    runbook: "Restore the missing replica(s); verify --cluster.peer addresses and that the gossip port is open between nodes."
+    recovery: Clears when membership returns to the expected size for 5m.
+    false_positives: Non-clustered single-node deployments — disable this alert or set the threshold to 1.
+  - name: AlertmanagerNotificationLatencyHigh
+    severity: warning
+    expr: >-
+      histogram_quantile(0.99, sum by (le, integration) (rate(alertmanager_notification_latency_seconds_bucket[5m]))) > 10
+    for: 10m
+    summary: "Alertmanager {{ $labels.integration }} notify p99 above 10s"
+    why: Slow delivery delays human response and can cause Alertmanager to retry and duplicate notifications.
+    investigate: "Check the downstream provider's response times and any rate-limiting on the integration."
+    runbook: "Reduce notification volume via better grouping, or move to a faster/closer receiver endpoint."
+    recovery: Clears when p99 drops below 10s for 5m.
+    false_positives: Email/SMTP relays are inherently slower — set a higher threshold for those integrations.
+
+troubleshooting:
+  - symptom: Cluster members shows 1 but you run an HA pair
+    cause: Peers cannot reach each other on the gossip port, so each sees only itself.
+    action: Open the cluster port between nodes and confirm --cluster.peer addresses resolve.
+  - symptom: No failures but alerts never arrive
+    cause: A broad active silence or an inhibition rule is suppressing them.
+    action: Audit active silences and the suppressed-alerts panel; expire stale silences.
+  - symptom: Latency histogram is empty
+    cause: No notifications have been sent in the window, or the integration label is absent.
+    action: Trigger a test alert with amtool and widen the time range.
+
+performance: >-
+  Notification counters use 5m rates; latency uses a native histogram aggregated by
+  `le` and `integration` only, keeping cardinality bounded. Alert-state panels read
+  the `alertmanager_alerts` gauge directly, which is cheap regardless of fleet size.
+
+customization: >-
+  Set the cluster-member threshold to your replica count (default rule assumes 3).
+  Raise the latency threshold for slow channels like email. For single-node setups,
+  drop the cluster alert entirely and rely on the self-scrape up check instead.

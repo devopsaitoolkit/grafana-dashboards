@@ -1,0 +1,81 @@
+# Alerting rules for the loki dashboards.
+# Generated from tools/specs/loki/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: loki.rules
+  rules:
+  - alert: LokiPushesRateLimited
+    expr: sum(rate(loki_request_duration_seconds_count{status_code="429"}[5m])) > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Loki is rate-limiting pushes (>1 429/s)
+      description: Rate-limited pushes mean clients are losing logs because they exceed the configured
+        ingest limits.
+      runbook: Raise the tenant's ingestion_rate_mb / burst limits if justified, or have the client reduce
+        its log volume.
+      dashboard: dashboards/loki/ingestion.json
+  - alert: LokiStreamCardinalityHigh
+    expr: sum(loki_ingester_memory_streams) > 500000
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Loki ingesters above 500k in-memory streams
+      description: High stream cardinality drives ingester memory toward an OOM kill that drops in-flight
+        logs.
+      runbook: Strip the dynamic label in pipeline_stages, enforce per-tenant max_streams, and scale ingesters
+        if the growth is real.
+      dashboard: dashboards/loki/ingestion.json
+  - alert: LokiChunkFlushStalled
+    expr: sum(rate(loki_ingester_chunks_flushed_total[10m])) == 0 and sum(loki_ingester_memory_chunks)
+      > 0
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Loki chunk flushing has stalled
+      description: If chunks stop flushing while memory chunks remain, data is trapped in memory and will
+        be lost if an ingester restarts.
+      runbook: Restore storage access; if an ingester is wedged, flush on shutdown (graceful) before replacing
+        it.
+      dashboard: dashboards/loki/ingestion.json
+  - alert: LokiHighErrorRatio
+    expr: 100 * sum(rate(loki_request_duration_seconds_count{status_code=~"5.."}[5m])) / clamp_min(sum(rate(loki_request_duration_seconds_count[5m])),
+      1) > 5
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Loki cluster 5xx ratio above 5%
+      description: A high server-error ratio means log pushes are rejected or queries fail, so you lose
+        logs or visibility during an incident.
+      runbook: Scale the failing tier (ingesters for writes, queriers for reads); check object storage
+        availability and rate limits.
+      dashboard: dashboards/loki/overview.json
+  - alert: LokiStreamCardinalityHigh
+    expr: sum(loki_ingester_memory_streams) > 500000
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Loki ingesters above 500k in-memory streams
+      description: Excess streams come from high-cardinality labels and drive ingester memory straight
+        toward an OOM kill.
+      runbook: Remove the offending label in the client/pipeline, enforce per-tenant stream limits, and
+        scale ingesters if legitimate.
+      dashboard: dashboards/loki/overview.json
+  - alert: LokiRequestLatencyHigh
+    expr: histogram_quantile(0.99, sum by (le, route) (rate(loki_request_duration_seconds_bucket[5m])))
+      > 2
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Loki route {{ $labels.route }} p99 latency above 2s
+      description: Slow requests stall log shipping or break log queries during the incidents you most
+        need them.
+      runbook: Scale the component, enable query result caching for read routes, or split heavy queries.
+      dashboard: dashboards/loki/overview.json

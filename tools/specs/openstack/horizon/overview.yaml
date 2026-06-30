@@ -1,0 +1,222 @@
+title: OpenStack / Horizon — Dashboard Service
+description: >-
+  Availability and responsiveness of the Horizon web dashboard: is the endpoint up
+  (blackbox probe), what HTTP status is it returning, how long do probes take, and
+  how busy is the Apache/WSGI process serving it. Answers "is the OpenStack UI up
+  and responsive for operators and tenants?" using honest, exporter-backed signals.
+datasource: prometheus
+tags: [openstack, horizon, dashboard, blackbox, apache]
+seo_phrase: OpenStack Horizon Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is the Horizon endpoint up (probe succeeding) right now?"
+  - "What HTTP status code is Horizon returning (200 vs 5xx/302-to-login)?"
+  - "How long is a page probe taking (is the UI slow)?"
+  - "How busy is the Apache/WSGI process behind Horizon (workers, request rate)?"
+
+production_lessons: >-
+  Horizon has no native Prometheus exporter, so the honest way to monitor it is from
+  the outside in: a blackbox probe of the login URL tells you what a user actually
+  experiences — up/down, status code and full request latency — without pretending
+  to see internals the service does not expose. Where the Apache exporter is
+  available on the Horizon host, it adds the supply side: busy workers and request
+  rate, which is what saturates first when a tenant leaves a heavy dashboard open or
+  a crawler hits the UI. Keeping these two honest signals side by side is enough to
+  tell "Horizon is down" from "Horizon is slow under load".
+
+data_sources:
+  - "`blackbox_exporter` probing the Horizon login URL (`probe_success`,
+    `probe_http_status_code`, `probe_http_duration_seconds`, `probe_duration_seconds`).
+    The `instance` label is the probed target URL."
+  - "Optional: `apache_exporter` on the Horizon host (`apache_up`,
+    `apache_accesses_total`, `apache_workers`) for server-side load. If you run
+    Horizon under nginx/uwsgi instead, swap these for the equivalent exporter and
+    note it here. Panels degrade gracefully to the probe signals if Apache metrics
+    are absent."
+
+templating:
+  - name: job
+    label: Probe job
+    query: label_values(probe_success, job)
+    description: Prometheus blackbox job probing Horizon.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Target
+    query: label_values(probe_success{job="$job"}, instance)
+    description: Probed Horizon URL(s); supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Availability — read these first
+    panels:
+      - type: stat
+        title: Horizon up
+        description: 1 when the blackbox probe of Horizon succeeded on the last scrape. This is the user-facing up/down.
+        unit: short
+        decimals: 0
+        colorMode: background
+        mappings:
+          - type: value
+            options:
+              "0": {text: DOWN}
+              "1": {text: UP}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: min(probe_success{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: up
+      - type: stat
+        title: HTTP status code
+        description: Status code returned by the probe. 200 is healthy; 5xx is an error, and a redirect to login (302) is expected for an unauthenticated probe.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 200}
+          - {color: yellow, value: 300}
+          - {color: red, value: 500}
+        targets:
+          - expr: max(probe_http_status_code{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: status
+      - type: gauge
+        title: Probe duration
+        description: Total time for the probe (DNS, connect, TLS, response). The slowest selected target — the user-perceived page latency.
+        unit: s
+        min: 0
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: max(probe_duration_seconds{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: duration
+      - type: stat
+        title: Targets down
+        description: Number of probed Horizon endpoints currently failing. Non-zero is a UI outage for at least one site.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(probe_success{job="$job", instance=~"$instance"} == 0) or vector(0)
+            instant: true
+            legend: down
+
+  - title: Reachability & latency
+    panels:
+      - type: state-timeline
+        title: Probe success per target
+        description: Up/down history of each Horizon endpoint as seen by the probe — pinpoint when the UI went down.
+        unit: short
+        legend: hidden
+        mappings:
+          - type: value
+            options:
+              "0": {text: DOWN, color: red}
+              "1": {text: UP, color: green}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: probe_success{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Probe latency
+        description: HTTP response time over time per target. A climbing line is Horizon getting slow before it goes down.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: probe_http_duration_seconds{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+
+  - title: Server-side load (Apache/WSGI)
+    panels:
+      - type: timeseries
+        title: Request rate
+        description: Requests per second served by the Apache/WSGI process behind Horizon (if the Apache exporter is present).
+        unit: reqps
+        min: 0
+        legend: table
+        fillOpacity: 20
+        targets:
+          - expr: sum(rate(apache_accesses_total{job=~".*apache.*"}[5m])) or vector(0)
+            legend: requests/s
+      - type: timeseries
+        title: Busy workers
+        description: Apache busy workers behind Horizon. Approaching MaxRequestWorkers means the UI queues requests and feels slow.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(apache_workers{job=~".*apache.*", state="busy"}) or vector(0)
+            legend: busy
+          - expr: sum(apache_workers{job=~".*apache.*", state="idle"}) or vector(0)
+            legend: idle
+
+alerts:
+  - name: HorizonDown
+    severity: critical
+    expr: probe_success == 0
+    for: 2m
+    summary: "Horizon dashboard probe failing for {{ $labels.instance }}"
+    why: A failing probe means operators and tenants cannot reach the OpenStack web UI — self-service and operator visibility are down even if the APIs still work.
+    investigate: "Open OpenStack / Horizon — Dashboard Service, check the probe status code and per-target timeline; then check the Apache/WSGI process and the Horizon host."
+    runbook: "Restart the Horizon Apache/WSGI service, confirm it can reach Keystone, and check TLS certificate validity and the host's disk/memory."
+    recovery: Clears when the probe succeeds again for 1m.
+    false_positives: A probe misconfiguration (wrong URL, expected-code mismatch) reports down without a real outage — validate the probe target and expected status.
+  - name: HorizonHTTPError
+    severity: warning
+    expr: probe_http_status_code >= 500
+    for: 5m
+    summary: "Horizon returning HTTP {{ $value }} for {{ $labels.instance }}"
+    why: A 5xx from the dashboard means the web tier is erroring — usually Horizon cannot reach Keystone or a backing API, so the UI loads but actions fail.
+    investigate: "Check the Horizon Apache/WSGI error log and whether Keystone and the other OpenStack APIs are healthy on their dashboards."
+    runbook: "Fix the failing dependency (Keystone/session backend/memcached), then reload the Horizon service."
+    recovery: Clears when the probe sees a non-5xx status for several minutes.
+    false_positives: A brief 5xx during a Horizon restart/redeploy; the 5m window filters short blips.
+  - name: HorizonSlow
+    severity: warning
+    expr: probe_http_duration_seconds > 3
+    for: 10m
+    summary: "Horizon HTTP response time above 3s for {{ $labels.instance }}"
+    why: A slow dashboard frustrates operators during incidents and tenants during normal use; sustained slowness usually means worker saturation or a slow Keystone/session backend.
+    investigate: "Compare probe latency with Apache busy workers and Keystone health; a saturated worker pool or slow auth backend is the usual cause."
+    runbook: "Raise Apache `MaxRequestWorkers`/WSGI processes if workers are saturated, or fix the slow backend (memcached/session store, Keystone)."
+    recovery: Clears when response time falls back under 3s.
+    false_positives: A one-off slow probe over a congested network path; the 10m window filters single spikes.
+
+troubleshooting:
+  - symptom: All availability panels show "No data"
+    cause: No blackbox probe is configured for Horizon, or the probe job/target labels differ.
+    action: "Add a blackbox `http_2xx`/`http_3xx` module probing the Horizon login URL and set `$job`/`$instance` to match; confirm `probe_success` in Explore."
+  - symptom: Status code is 302 and flagged yellow but Horizon is fine
+    cause: An unauthenticated probe is redirected to the login page (302), which is normal.
+    action: Use a blackbox module whose `valid_status_codes` includes 302, or probe an endpoint that returns 200.
+  - symptom: Server-side panels are empty
+    cause: No Apache exporter on the Horizon host, or it uses a different job-name pattern.
+    action: Deploy apache_exporter (or your web server's exporter) and adjust the `job=~".*apache.*"` selector; the probe panels work without it.
+
+performance: >-
+  Probe and Apache series are tiny, so this dashboard is very cheap at 30s refresh.
+  Rates use a 5m window. The Apache panels use a permissive `job=~".*apache.*"`
+  selector so they light up wherever the exporter runs; tighten it to your real job
+  name to avoid blending unrelated Apache instances.
+
+customization: >-
+  Point the blackbox module at the exact Horizon URL and expected status codes for
+  your deployment, and tune the latency thresholds to your UX target. If Horizon
+  runs under nginx/uwsgi, replace the Apache panels with the matching exporter's
+  request-rate and worker metrics. Add a second probe for the TLS certificate
+  expiry (`probe_ssl_earliest_cert_expiry`) to catch cert lapses early.

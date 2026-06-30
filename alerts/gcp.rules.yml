@@ -1,0 +1,81 @@
+# Alerting rules for the gcp dashboards.
+# Generated from tools/specs/gcp/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: gcp.rules
+  rules:
+  - alert: GceInstanceHighCPU
+    expr: stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization > 0.9
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: GCE instance {{ $labels.instance_name }} CPU >90%
+      description: A pinned instance drops or delays work even when the fleet average looks healthy —
+        autoscaling on the mean misses it.
+      runbook: Scale the managed instance group out, raise the autoscaler target lower, or move to a larger
+        machine type.
+      dashboard: dashboards/gcp/compute.json
+  - alert: GceFleetCPUSaturated
+    expr: avg(stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization) by (zone) > 0.85
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: GCE fleet in {{ $labels.zone }} averaging >85% CPU
+      description: When the whole zone's average is high there is no headroom to absorb a failure or a
+        traffic spike.
+      runbook: Add capacity to the managed instance groups in the zone, or shift load to another zone/region.
+      dashboard: dashboards/gcp/compute.json
+  - alert: GceMetricsMissing
+    expr: absent(stackdriver_gce_instance_compute_googleapis_com_instance_cpu_utilization)
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: No GCE CPU metrics from Cloud Monitoring
+      description: Missing metrics mean the exporter, its service-account credentials, or the Cloud Monitoring
+        API is broken — you are blind to the fleet.
+      runbook: Restart the exporter, rotate/repair the service-account key, and confirm the Monitoring
+        API quota isn't exhausted.
+      dashboard: dashboards/gcp/compute.json
+  - alert: GkeNamespaceHighCPU
+    expr: sum by (cluster_name, namespace_name) (rate(stackdriver_k8s_container_kubernetes_io_container_cpu_core_usage_time[5m]))
+      > 8
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: GKE namespace {{ $labels.namespace_name }} using >8 CPU cores
+      description: A namespace consuming an outsized share of cluster CPU can starve other workloads and
+        force the node pool to scale (cost) or fail to schedule pods.
+      runbook: Set/lower CPU limits on the offending workload, fix the hot code path, or give the namespace
+        its own node pool and quota.
+      dashboard: dashboards/gcp/gke.json
+  - alert: GkeContainerHighMemory
+    expr: sum by (cluster_name, namespace_name, container_name) (stackdriver_k8s_container_kubernetes_io_container_memory_used_bytes)
+      > 2147483648
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: GKE container {{ $labels.container_name }} using >2GiB memory
+      description: A container near or above its memory limit gets OOMKilled and restarts, dropping in-flight
+        work; unbounded growth signals a leak.
+      runbook: Raise the memory limit if it is legitimately sized, or fix the leak; add a limit if the
+        container has none.
+      dashboard: dashboards/gcp/gke.json
+  - alert: GkeNodeCPUSaturated
+    expr: sum by (cluster_name, node_name) (rate(stackdriver_k8s_node_kubernetes_io_node_cpu_core_usage_time[5m]))
+      > 8
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: GKE node {{ $labels.node_name }} using >8 CPU cores
+      description: A saturated node can't accept new pods and throttles the ones it has — the scheduler
+        then fails placements cluster-wide.
+      runbook: Enable/expand the cluster autoscaler, spread workloads with anti-affinity, or move to larger
+        machine types.
+      dashboard: dashboards/gcp/gke.json

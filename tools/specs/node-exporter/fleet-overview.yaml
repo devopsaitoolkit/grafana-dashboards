@@ -1,0 +1,266 @@
+title: Node Exporter / Fleet Overview
+description: >-
+  Single-pane health of an entire Linux fleet scraped by node_exporter: who is up,
+  who is down, and the worst CPU, memory and disk pressure anywhere in the fleet —
+  so on-call can triage hundreds of hosts in one glance instead of opening per-host
+  dashboards one by one.
+datasource: prometheus
+tags: [linux, fleet, node-exporter, overview, capacity]
+seo_phrase: Node Exporter fleet overview Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are any hosts down (failing scrape) right now?"
+  - "What is the worst CPU, memory and disk pressure anywhere in the fleet?"
+  - "Which hosts are the top network talkers?"
+  - "Which hosts rebooted recently or have suspicious uptime?"
+
+production_lessons: >-
+  A fleet dashboard's job is to answer "is anything on fire?" in five seconds, not to
+  draw every metric. The two numbers that matter first are **hosts down** (a missing
+  scrape is worse than any busy host) and the **single worst resource** across the
+  fleet — one box at 98% disk will page you long before the fleet average moves. We
+  lead with those, then rank hosts so the outlier is obvious, and keep a boot-time
+  table because an unexplained uptime reset is often the real root cause of the
+  incident you were called about.
+
+data_sources:
+  - "`node_exporter` on every host (the `up`, `node_cpu_seconds_total`,
+    `node_memory_*`, `node_filesystem_*`, `node_network_*` and `node_boot_time_seconds`
+    series). The `up` metric is synthesised by Prometheus per scrape target."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job that collects your node_exporter targets.
+    multi: false
+    includeAll: false
+
+rows:
+  - title: Fleet health — read these first
+    panels:
+      - type: stat
+        title: Hosts up
+        description: Targets in this job whose last scrape succeeded.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: count(up{job="$job"} == 1) or vector(0)
+            instant: true
+            legend: up
+      - type: stat
+        title: Hosts down
+        description: Targets failing to scrape — investigate before anything else.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(up{job="$job"} == 0) or vector(0)
+            instant: true
+            legend: down
+      - type: gauge
+        title: Worst host CPU busy
+        description: Highest non-idle CPU utilisation across the fleet.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              max(100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job="$job", mode="idle"}[5m])))) or vector(0)
+            instant: true
+            legend: worst-cpu
+      - type: gauge
+        title: Worst host memory used
+        description: Highest memory utilisation across the fleet (used / total).
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              max(100 * (1 - node_memory_MemAvailable_bytes{job="$job"} / node_memory_MemTotal_bytes{job="$job"})) or vector(0)
+            instant: true
+            legend: worst-mem
+      - type: gauge
+        title: Worst filesystem used
+        description: Fullest real filesystem anywhere in the fleet (pseudo FS excluded).
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              max(100 * (1 - node_filesystem_avail_bytes{job="$job", fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}
+              / node_filesystem_size_bytes{job="$job", fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"})) or vector(0)
+            instant: true
+            legend: worst-fs
+
+  - title: Worst offenders — who to open next
+    panels:
+      - type: bargauge
+        title: CPU busy by host (top 10)
+        description: Non-idle CPU per host, ranked. The outlier is your first click.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              topk(10, 100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job="$job", mode="idle"}[5m]))))
+            instant: true
+            legend: "{{instance}}"
+      - type: bargauge
+        title: Memory used by host (top 10)
+        description: Memory utilisation per host, ranked highest first.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              topk(10, 100 * (1 - node_memory_MemAvailable_bytes{job="$job"} / node_memory_MemTotal_bytes{job="$job"}))
+            instant: true
+            legend: "{{instance}}"
+      - type: bargauge
+        title: Fullest filesystem by host (top 10)
+        description: Worst mount per host, ranked — catches the disk that pages you.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              topk(10, max by (instance) (100 * (1 - node_filesystem_avail_bytes{job="$job", fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}
+              / node_filesystem_size_bytes{job="$job", fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"})))
+            instant: true
+            legend: "{{instance}}"
+
+  - title: Network top talkers
+    panels:
+      - type: timeseries
+        title: Receive throughput by host (top 5)
+        description: Inbound bandwidth per host, physical interfaces only.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              topk(5, sum by (instance) (rate(node_network_receive_bytes_total{job="$job", device!~"lo|veth.*|docker.*|br-.*"}[5m])))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Transmit throughput by host (top 5)
+        description: Outbound bandwidth per host, physical interfaces only.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              topk(5, sum by (instance) (rate(node_network_transmit_bytes_total{job="$job", device!~"lo|veth.*|docker.*|br-.*"}[5m])))
+            legend: "{{instance}}"
+
+  - title: Inventory & uptime
+    panels:
+      - type: table
+        title: Hosts — uptime, load and reachability
+        description: Per-host roster. Sort by uptime to spot a host that just rebooted.
+        unit: dtdurations
+        filterable: true
+        targets:
+          - expr: time() - node_boot_time_seconds{job="$job"}
+            instant: true
+            format: table
+            legend: "{{instance}}"
+          - expr: node_load1{job="$job"}
+            instant: true
+            format: table
+            legend: "{{instance}}"
+          - expr: up{job="$job"}
+            instant: true
+            format: table
+            legend: "{{instance}}"
+
+alerts:
+  - name: FleetHostDown
+    severity: critical
+    expr: up{job=~".*node.*"} == 0
+    for: 3m
+    summary: "Host {{ $labels.instance }} is down (scrape failing)"
+    why: A node_exporter that stops responding usually means the host is down, the network is partitioned, or the exporter crashed — and you are now blind to that host.
+    investigate: "Open Node Exporter / Fleet Overview, find the host in the inventory table, then ping/SSH it and check the node_exporter service."
+    runbook: "Restart node_exporter (systemctl restart node_exporter); if the host is unreachable, escalate to the infra on-call to power-cycle or replace it."
+    recovery: Clears as soon as a scrape succeeds again.
+    false_positives: Planned maintenance and reboots — silence the instance for the maintenance window. Tighten the job regex to match only node_exporter jobs.
+  - name: FleetFilesystemAlmostFull
+    severity: warning
+    expr: >-
+      100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}
+      / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}) > 90
+    for: 10m
+    summary: "{{ $labels.instance }} {{ $labels.mountpoint }} is {{ printf \"%.0f\" $value }}% full"
+    why: A full root or data filesystem causes writes to fail, which corrupts databases and crashes services with no warning.
+    investigate: "Scope the fleet board to the host, then find the largest directories (du -xh / | sort -h)."
+    runbook: "Clear logs/old artefacts, rotate journald, or grow the volume. For containers, prune images (docker system prune)."
+    recovery: Clears when free space rises above 10% for 5m.
+    false_positives: Hosts that intentionally run filesystems near full (caches) — exclude their mountpoints.
+  - name: FleetHostMemoryExhausted
+    severity: warning
+    expr: 100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 92
+    for: 10m
+    summary: "{{ $labels.instance }} memory {{ printf \"%.0f\" $value }}% used"
+    why: Low available memory pushes the host into swap or triggers the OOM killer, which terminates processes unpredictably.
+    investigate: "Identify the top RSS consumers on the host; check for a leak versus legitimate growth."
+    runbook: "Restart or cap the offending process, add memory, or move workloads off the host."
+    recovery: Clears when available memory recovers for 5m.
+    false_positives: Hosts using most RAM as page cache report high "used" but reclaim on demand — MemAvailable already accounts for this, so a sustained breach is real.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: The `$job` value does not match your node_exporter scrape job.
+    action: "Run `up{job=\"$job\"}` in Explore and confirm the job label in your scrape config."
+  - symptom: Worst filesystem stuck near 100%
+    cause: A read-only or pseudo filesystem (snap, overlay) is being counted.
+    action: Extend the `fstype!~` exclusion list to drop the offending filesystem type.
+  - symptom: Hosts up count looks too high
+    cause: The job also scrapes non-node targets that export `up`.
+    action: Use a job name that selects only node_exporter, or add a metric guard to the count.
+
+performance: >-
+  Every panel aggregates with `max`/`topk` or `by (instance)` so series count stays
+  near one per host regardless of fleet size. Rates use a 5m window (≥4× a 15s
+  scrape). Above ~1000 hosts, back the per-host CPU and memory panels with recording
+  rules so the single-stat reductions don't re-evaluate raw counters on every refresh.
+
+customization: >-
+  Tune the 80/95 CPU and 85/95 disk thresholds to your SLOs. Add a `region`/`role`
+  template variable and selector to split the fleet into tiers. Swap `topk(10)` for a
+  larger N on big fleets, or pin the network panels to specific interface names.

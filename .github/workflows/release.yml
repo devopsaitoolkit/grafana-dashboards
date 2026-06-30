@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet pyyaml jsonschema
+      - name: Build & validate
+        run: |
+          python -m tools.dashgen.build
+          python -m tools.dashgen.validate
+          python tools/dashgen/schema_check.py
+      - name: Package dashboards, alerts and rules
+        run: |
+          mkdir -p dist
+          tar -czf dist/grafana-dashboards-${GITHUB_REF_NAME:-dev}.tar.gz \
+            dashboards alerts recording-rules datasources docs/catalog.md assets/catalog.json
+          (cd dashboards && zip -qr ../dist/grafana-dashboards-${GITHUB_REF_NAME:-dev}.zip .)
+          ls -la dist
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            Production-ready Grafana dashboards, alert rules and recording rules.
+
+            - Import any JSON from `dashboards/` via *Dashboards → Import* and pick your datasource.
+            - Or use file-based provisioning — see `docs/provisioning.md`.
+            - Alert rules: `alerts/`. Recording rules: `recording-rules/`.
+
+            See the [dashboard catalog](docs/catalog.md) for the full list.

@@ -1,0 +1,257 @@
+# Azure VM health from Azure Monitor via azure_metrics_exporter.
+title: Azure / Virtual Machines
+description: >-
+  CPU, available memory, network throughput, disk IO and OS-disk queue depth for
+  Azure VMs exported from Azure Monitor. Answers "which VMs are CPU-bound, low on
+  memory, or bottlenecked on disk?" rather than just charting percentage CPU.
+datasource: prometheus
+tags: [azure, vm, azure-monitor, cloud, capacity]
+seo_phrase: Azure virtual machines Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "Which VMs are running hottest on CPU right now?"
+  - "How many VMs are low on available memory?"
+  - "Is any VM's OS disk queue backing up (IO bottleneck)?"
+  - "Which VMs are driving the most disk and network traffic?"
+  - "Is a noisy VM consuming a resource group's headroom?"
+
+production_lessons: >-
+  Azure Monitor exposes **available memory** rather than used memory, which trips
+  people up: the signal you watch is available bytes falling toward zero, not a
+  percentage climbing. The other quietly fatal metric is **OS disk queue depth** —
+  a sustained queue above ~2 means the VM is IO-bound and every request waits on
+  disk, even while CPU looks idle. This dashboard leads with CPU and low-memory VM
+  count, then surfaces disk queue depth so you can tell a compute problem from a
+  storage problem before users feel it. Azure Monitor data lags 1–3 minutes, so
+  alert windows are generous.
+
+data_sources:
+  - "`azure_metrics_exporter` scraping `Microsoft.Compute/virtualMachines`
+    (`azure_vm_percentage_cpu_average`, `azure_vm_available_memory_bytes_average`,
+    `azure_vm_network_in_total_total`, `azure_vm_network_out_total_total`,
+    `azure_vm_disk_read_bytes_average`, `azure_vm_disk_write_bytes_average`,
+    `azure_vm_os_disk_queue_depth_average`)."
+  - "**Naming assumption:** the exporter labels series with `resourceGroup` and
+    `resourceName` (the VM name) plus `subscriptionID`. Available memory requires
+    the Azure diagnostics/guest metrics extension — without it
+    `azure_vm_available_memory_bytes_average` is absent. Network `_total_total`
+    values are bytes per Azure Monitor interval."
+
+templating:
+  - name: resourceGroup
+    label: Resource group
+    query: label_values(azure_vm_percentage_cpu_average, resourceGroup)
+    description: Azure resource group(s) to display.
+    multi: true
+    includeAll: true
+  - name: resourceName
+    label: VM
+    query: label_values(azure_vm_percentage_cpu_average{resourceGroup=~"$resourceGroup"}, resourceName)
+    description: Azure VM(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: VM health — read these first
+    panels:
+      - type: stat
+        title: Busiest VM CPU
+        description: Highest CPU percentage across the selected VMs.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: max(azure_vm_percentage_cpu_average{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"}) or vector(0)
+            instant: true
+            legend: max cpu
+      - type: stat
+        title: Low-memory VMs
+        description: Count of VMs with less than 1 GiB available memory — candidates for swap and OOM.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 3}
+        targets:
+          - expr: count(azure_vm_available_memory_bytes_average{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"} < 1073741824) or vector(0)
+            instant: true
+            legend: low mem
+      - type: stat
+        title: VMs over 80% CPU
+        description: Count of VMs above 80% CPU right now.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: count(azure_vm_percentage_cpu_average{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"} > 80) or vector(0)
+            instant: true
+            legend: hot
+      - type: stat
+        title: Deepest OS disk queue
+        description: Highest OS-disk queue depth across the selection. Sustained values above 2 mean IO is the bottleneck.
+        unit: short
+        decimals: 1
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 2}
+          - {color: red, value: 4}
+        targets:
+          - expr: max(azure_vm_os_disk_queue_depth_average{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"}) or vector(0)
+            instant: true
+            legend: max queue
+
+  - title: CPU & memory
+    panels:
+      - type: bargauge
+        title: Top 10 VMs by CPU
+        description: The hottest VMs right now — your scaling and right-sizing candidates.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: topk(10, azure_vm_percentage_cpu_average{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"})
+            instant: true
+            legend: "{{resourceName}}"
+      - type: timeseries
+        title: Available memory per VM
+        description: Available bytes per VM. Azure reports available, not used — watch this fall toward zero.
+        unit: bytes
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1073741824}
+        targets:
+          - expr: azure_vm_available_memory_bytes_average{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"}
+            legend: "{{resourceName}}"
+
+  - title: Disk IO
+    panels:
+      - type: timeseries
+        title: Disk read/write bytes
+        description: Disk read and write throughput summed across the selection.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(azure_vm_disk_read_bytes_average{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"})
+            legend: read
+          - expr: sum(azure_vm_disk_write_bytes_average{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"})
+            legend: write
+      - type: timeseries
+        title: OS disk queue depth per VM
+        description: Per-VM queue depth. A line that stays above 2 is a VM waiting on its disk — resize or switch to premium SSD.
+        unit: short
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 2}
+        targets:
+          - expr: azure_vm_os_disk_queue_depth_average{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"}
+            legend: "{{resourceName}}"
+
+  - title: Network & per-VM CPU
+    panels:
+      - type: timeseries
+        title: Network in/out
+        description: Bytes in and out per Azure Monitor interval, summed across the selection.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(azure_vm_network_in_total_total{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"})
+            legend: in
+          - expr: sum(azure_vm_network_out_total_total{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"})
+            legend: out
+      - type: timeseries
+        title: CPU per VM
+        description: Per-VM CPU over time — find the noisy VM behind a resource group's pressure.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: azure_vm_percentage_cpu_average{resourceGroup=~"$resourceGroup", resourceName=~"$resourceName"}
+            legend: "{{resourceName}}"
+
+alerts:
+  - name: AzureVMHighCPU
+    severity: warning
+    expr: azure_vm_percentage_cpu_average > 90
+    for: 15m
+    summary: "Azure VM {{ $labels.resourceName }} CPU >90%"
+    why: Sustained high CPU means the VM size is too small for its load and work will start queuing.
+    investigate: "Open Azure / Virtual Machines; confirm it is steady-state, not a burst, and review the VM SKU and any scale-set policy."
+    runbook: "Resize the VM to a larger SKU, add instances to the scale set, or move workload off the VM."
+    recovery: Clears when CPU falls below 90% for 10m.
+    false_positives: Batch VMs meant to run pinned — scope the rule by resource group or VM name.
+  - name: AzureVMLowMemory
+    severity: warning
+    expr: azure_vm_available_memory_bytes_average < 536870912
+    for: 10m
+    summary: "Azure VM {{ $labels.resourceName }} available memory <512MiB"
+    why: Low available memory pushes the guest into swap and risks the OOM killer terminating the workload.
+    investigate: "Identify the memory-hungry process in the guest; check whether it is a leak or genuine demand."
+    runbook: "Resize to a memory-optimised SKU, fix the leaking process, or add swap as a stopgap while you scale."
+    recovery: Clears when available memory rises above 512MiB for 10m.
+    false_positives: Caching workloads that intentionally hold memory — exclude them by resource name.
+  - name: AzureVMDiskQueueHigh
+    severity: warning
+    expr: azure_vm_os_disk_queue_depth_average > 2
+    for: 10m
+    summary: "Azure VM {{ $labels.resourceName }} OS disk queue >2"
+    why: A persistently deep disk queue means the VM is IO-bound; requests wait on storage even though CPU looks fine — a commonly missed bottleneck.
+    investigate: "Correlate with the disk read/write panels; check the disk SKU (Standard HDD/SSD vs Premium) and the VM's IOPS cap."
+    runbook: "Upgrade to Premium SSD/Ultra Disk, increase the disk size for more IOPS, or spread IO across multiple data disks."
+    recovery: Clears when the queue depth falls below 2 for 10m.
+    false_positives: Short bursts during backups or large writes — the 10m `for` filters transients.
+
+troubleshooting:
+  - symptom: Memory panels "No data"
+    cause: The guest/diagnostics metrics extension isn't installed, so Available Memory Bytes isn't published.
+    action: Install the Azure Monitor agent or diagnostics extension on the VMs and enable guest metrics.
+  - symptom: Labels don't match the queries
+    cause: Your exporter uses different label casing (e.g. `resource_group`).
+    action: Check the actual labels in Explore and update the template variables and selectors.
+  - symptom: Network values look like totals, not rates
+    cause: The `_total_total` metric is bytes per Azure Monitor interval, not per second.
+    action: Divide by the interval length for a true bytes/sec and switch the unit to `Bps`.
+
+performance: >-
+  Azure Monitor metrics are 1-minute granularity and lag 1–3 minutes, so a 1m
+  refresh matches the data and avoids extra API cost. Top-N and counts bound the
+  series; per-VM panels are scoped by resource group. Limit the scraped metric and
+  resource set in the exporter config to control Azure Monitor API throttling on
+  large subscriptions.
+
+customization: >-
+  Tune the 1 GiB / 512 MiB memory thresholds to your VM sizes, and the disk-queue
+  threshold to your disk SKU's expected depth. Scope `$resourceGroup` to separate
+  environments, and add a `subscriptionID` variable if you scrape multiple
+  subscriptions through one exporter.

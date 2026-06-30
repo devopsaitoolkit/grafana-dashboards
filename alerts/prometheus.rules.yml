@@ -1,0 +1,188 @@
+# Alerting rules for the prometheus dashboards.
+# Generated from tools/specs/prometheus/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: prometheus.rules
+  rules:
+  - alert: AlertmanagerNotificationsFailing
+    expr: rate(alertmanager_notifications_failed_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Alertmanager {{ $labels.instance }} failing {{ $labels.integration }} notifications
+      description: A failing integration means alerts are firing but the notification never reaches the
+        on-call — the worst kind of silent failure.
+      runbook: Fix the receiver config (token, URL, TLS); test with amtool; if a downstream provider is
+        down, fail over to a secondary receiver.
+      dashboard: dashboards/prometheus/alertmanager.json
+  - alert: AlertmanagerClusterDegraded
+    expr: alertmanager_cluster_members < 3
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Alertmanager cluster on {{ $labels.instance }} has fewer than 3 members
+      description: A shrunken gossip cluster risks duplicate or dropped notifications because peers can
+        no longer coordinate dedup.
+      runbook: Restore the missing replica(s); verify --cluster.peer addresses and that the gossip port
+        is open between nodes.
+      dashboard: dashboards/prometheus/alertmanager.json
+  - alert: AlertmanagerNotificationLatencyHigh
+    expr: histogram_quantile(0.99, sum by (le, integration) (rate(alertmanager_notification_latency_seconds_bucket[5m])))
+      > 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Alertmanager {{ $labels.integration }} notify p99 above 10s
+      description: Slow delivery delays human response and can cause Alertmanager to retry and duplicate
+        notifications.
+      runbook: Reduce notification volume via better grouping, or move to a faster/closer receiver endpoint.
+      dashboard: dashboards/prometheus/alertmanager.json
+  - alert: PrometheusRuleEvaluationsMissed
+    expr: increase(prometheus_rule_group_iterations_missed_total[5m]) > 0
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Prometheus {{ $labels.instance }} is missing rule-group iterations
+      description: Missed iterations mean alerting and recording rules are not evaluating on schedule,
+        so alerts can be silently late or stale.
+      runbook: Reduce per-group rule cost or split heavy groups; lower cardinality feeding the rules;
+        give the server more CPU/memory.
+      dashboard: dashboards/prometheus/overview.json
+  - alert: PrometheusHeadSeriesHigh
+    expr: sum by (instance, job) (prometheus_tsdb_head_series) > 5000000
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Prometheus {{ $labels.instance }} head series above 5M
+      description: Head cardinality drives memory; unbounded growth ends in an OOM kill that takes down
+        all monitoring.
+      runbook: Drop or aggregate the high-cardinality label via metric_relabel_configs; add a sample/label
+        limit to the noisy job.
+      dashboard: dashboards/prometheus/overview.json
+  - alert: PrometheusSelfScrapeDown
+    expr: up{job=~".*prometheus.*"} == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Prometheus {{ $labels.instance }} is not scraping itself
+      description: If Prometheus cannot scrape its own metrics, its self-health is invisible and the process
+        may be wedged.
+      runbook: Restart or replace the instance; confirm the scrape config still targets 127.0.0.1 on the
+        listen port.
+      dashboard: dashboards/prometheus/overview.json
+  - alert: RemoteWriteFailingSamples
+    expr: rate(prometheus_remote_storage_samples_failed_total[5m]) > 0
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Prometheus {{ $labels.instance }} dropping remote-write samples to {{ $labels.remote_name
+        }}
+      description: Failed samples are dropped permanently, leaving gaps in long-term storage that no retry
+        will fill.
+      runbook: Fix auth/TLS or the rejected-series cause (out-of-order, label limit); if the store is
+        overloaded, throttle send via queue_config.
+      dashboard: dashboards/prometheus/remote-write.json
+  - alert: RemoteWriteLagHigh
+    expr: prometheus_remote_storage_highest_timestamp_in_seconds - ignoring(remote_name, url) group_right
+      prometheus_remote_storage_queue_highest_sent_timestamp_seconds > 120
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Remote write to {{ $labels.remote_name }} is >2m behind
+      description: Lagging remote_write means recent data is missing from long-term storage, so dashboards
+        and alerts on that store are stale.
+      runbook: Raise max_shards / capacity in queue_config, or scale the remote store; reduce series volume
+        if the endpoint is saturated.
+      dashboard: dashboards/prometheus/remote-write.json
+  - alert: RemoteWriteBacklogGrowing
+    expr: prometheus_remote_storage_samples_pending > 1000000
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Remote-write backlog to {{ $labels.remote_name }} above 1M pending
+      description: A growing pending queue is backpressure that consumes memory and ends in dropped samples
+        if it cannot drain.
+      runbook: Increase shard capacity, improve remote-store throughput, or shed load by dropping low-value
+        series before send.
+      dashboard: dashboards/prometheus/remote-write.json
+  - alert: PrometheusTargetDown
+    expr: up == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Target {{ $labels.instance }} ({{ $labels.job }}) is down
+      description: A down target leaves a gap in every dashboard and alert that depends on it, and Prometheus
+        stays green while you go blind.
+      runbook: Restart the exporter / fix the endpoint or firewall; if the target is gone for good, remove
+        it from service discovery to stop the noise.
+      dashboard: dashboards/prometheus/scrape-targets.json
+  - alert: PrometheusScrapeSampleLimitExceeded
+    expr: increase(prometheus_target_scrapes_exceeded_sample_limit_total[10m]) > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Scrapes hitting the sample limit in job {{ $labels.job }}
+      description: Truncated scrapes drop series silently — the target looks healthy but its data is incomplete.
+      runbook: Reduce cardinality at the source or via metric_relabel_configs, or raise sample_limit deliberately
+        if the growth is legitimate.
+      dashboard: dashboards/prometheus/scrape-targets.json
+  - alert: PrometheusScrapeSlow
+    expr: scrape_duration_seconds > 5
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Scrape of {{ $labels.instance }} taking >5s
+      description: A scrape approaching the timeout will eventually fail outright and the target will
+        flap up/down.
+      runbook: Trim expensive collectors, raise scrape_timeout to match interval, or split the target's
+        metrics.
+      dashboard: dashboards/prometheus/scrape-targets.json
+  - alert: PrometheusWALCorruption
+    expr: increase(prometheus_tsdb_wal_corruptions_total[10m]) > 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: Prometheus {{ $labels.instance }} detected a WAL corruption
+      description: A corrupt write-ahead log risks losing the unflushed head block on the next restart
+        — silent data loss.
+      runbook: Snapshot the data dir; replace failing storage; if needed, let Prometheus truncate the
+        corrupt segment on restart and accept the gap.
+      dashboard: dashboards/prometheus/tsdb.json
+  - alert: PrometheusTSDBReloadFailing
+    expr: increase(prometheus_tsdb_reloads_failures_total[10m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Prometheus {{ $labels.instance }} TSDB reloads are failing
+      description: A failed reload means a recent config or block change did not take effect, so the server
+        may be running stale state.
+      runbook: Resolve the underlying disk/permission error and trigger a clean reload; validate the config
+        with promtool first.
+      dashboard: dashboards/prometheus/tsdb.json
+  - alert: PrometheusHeadCardinalityGrowing
+    expr: deriv(prometheus_tsdb_head_series[30m]) > 1000
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Prometheus {{ $labels.instance }} head series growing >1k/s
+      description: Sustained linear growth in active series is the classic cardinality bomb that ends
+        in an OOM kill.
+      runbook: Drop or aggregate the offending label via metric_relabel_configs; impose a sample limit
+        on the noisy scrape job.
+      dashboard: dashboards/prometheus/tsdb.json

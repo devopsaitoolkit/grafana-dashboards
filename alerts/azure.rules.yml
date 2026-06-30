@@ -1,0 +1,43 @@
+# Alerting rules for the azure dashboards.
+# Generated from tools/specs/azure/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: azure.rules
+  rules:
+  - alert: AzureVMHighCPU
+    expr: azure_vm_percentage_cpu_average > 90
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Azure VM {{ $labels.resourceName }} CPU >90%
+      description: Sustained high CPU means the VM size is too small for its load and work will start
+        queuing.
+      runbook: Resize the VM to a larger SKU, add instances to the scale set, or move workload off the
+        VM.
+      dashboard: dashboards/azure/virtual-machines.json
+  - alert: AzureVMLowMemory
+    expr: azure_vm_available_memory_bytes_average < 536870912
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Azure VM {{ $labels.resourceName }} available memory <512MiB
+      description: Low available memory pushes the guest into swap and risks the OOM killer terminating
+        the workload.
+      runbook: Resize to a memory-optimised SKU, fix the leaking process, or add swap as a stopgap while
+        you scale.
+      dashboard: dashboards/azure/virtual-machines.json
+  - alert: AzureVMDiskQueueHigh
+    expr: azure_vm_os_disk_queue_depth_average > 2
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Azure VM {{ $labels.resourceName }} OS disk queue >2
+      description: A persistently deep disk queue means the VM is IO-bound; requests wait on storage even
+        though CPU looks fine — a commonly missed bottleneck.
+      runbook: Upgrade to Premium SSD/Ultra Disk, increase the disk size for more IOPS, or spread IO across
+        multiple data disks.
+      dashboard: dashboards/azure/virtual-machines.json

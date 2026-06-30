@@ -1,0 +1,20 @@
+# Grafana datasource provisioning — Loki (logs).
+# Place at /etc/grafana/provisioning/datasources/loki.yaml
+# uid DS_LOKI matches the input the Loki-backed dashboards prompt for.
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    uid: DS_LOKI
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    jsonData:
+      maxLines: 1000
+      # Correlate logs -> traces (uncomment if Tempo is provisioned):
+      # derivedFields:
+      #   - name: trace_id
+      #     matcherRegex: 'traceID=(\w+)'
+      #     url: '$${__value.raw}'
+      #     datasourceUid: DS_TEMPO
+    editable: true

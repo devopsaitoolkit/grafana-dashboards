@@ -1,0 +1,247 @@
+# Redis keyspace and memory. Leads with memory pressure, the eviction rate and how
+# stale the last RDB save is — the three things that decide whether you are about to
+# lose cache contents or durability.
+uid: redis-keyspace-and-memory
+title: Redis / Keyspace & Memory
+description: >-
+  Keyspace and memory detail for Redis via redis_exporter: keys per database, keys with
+  a TTL, eviction and expiration rates, memory used against maxmemory, and the age of the
+  last RDB save. Answers "where is the memory going, is Redis evicting, and is my last
+  snapshot recent enough?".
+datasource: prometheus
+tags: [redis, cache, redis-exporter, memory]
+seo_phrase: Redis memory Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How close is memory used to maxmemory?"
+  - "Is Redis evicting keys under memory pressure?"
+  - "How old is the last successful RDB snapshot?"
+  - "How many keys are in each database, and how many have a TTL?"
+  - "Are keys expiring at the expected rate?"
+
+production_lessons: >-
+  Two slow-burn Redis failures hide in the keyspace. The first is **unbounded growth**:
+  keys written without a TTL accumulate until memory crosses maxmemory and evictions
+  begin — the ratio of keys-with-a-TTL to total keys is the early warning. The second is
+  **stale persistence**: if RDB saves stop (disk full, fork failure, save disabled) the
+  data looks fine in RAM but a restart loses everything since the last snapshot, so this
+  dashboard leads with the **age of the last save**. Evictions above zero are never
+  silent-safe — every evicted key is a downstream cache miss hitting your database.
+
+data_sources:
+  - "`redis_exporter` with keyspace stats (the `redis_db_keys`, `redis_db_keys_expiring`,
+    `redis_evicted_keys_total`, `redis_expired_keys_total`, `redis_memory_used_bytes`,
+    `redis_memory_max_bytes` and `redis_rdb_last_save_timestamp_seconds` series)."
+
+templating:
+  - name: instance
+    label: Instance
+    query: label_values(redis_up, instance)
+    description: Redis instance(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+  - name: db
+    label: Database
+    query: label_values(redis_db_keys{instance=~"$instance"}, db)
+    description: Redis logical database(s) for the per-db key panels.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Memory pressure — read these first
+    panels:
+      - type: gauge
+        title: Memory used vs maxmemory
+        description: Worst instance's memory as a percentage of maxmemory. Meaningless when maxmemory is 0 (unlimited).
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(
+                100 * redis_memory_used_bytes{instance=~"$instance"}
+                / clamp_min(redis_memory_max_bytes{instance=~"$instance"}, 1)
+              ) or vector(0)
+            instant: true
+            legend: memory %
+      - type: stat
+        title: Eviction rate
+        description: Keys evicted per second under memory pressure. Any sustained rate means you are over maxmemory.
+        unit: ops
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.001}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(rate(redis_evicted_keys_total{instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: evicted/s
+      - type: stat
+        title: Last RDB save age
+        description: Time since the last successful RDB snapshot. A growing value means persistence has stalled.
+        unit: s
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 3600}
+          - {color: red, value: 86400}
+        targets:
+          - expr: >-
+              max(
+                time() - redis_rdb_last_save_timestamp_seconds{instance=~"$instance"}
+              ) or vector(0)
+            instant: true
+            legend: save age
+      - type: stat
+        title: Total keys
+        description: Total keys across the selected instances and databases.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(redis_db_keys{instance=~"$instance", db=~"$db"}) or vector(0)
+            instant: true
+            legend: keys
+
+  - title: Keyspace
+    panels:
+      - type: bargauge
+        title: Keys per database
+        description: Key count in each logical database — find where the keyspace actually lives.
+        unit: short
+        orientation: horizontal
+        targets:
+          - expr: sum by (db) (redis_db_keys{instance=~"$instance", db=~"$db"})
+            instant: true
+            legend: "{{db}}"
+      - type: timeseries
+        title: Keys with a TTL
+        description: Keys carrying an expiry per database. A flat line while total keys grow means TTLs are missing.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (db) (redis_db_keys_expiring{instance=~"$instance", db=~"$db"})
+            legend: "{{db}}"
+      - type: timeseries
+        title: Total keys over time
+        description: Keyspace size trend. A monotonic climb without expirations is the unbounded-growth pattern.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (redis_db_keys{instance=~"$instance", db=~"$db"})
+            legend: "{{instance}}"
+
+  - title: Eviction and expiry
+    panels:
+      - type: timeseries
+        title: Evicted keys
+        description: Keys removed because Redis hit maxmemory. Each one is a downstream cache miss.
+        unit: ops
+        min: 0
+        drawStyle: bars
+        fillOpacity: 50
+        targets:
+          - expr: sum(rate(redis_evicted_keys_total{instance=~"$instance"}[5m]))
+            legend: evicted/s
+      - type: timeseries
+        title: Expired keys
+        description: Keys removed by TTL expiry. Healthy and expected — this is the keyspace self-pruning.
+        unit: ops
+        min: 0
+        targets:
+          - expr: sum(rate(redis_expired_keys_total{instance=~"$instance"}[5m]))
+            legend: expired/s
+
+  - title: Memory and persistence
+    panels:
+      - type: timeseries
+        title: Memory used vs maxmemory
+        description: Memory consumed against the configured ceiling per instance. The gap before eviction.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: redis_memory_used_bytes{instance=~"$instance"}
+            legend: "{{instance}} used"
+          - expr: redis_memory_max_bytes{instance=~"$instance"} > 0
+            legend: "{{instance}} max"
+      - type: timeseries
+        title: Time since last RDB save
+        description: Age of the most recent snapshot per instance. A staircase that keeps climbing means saves are failing.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 86400}
+        targets:
+          - expr: time() - redis_rdb_last_save_timestamp_seconds{instance=~"$instance"}
+            legend: "{{instance}}"
+
+alerts:
+  - name: RedisEvictingKeys
+    severity: warning
+    expr: sum by (instance) (rate(redis_evicted_keys_total[5m])) > 0
+    for: 5m
+    summary: "Redis {{ $labels.instance }} is evicting keys"
+    why: Evictions mean Redis is over maxmemory and discarding data; every evicted key becomes a database cache miss.
+    investigate: "Open Redis / Keyspace & Memory; check memory %, key growth and whether large keys lack a TTL."
+    runbook: "Raise maxmemory if RAM allows, add TTLs to unbounded keys, or shard the keyspace across instances."
+    recovery: Clears when evictions stop for 5m.
+    false_positives: An allkeys-lru cache is designed to evict; scope this to instances where eviction is not expected.
+  - name: RedisMemoryHigh
+    severity: warning
+    expr: >-
+      100 * redis_memory_used_bytes
+      / clamp_min(redis_memory_max_bytes, 1) > 90
+    for: 5m
+    summary: "Redis {{ $labels.instance }} memory above 90% of maxmemory"
+    why: Approaching maxmemory means eviction or write rejection is imminent depending on the policy.
+    investigate: "Check key growth, the largest keys and missing TTLs in Redis / Keyspace & Memory."
+    runbook: "Increase maxmemory, expire or trim large keys, or move cold data out of Redis."
+    recovery: Clears when memory falls below 90% of maxmemory for 5m.
+    false_positives: Instances with maxmemory=0 (unlimited); scope the rule to instances with a configured limit.
+  - name: RedisRDBSaveStale
+    severity: warning
+    expr: time() - redis_rdb_last_save_timestamp_seconds > 86400
+    for: 10m
+    summary: "Redis {{ $labels.instance }} has not saved an RDB snapshot in 24h"
+    why: A stalled RDB save means a restart would lose everything since the last snapshot — silent durability loss.
+    investigate: "Check the Redis log for bgsave/fork errors, disk space, and whether save points are configured."
+    runbook: "Free disk space, fix fork/copy-on-write memory limits, or trigger BGSAVE and confirm it completes."
+    recovery: Clears once a successful save updates the timestamp within 24h.
+    false_positives: Instances using AOF-only persistence or with saving disabled by design — scope the rule accordingly.
+
+troubleshooting:
+  - symptom: Last-save age is enormous or negative
+    cause: redis_rdb_last_save_timestamp_seconds is missing or the host clock is skewed.
+    action: Confirm the metric exists and that Prometheus and the Redis host agree on time.
+  - symptom: Keys-per-database panel is empty
+    cause: All databases are empty, or the keyspace section is not exported.
+    action: Confirm `redis_db_keys` exists and at least one db holds keys.
+  - symptom: Memory percentage looks wrong
+    cause: maxmemory is 0 (unlimited), so the ratio is undefined.
+    action: Use the absolute memory panel against host RAM, or configure maxmemory.
+
+performance: >-
+  Counter panels use a 5m rate window so restarts never spike them. Save-age uses
+  `time() - timestamp`, which is cheap, and per-db aggregation keeps cardinality at one
+  series per database rather than per key.
+
+customization: >-
+  Tune the 1h/24h save-age thresholds to your snapshot schedule, and the eviction
+  thresholds to whether eviction is expected for the instance's role. If your exporter
+  exposes `redis_mem_fragmentation_ratio`, add it here to separate logical memory from
+  RSS held by the allocator.

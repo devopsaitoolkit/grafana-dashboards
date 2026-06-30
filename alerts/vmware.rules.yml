@@ -1,0 +1,79 @@
+# Alerting rules for the vmware dashboards.
+# Generated from tools/specs/vmware/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: vmware.rules
+  rules:
+  - alert: VmwareVMHighMemoryUsage
+    expr: vmware_vm_mem_usage_average > 90
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: VM {{ $labels.vm_name }} active memory >90%
+      description: A guest pinned near 100% active memory is likely swapping inside the OS, degrading
+        its own performance and pressuring the host.
+      runbook: Add vRAM to the VM (or fix the in-guest leak), set a reservation for a critical workload,
+        or migrate it to a host with headroom.
+      dashboard: dashboards/vmware/virtual-machines.json
+  - alert: VmwareNoPoweredOnVMs
+    expr: count by (cluster_name) (vmware_vm_power_state == 1) == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Cluster {{ $labels.cluster_name }} has zero powered-on VMs
+      description: No running VMs in a production cluster means either a mass outage or that the exporter
+        has lost visibility — both are emergencies.
+      runbook: If VMs really are down, trigger HA/restart and investigate the host failure; if it is an
+        exporter blind spot, restart vmware_exporter.
+      dashboard: dashboards/vmware/virtual-machines.json
+  - alert: VmwareHostVMDensityHigh
+    expr: max by (cluster_name) (count by (host_name, cluster_name) (vmware_vm_power_state == 1)) > 45
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: A host in {{ $labels.cluster_name }} runs >45 powered-on VMs
+      description: Heavy concentration of VMs on one host breaks HA headroom — losing that host overwhelms
+        the rest of the cluster.
+      runbook: Enable/raise DRS aggressiveness, manually vMotion VMs to spread load, or add a host to
+        the cluster.
+      dashboard: dashboards/vmware/virtual-machines.json
+  - alert: VsphereHostDisconnected
+    expr: vmware_host_connection_state != 1
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: ESXi host {{ $labels.host_name }} is not connected to vCenter
+      description: A disconnected host means its VMs are unmanaged and possibly down; HA may not protect
+        them and vMotion is impossible.
+      runbook: Reconnect the host in vCenter; if it is notResponding, restart the management agents (`services.sh
+        restart`) on the ESXi host or trigger HA failover.
+      dashboard: dashboards/vmware/vsphere-hosts.json
+  - alert: VsphereHostMemoryPressure
+    expr: 100 * vmware_host_memory_usage / clamp_min(vmware_host_memory_max, 1) > 95
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: ESXi host {{ $labels.host_name }} memory >95% of capacity
+      description: Above ~95% the hypervisor balloons and then swaps guest memory to disk, slowing every
+        VM on the host and breaking HA headroom.
+      runbook: vMotion VMs to a less-loaded host, set memory reservations on critical VMs, or add capacity;
+        verify DRS is enabled and balancing.
+      dashboard: dashboards/vmware/vsphere-hosts.json
+  - alert: VsphereDatastoreLow
+    expr: 100 * vmware_datastore_freespace_size / clamp_min(vmware_datastore_capacity_size, 1) < 10
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Datastore {{ $labels.ds_name }} below 10% free
+      description: A near-full datastore stuns running VMs, blocks power-ons and can wedge on a growing
+        snapshot — a cluster-wide hazard.
+      runbook: Consolidate snapshots, storage-vMotion VMs off the datastore, delete orphaned files, or
+        expand the datastore/LUN.
+      dashboard: dashboards/vmware/vsphere-hosts.json

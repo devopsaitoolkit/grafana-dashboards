@@ -1,0 +1,215 @@
+title: OpenStack / RabbitMQ — Queue Depth & Flow
+description: >-
+  Per-queue depth and message flow for the OpenStack message bus: which queues are
+  deepest, which have no consumers, and whether publish rate is outrunning delivery.
+  Answers "which agent stopped consuming?" — the usual root cause of a RabbitMQ
+  backlog that eventually blocks the whole control plane.
+datasource: prometheus
+tags: [openstack, rabbitmq, messaging, queues]
+seo_phrase: RabbitMQ queue depth Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which queues are the deepest right now (ready + unacknowledged)?"
+  - "Which queues have messages but zero consumers (a dead agent)?"
+  - "Is publish rate outrunning delivery rate (backlog building)?"
+  - "Which queues are growing fastest over the last few minutes?"
+
+production_lessons: >-
+  A RabbitMQ backlog in OpenStack is almost never the broker's fault — it is a
+  consumer that died: a `nova-compute`, `neutron-agent` or `cinder-volume` that
+  lost its connection and stopped acking, leaving its reply/fanout queue to grow
+  until memory fills and the watermark alarm blocks everyone. The fastest path to
+  root cause is "deepest queue with zero consumers", which names the broken agent
+  directly. Watching publish-vs-deliver rate catches the same failure earlier,
+  while the backlog is still small enough that nothing has paged yet.
+
+data_sources:
+  - "RabbitMQ with the `rabbitmq_prometheus` plugin. Per-queue series
+    (`rabbitmq_queue_messages_ready`, `_unacknowledged`, `_published_total`,
+    `_delivered_total`, `rabbitmq_queue_consumers`) carry `queue` and `vhost`
+    labels."
+  - "On clusters with very high queue churn (e.g. per-RPC reply queues), enable the
+    plugin's `detailed` metrics selectively — emitting every transient queue can be
+    high-cardinality."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(rabbitmq_queue_messages_ready, job)
+    description: Prometheus scrape job for your RabbitMQ nodes.
+    multi: false
+    includeAll: false
+  - name: vhost
+    label: Vhost
+    query: label_values(rabbitmq_queue_messages_ready{job="$job"}, vhost)
+    description: RabbitMQ virtual host (OpenStack usually uses "/").
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Backlog hot spots — read these first
+    panels:
+      - type: stat
+        title: Queues with no consumers (and backlog)
+        description: Queues holding ready messages but with zero consumers — each one is very likely a dead OpenStack agent.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(
+                (rabbitmq_queue_messages_ready{job="$job", vhost=~"$vhost"} > 0)
+                and (rabbitmq_queue_consumers{job="$job", vhost=~"$vhost"} == 0)
+              ) or vector(0)
+            instant: true
+            legend: starved
+      - type: stat
+        title: Deepest queue
+        description: Largest single-queue backlog (ready messages). Drill into the table below to name it.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1000}
+          - {color: red, value: 10000}
+        targets:
+          - expr: max(rabbitmq_queue_messages_ready{job="$job", vhost=~"$vhost"}) or vector(0)
+            instant: true
+            legend: max ready
+      - type: stat
+        title: Total ready
+        description: Cluster-wide messages ready for delivery (not yet picked up by a consumer).
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rabbitmq_queue_messages_ready{job="$job", vhost=~"$vhost"}) or vector(0)
+            instant: true
+            legend: ready
+      - type: stat
+        title: Total unacknowledged
+        description: Messages delivered but not yet acked. A large persistent value means consumers are stuck mid-processing.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1000}
+          - {color: red, value: 10000}
+        targets:
+          - expr: sum(rabbitmq_queue_messages_unacknowledged{job="$job", vhost=~"$vhost"}) or vector(0)
+            instant: true
+            legend: unacked
+
+  - title: Deepest queues
+    panels:
+      - type: bargauge
+        title: Top 10 queues by ready messages
+        description: The ten queues with the most messages waiting for a consumer. The OpenStack service is usually obvious from the queue name.
+        unit: short
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1000}
+          - {color: red, value: 10000}
+        targets:
+          - expr: topk(10, rabbitmq_queue_messages_ready{job="$job", vhost=~"$vhost"})
+            instant: true
+            legend: "{{queue}}"
+      - type: table
+        title: Queues with no consumers
+        description: Every queue that has a backlog but no consumer attached — the shortlist of agents to restart.
+        unit: short
+        filterable: true
+        transformations:
+          - id: organize
+            options:
+              renameByName:
+                queue: Queue
+                vhost: Vhost
+                Value: Ready
+        targets:
+          - expr: >-
+              (rabbitmq_queue_messages_ready{job="$job", vhost=~"$vhost"} > 0)
+              and (rabbitmq_queue_consumers{job="$job", vhost=~"$vhost"} == 0)
+            instant: true
+            format: table
+            legend: "{{queue}}"
+
+  - title: Flow — publish vs deliver
+    panels:
+      - type: timeseries
+        title: Publish vs deliver rate
+        description: Cluster-wide publish rate against delivery rate. When publish sits above deliver, the backlog is building.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(rabbitmq_queue_messages_published_total{job="$job", vhost=~"$vhost"}[5m]))
+            legend: published/s
+          - expr: sum(rate(rabbitmq_queue_messages_delivered_total{job="$job", vhost=~"$vhost"}[5m]))
+            legend: delivered/s
+      - type: timeseries
+        title: Fastest-growing queues
+        description: Per-queue rate of change of ready messages (top 10). Positive and climbing means that queue is falling behind.
+        unit: ops
+        legend: table
+        targets:
+          - expr: topk(10, deriv(rabbitmq_queue_messages_ready{job="$job", vhost=~"$vhost"}[5m]))
+            legend: "{{queue}}"
+
+alerts:
+  - name: RabbitMQQueueNoConsumers
+    severity: warning
+    expr: rabbitmq_queue_messages_ready > 100 and rabbitmq_queue_consumers == 0
+    for: 5m
+    summary: "Queue {{ $labels.queue }} has {{ $value }} ready messages and no consumer"
+    why: A backlog with zero consumers means the OpenStack agent that drains this queue has died; the backlog will grow until it trips the broker memory alarm and stalls the control plane.
+    investigate: "Open OpenStack / RabbitMQ — Queue Depth & Flow, read the no-consumer table to map the queue name to its service (nova/neutron/cinder)."
+    runbook: "Restart the matching agent (e.g. `systemctl restart nova-compute`); verify it reconnects and the queue drains, then check why it disconnected (network/AMQP heartbeat)."
+    recovery: Clears when a consumer reattaches or the queue drains below 100.
+    false_positives: Short-lived reply queues between RPC turns; the 100-message and 5m thresholds filter most of these.
+  - name: RabbitMQBacklogBuilding
+    severity: warning
+    expr: >-
+      sum(rate(rabbitmq_queue_messages_published_total[5m]))
+      > 1.2 * sum(rate(rabbitmq_queue_messages_delivered_total[5m]))
+    for: 10m
+    summary: "RabbitMQ publish rate exceeds delivery by >20% for 10m"
+    why: Sustained publish-over-deliver means consumers cannot keep up and the backlog is compounding toward a memory alarm.
+    investigate: "Compare publish vs deliver and the fastest-growing-queues panel to find which queue/service is the bottleneck."
+    runbook: "Scale out or restart the lagging consumers; check for a slow database or storage backend stalling message processing."
+    recovery: Clears when delivery catches up to publishing.
+    false_positives: Brief bursts (e.g. mass instance launch) where consumers catch up within minutes.
+
+troubleshooting:
+  - symptom: Tables and top-N are empty but the cluster is busy
+    cause: Per-queue metrics are disabled or filtered out by the plugin's aggregation settings.
+    action: Enable per-queue metrics in `rabbitmq_prometheus` (or remove an over-aggressive metric filter) and re-scrape.
+  - symptom: Hundreds of transient queues flood the table
+    cause: Per-RPC reply queues are being exported individually.
+    action: "Filter to durable queues by name regex on `$vhost`/queue, or have the plugin collapse reply queues."
+  - symptom: Deriv panel shows large negatives
+    cause: A queue drained rapidly — that is healthy, not a problem.
+    action: Focus on sustained positive growth; negatives mean consumers are winning.
+
+performance: >-
+  Per-queue series are the cardinality risk here. Rates use a 5m window. On clouds
+  with many ephemeral reply queues, restrict the plugin to durable queues or push
+  per-queue panels behind a recording rule; the top-N (`topk`) panels stay cheap
+  because they bound the returned series to ten.
+
+customization: >-
+  Adjust the depth thresholds (1k/10k) to your normal queue sizes and the
+  no-consumer alert floor to filter short-lived reply queues. Add a `queue` regex
+  template variable to focus on a single service's notification/RPC queues during
+  an incident.

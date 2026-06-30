@@ -1,0 +1,9 @@
+grafana-dashboards
+Copyright 2026 DevOps AI Toolkit and contributors
+
+This product includes software developed as an open-source collection of
+production-ready Grafana dashboards, Prometheus alerting/recording rules, and a
+spec-driven dashboard generator.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. See the LICENSE file.

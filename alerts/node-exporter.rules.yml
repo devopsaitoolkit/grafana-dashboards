@@ -1,0 +1,113 @@
+# Alerting rules for the node-exporter dashboards.
+# Generated from tools/specs/node-exporter/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: node-exporter.rules
+  rules:
+  - alert: ScrapeTargetDown
+    expr: up == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Target {{ $labels.instance }} ({{ $labels.job }}) is down
+      description: A down target means Prometheus has no data for it — every dashboard and alert that
+        depends on it is silently blind.
+      runbook: Restart the exporter; verify firewall/security-group rules to the scrape port; confirm
+        the target is still in service discovery.
+      dashboard: dashboards/node-exporter/exporter-health.json
+  - alert: ScrapeDurationHigh
+    expr: scrape_duration_seconds > 5
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Scrape of {{ $labels.instance }} taking {{ printf "%.1f" $value }}s
+      description: A scrape that approaches the scrape timeout will start failing intermittently and dropping
+        samples — flaky data that is hard to diagnose later.
+      runbook: Reduce the exporter's metric surface (disable unused collectors), raise the scrape timeout,
+        or move the target to a less contended host.
+      dashboard: dashboards/node-exporter/exporter-health.json
+  - alert: ScrapeReturnsNoSamples
+    expr: scrape_samples_scraped == 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $labels.instance }} scraped but returned 0 samples'
+      description: A target that responds but returns nothing is a half-broken exporter — `up` is 1, so
+        it looks healthy while delivering no data.
+      runbook: Restart the exporter and review relabel rules that may be dropping every series.
+      dashboard: dashboards/node-exporter/exporter-health.json
+  - alert: FleetHostDown
+    expr: up{job=~".*node.*"} == 0
+    for: 3m
+    labels:
+      severity: critical
+    annotations:
+      summary: Host {{ $labels.instance }} is down (scrape failing)
+      description: A node_exporter that stops responding usually means the host is down, the network is
+        partitioned, or the exporter crashed — and you are now blind to that host.
+      runbook: Restart node_exporter (systemctl restart node_exporter); if the host is unreachable, escalate
+        to the infra on-call to power-cycle or replace it.
+      dashboard: dashboards/node-exporter/fleet-overview.json
+  - alert: FleetFilesystemAlmostFull
+    expr: 100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"})
+      > 90
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $labels.instance }} {{ $labels.mountpoint }} is {{ printf "%.0f" $value }}% full'
+      description: A full root or data filesystem causes writes to fail, which corrupts databases and
+        crashes services with no warning.
+      runbook: Clear logs/old artefacts, rotate journald, or grow the volume. For containers, prune images
+        (docker system prune).
+      dashboard: dashboards/node-exporter/fleet-overview.json
+  - alert: FleetHostMemoryExhausted
+    expr: 100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 92
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $labels.instance }} memory {{ printf "%.0f" $value }}% used'
+      description: Low available memory pushes the host into swap or triggers the OOM killer, which terminates
+        processes unpredictably.
+      runbook: Restart or cap the offending process, add memory, or move workloads off the host.
+      dashboard: dashboards/node-exporter/fleet-overview.json
+  - alert: HostRunQueueSaturated
+    expr: node_load1 / count without (cpu, mode) (node_cpu_seconds_total{mode="idle"}) > 2
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $labels.instance }} run queue is {{ printf "%.1f" $value }}× cores'
+      description: A run queue sustained above 2× the core count means tasks spend more time waiting than
+        running — latency climbs even though CPU may not read 100%.
+      runbook: Shed load, scale out, or move the heaviest process; if iowait dominates, the disks — not
+        the CPU — are the limit.
+      dashboard: dashboards/node-exporter/host-use-method.json
+  - alert: HostMemoryExhausted
+    expr: 100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 92
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $labels.instance }} memory {{ printf "%.0f" $value }}% used'
+      description: Available memory near zero forces swapping or OOM kills, which terminate processes
+        without warning.
+      runbook: Restart or cap the top RSS process, add RAM, or rebalance workloads.
+      dashboard: dashboards/node-exporter/host-use-method.json
+  - alert: HostNICErrors
+    expr: rate(node_network_receive_errs_total{device!~"lo"}[5m]) > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $labels.instance }} NIC {{ $labels.device }} receiving errors'
+      description: NIC errors cause retransmits and tail-latency that no utilisation gauge reveals — a
+        classic "everything looks green but the app is slow" cause.
+      runbook: Replace the cable/SFP, move to another port, or tune ring buffers (ethtool -G); failing
+        hardware should be swapped.
+      dashboard: dashboards/node-exporter/host-use-method.json

@@ -1,0 +1,283 @@
+# PostgreSQL fleet health overview. Leads with the three signals an on-call DBA
+# checks first: is the server up, how close are we to max_connections, and is the
+# cache still absorbing reads.
+uid: postgres-overview
+title: PostgreSQL / Overview
+description: >-
+  Top-level health for PostgreSQL servers scraped by postgres_exporter: liveness,
+  connection saturation against max_connections, shared-buffer cache hit ratio, the
+  commit-vs-rollback transaction mix, deadlocks and per-database size. Answers "is
+  this instance healthy and does it have headroom?" in five seconds.
+datasource: prometheus
+tags: [postgres, database, postgres-exporter, overview]
+seo_phrase: PostgreSQL Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is PostgreSQL up and accepting connections right now?"
+  - "How close are we to max_connections (connection saturation)?"
+  - "Is the shared-buffer cache still serving reads, or are we hitting disk?"
+  - "Are transactions committing, or is the rollback rate climbing?"
+  - "Which database is growing and how fast?"
+
+production_lessons: >-
+  Most Postgres incidents are not slow queries — they are connection exhaustion and
+  a cache that fell off a cliff after a plan or workload change. A server at 95% of
+  max_connections will refuse new clients while looking "fine" on CPU, so this
+  dashboard leads with **saturation** and **cache hit ratio**, the two numbers that
+  predict an outage. A cache hit ratio that drops from 99% to 90% means reads are now
+  going to disk and latency has already changed; pair it with the commit/rollback mix
+  to tell a healthy busy server from one thrashing on aborted work.
+
+data_sources:
+  - "`postgres_exporter` pointed at each server (the `pg_up`, `pg_stat_database_*`,
+    `pg_settings_max_connections` and `pg_database_size_bytes` series)."
+
+templating:
+  - name: instance
+    label: Instance
+    query: label_values(pg_up, instance)
+    description: PostgreSQL server(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+  - name: datname
+    label: Database
+    query: label_values(pg_stat_database_numbackends{instance=~"$instance"}, datname)
+    description: Database(s) for the per-database throughput and size panels.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Health — read these first
+    panels:
+      - type: stat
+        title: PostgreSQL up
+        description: Liveness from postgres_exporter. 1 = the exporter reached the server.
+        unit: short
+        decimals: 0
+        colorMode: background
+        mappings:
+          - type: value
+            options:
+              "0": {text: DOWN, color: red, index: 0}
+              "1": {text: UP, color: green, index: 1}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: min(pg_up{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: up
+      - type: gauge
+        title: Connection saturation
+        description: Worst instance's active backends as a percentage of its max_connections.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(
+                100 * sum by (instance) (pg_stat_database_numbackends{instance=~"$instance"})
+                / on (instance) pg_settings_max_connections{instance=~"$instance"}
+              ) or vector(0)
+            instant: true
+            legend: saturation
+      - type: gauge
+        title: Cache hit ratio
+        description: Share of block reads served from shared buffers over the last 5m. Below ~95% means reads are hitting disk.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 90}
+          - {color: green, value: 99}
+        targets:
+          - expr: >-
+              100 * sum(rate(pg_stat_database_blks_hit{instance=~"$instance"}[5m]))
+              / clamp_min(
+                  sum(rate(pg_stat_database_blks_hit{instance=~"$instance"}[5m]))
+                  + sum(rate(pg_stat_database_blks_read{instance=~"$instance"}[5m])),
+                  1)
+            instant: true
+            legend: hit ratio
+      - type: stat
+        title: Active backends
+        description: Total server-side connections in use across the selected instances.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 200}
+          - {color: red, value: 500}
+        targets:
+          - expr: sum(pg_stat_database_numbackends{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: backends
+
+  - title: Transactions
+    panels:
+      - type: timeseries
+        title: Commits vs rollbacks
+        description: Transaction throughput. A rising rollback line points at application errors or lock/serialisation failures.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(pg_stat_database_xact_commit{instance=~"$instance", datname=~"$datname"}[5m]))
+            legend: commits/s
+          - expr: sum(rate(pg_stat_database_xact_rollback{instance=~"$instance", datname=~"$datname"}[5m]))
+            legend: rollbacks/s
+      - type: timeseries
+        title: Rollback ratio
+        description: Percentage of transactions that rolled back. Sustained values above a few percent are worth a look.
+        unit: percent
+        min: 0
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum(rate(pg_stat_database_xact_rollback{instance=~"$instance", datname=~"$datname"}[5m]))
+              / clamp_min(
+                  sum(rate(pg_stat_database_xact_commit{instance=~"$instance", datname=~"$datname"}[5m]))
+                  + sum(rate(pg_stat_database_xact_rollback{instance=~"$instance", datname=~"$datname"}[5m])),
+                  1)
+            legend: rollback %
+      - type: timeseries
+        title: Tuples fetched vs inserted
+        description: Read (fetched) and write (inserted) row throughput — the shape of the workload.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(pg_stat_database_tup_fetched{instance=~"$instance", datname=~"$datname"}[5m]))
+            legend: fetched/s
+          - expr: sum(rate(pg_stat_database_tup_inserted{instance=~"$instance", datname=~"$datname"}[5m]))
+            legend: inserted/s
+
+  - title: Cache and contention
+    panels:
+      - type: timeseries
+        title: Cache hit ratio over time
+        description: The headline gauge as a trend — spot the moment a plan change pushed reads to disk.
+        unit: percent
+        min: 0
+        max: 100
+        legend: hidden
+        targets:
+          - expr: >-
+              100 * sum(rate(pg_stat_database_blks_hit{instance=~"$instance"}[5m]))
+              / clamp_min(
+                  sum(rate(pg_stat_database_blks_hit{instance=~"$instance"}[5m]))
+                  + sum(rate(pg_stat_database_blks_read{instance=~"$instance"}[5m])),
+                  1)
+            legend: hit ratio
+      - type: timeseries
+        title: Deadlocks
+        description: Deadlocks resolved per second. Any sustained rate means two transactions are taking locks in opposite order.
+        unit: ops
+        min: 0
+        drawStyle: bars
+        fillOpacity: 50
+        targets:
+          - expr: sum(rate(pg_stat_database_deadlocks{instance=~"$instance", datname=~"$datname"}[5m]))
+            legend: deadlocks/s
+      - type: timeseries
+        title: Temp bytes written
+        description: Bytes spilled to temp files for sorts/hashes that exceeded work_mem.
+        unit: Bps
+        min: 0
+        targets:
+          - expr: sum(rate(pg_stat_database_temp_bytes{instance=~"$instance", datname=~"$datname"}[5m]))
+            legend: temp bytes/s
+
+  - title: Capacity
+    panels:
+      - type: bargauge
+        title: Database size (top 10)
+        description: On-disk size of the largest databases. Track growth against your volume headroom.
+        unit: bytes
+        orientation: horizontal
+        targets:
+          - expr: topk(10, pg_database_size_bytes{instance=~"$instance", datname=~"$datname"})
+            instant: true
+            legend: "{{datname}}"
+      - type: timeseries
+        title: Backends vs max_connections
+        description: Used connections against the configured ceiling per instance. The gap is your headroom.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (pg_stat_database_numbackends{instance=~"$instance"})
+            legend: "{{instance}} backends"
+          - expr: pg_settings_max_connections{instance=~"$instance"}
+            legend: "{{instance}} max"
+
+alerts:
+  - name: PostgresInstanceDown
+    severity: critical
+    expr: pg_up == 0
+    for: 1m
+    summary: "PostgreSQL {{ $labels.instance }} is down"
+    why: The exporter cannot reach the server — clients are likely failing too.
+    investigate: "Check the postgres service and host; confirm the exporter's DSN and that the server accepts connections."
+    runbook: "Restart postgres if crashed; if the host is down, fail over to a replica and promote it."
+    recovery: Clears once pg_up reports 1 again.
+    false_positives: Exporter restart or credential rotation can briefly trip this — keep `for` at 1m.
+  - name: PostgresConnectionSaturationHigh
+    severity: warning
+    expr: >-
+      100 * sum by (instance) (pg_stat_database_numbackends)
+      / on (instance) pg_settings_max_connections > 85
+    for: 10m
+    summary: "PostgreSQL {{ $labels.instance }} using >85% of max_connections"
+    why: At 100% the server refuses new connections and the application starts failing, even with spare CPU and RAM.
+    investigate: "Open PostgreSQL / Connections, look for idle-in-transaction backends and a missing pooler."
+    runbook: "Put PgBouncer in front of the server; lower per-app pool sizes; kill stuck idle-in-transaction sessions."
+    recovery: Clears when saturation drops below 85% for 5m.
+    false_positives: Brief spikes during deploys or connection-pool warm-up; raise `for` if your pooler cycles connections.
+  - name: PostgresCacheHitRatioLow
+    severity: warning
+    expr: >-
+      100 * sum by (instance) (rate(pg_stat_database_blks_hit[5m]))
+      / clamp_min(
+          sum by (instance) (rate(pg_stat_database_blks_hit[5m]))
+          + sum by (instance) (rate(pg_stat_database_blks_read[5m])), 1) < 95
+    for: 15m
+    summary: "PostgreSQL {{ $labels.instance }} cache hit ratio below 95%"
+    why: Reads are going to disk instead of shared buffers, so query latency has already risen.
+    investigate: "Check for a large sequential scan, a cold cache after restart, or a working set that outgrew shared_buffers."
+    runbook: "Add the missing index, increase shared_buffers, or schedule the heavy scan off-peak."
+    recovery: Clears when the ratio recovers above 95% for 5m.
+    false_positives: Expected for the first minutes after a restart or for a deliberate full-table analytics scan.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: postgres_exporter not scraped or wrong `$instance`.
+    action: "Check `pg_up` in Explore and confirm the instance label matches your scrape config."
+  - symptom: Cache hit ratio reads 100% with no traffic
+    cause: Both blks_hit and blks_read rates are ~0, so the ratio is dominated by the clamp.
+    action: Read it together with the transaction-rate panel; the number is only meaningful under load.
+  - symptom: Saturation gauge above 100%
+    cause: numbackends counts background workers the configured max_connections does not.
+    action: Treat values near 100% as the signal; the absolute backend count is in the Capacity row.
+
+performance: >-
+  Every rate uses a 5m window (≥4× a typical 15–30s scrape) so counters survive a
+  reset. Cache-hit and rollback ratios clamp their denominator with `clamp_min(...,1)`
+  to stay defined at zero traffic. Sums are bounded with `by (instance)` so series
+  count scales with servers, not databases.
+
+customization: >-
+  Tune the 85% saturation and 95%/99% cache thresholds to your SLOs — OLAP boxes run
+  lower hit ratios by design. Scope `$datname` to exclude template databases, and add
+  a `pg_database_size_bytes` panel override if you provision volumes per database.

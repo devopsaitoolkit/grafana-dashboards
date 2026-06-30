@@ -1,0 +1,253 @@
+# Kubelet dashboard — the node agent whose health decides whether a node is Ready.
+# Leads with node config errors and PLEG relist latency, the two signals that most
+# directly precede a node flipping NotReady.
+title: Kubernetes / Kubelet
+description: >-
+  Running pods/containers, PLEG relist latency, pod worker duration, runtime
+  operation errors and node config errors for the kubelet. Answers "is the node agent
+  healthy enough to keep this node Ready and start pods on time?" rather than dumping
+  raw kubelet counters.
+datasource: prometheus
+tags: [kubernetes, node, kubelet, runtime]
+seo_phrase: Kubelet Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Does any node have a kubelet config error right now?"
+  - "Is PLEG relist latency healthy, or is a node about to flip NotReady?"
+  - "How long is the pod worker taking to sync pods?"
+  - "Are container runtime operations erroring?"
+  - "How many pods and containers is each node running?"
+
+production_lessons: >-
+  When a node flips NotReady the kubelet metrics usually warned you minutes earlier.
+  The classic precursor is **PLEG relist latency** (Pod Lifecycle Event Generator):
+  the kubelet lists every container's state on an interval, and when the container
+  runtime gets slow that relist stretches out — cross three minutes and the node is
+  declared NotReady. So this dashboard leads with **node config errors** (a
+  misconfigured kubelet won't start pods at all) and **PLEG relist p99**, then breaks
+  out pod worker duration and runtime-operation errors so you can tell a runtime
+  problem (containerd/CRI) from a kubelet problem. High PLEG with high runtime errors
+  almost always means the container runtime, not the kubelet.
+
+data_sources:
+  - "`kubelet` metrics endpoint (the `kubelet_running_pods`,
+    `kubelet_running_containers`, `kubelet_pleg_relist_duration_seconds_bucket`,
+    `kubelet_pod_worker_duration_seconds_bucket`, `kubelet_runtime_operations_errors_total`
+    and `kubelet_node_config_error` series), scraped via the apiserver proxy or
+    directly on each node."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(kubelet_running_pods, job)
+    description: Prometheus scrape job for the kubelet targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Node
+    query: label_values(kubelet_running_pods{job="$job"}, instance)
+    description: Node(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Node agent health — read these first
+    panels:
+      - type: stat
+        title: Nodes with config error
+        description: Count of nodes reporting a kubelet config error. Such a kubelet may refuse to start pods.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(kubelet_node_config_error{job="$job", instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: config errors
+      - type: stat
+        title: PLEG relist p99
+        description: 99th percentile PLEG relist time. Above a few seconds risks the node being declared NotReady.
+        unit: s
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 3}
+          - {color: red, value: 10}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(kubelet_pleg_relist_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            instant: true
+            legend: pleg p99
+      - type: stat
+        title: Pod worker p99
+        description: 99th percentile time for the kubelet to sync a pod to its desired state. Slow syncs delay pod startup.
+        unit: s
+        min: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le) (rate(kubelet_pod_worker_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            instant: true
+            legend: worker p99
+      - type: stat
+        title: Runtime error rate
+        description: Container runtime (CRI) operation errors per second across the selected nodes.
+        unit: ops
+        min: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.01}
+          - {color: red, value: 0.1}
+        targets:
+          - expr: sum(rate(kubelet_runtime_operations_errors_total{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: runtime errors
+
+  - title: Workload footprint
+    panels:
+      - type: timeseries
+        title: Running pods per node
+        description: Pods the kubelet is currently running. Approaching the per-node cap (default 110) is a packing limit.
+        unit: short
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 110}
+        targets:
+          - expr: kubelet_running_pods{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Running containers per node
+        description: Containers the kubelet is currently running — includes init/sidecars, so it outpaces the pod count.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: kubelet_running_containers{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+
+  - title: Latency
+    panels:
+      - type: timeseries
+        title: PLEG relist p99 by node
+        description: Per-node PLEG relist latency. A single climbing node is the one about to go NotReady.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 10}
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le, instance) (rate(kubelet_pleg_relist_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Pod worker p99 by node
+        description: Per-node pod sync latency. Rising values delay pod starts and updates on that node.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le, instance) (rate(kubelet_pod_worker_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Storage operation p99
+        description: 99th percentile time for volume operations (mount/attach). Slow storage stalls pod startup.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: >-
+              histogram_quantile(0.99, sum by (le, operation_name) (rate(storage_operation_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: "{{operation_name}}"
+
+  - title: Errors
+    panels:
+      - type: timeseries
+        title: Runtime operation errors by type
+        description: CRI errors by operation (pull_image, create_container, ...). The operation tells you where the runtime is failing.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (operation_type) (rate(kubelet_runtime_operations_errors_total{job="$job", instance=~"$instance"}[5m])) > 0
+            legend: "{{operation_type}}"
+      - type: table
+        title: Nodes reporting config errors
+        description: Nodes whose kubelet currently reports a config error — fix these before scheduling onto them.
+        unit: short
+        targets:
+          - expr: kubelet_node_config_error{job="$job", instance=~"$instance"} == 1
+            instant: true
+            format: table
+            legend: "{{instance}}"
+
+alerts:
+  - name: KubeletNodeConfigError
+    severity: warning
+    expr: kubelet_node_config_error == 1
+    for: 5m
+    summary: "Kubelet on {{ $labels.instance }} reports a config error"
+    why: A kubelet with a config error may refuse to start or update pods, so the node silently stops accepting work correctly.
+    investigate: "Open Kubernetes / Kubelet, find the node in the config-error table, and read its kubelet logs/events for the rejected config."
+    runbook: "Fix or roll back the kubelet/dynamic-config change; restart the kubelet and confirm the metric clears."
+    recovery: Clears when the kubelet stops reporting a config error for 5m.
+    false_positives: A brief error during a deliberate kubelet config rollout that immediately self-corrects.
+  - name: KubeletPLEGLatencyHigh
+    severity: critical
+    expr: >-
+      histogram_quantile(0.99, sum by (le, instance, job) (rate(kubelet_pleg_relist_duration_seconds_bucket[5m]))) > 10
+    for: 10m
+    summary: "Kubelet PLEG relist p99 above 10s on {{ $labels.instance }}"
+    why: A slow PLEG is the canonical precursor to a node flipping NotReady; the kubelet can't keep up with container state.
+    investigate: "Correlate with runtime-operation errors and node CPU/IO — high PLEG with runtime errors points at the container runtime."
+    runbook: "Check containerd/CRI health and disk IO on the node; restart the runtime if it is wedged; reduce pod density if the node is overloaded."
+    recovery: Clears when PLEG p99 falls below 10s for 5m.
+    false_positives: A transient spike during a mass pod churn (node drain/fill) can lift PLEG briefly.
+  - name: KubeletRuntimeOperationErrors
+    severity: warning
+    expr: sum by (instance, job) (rate(kubelet_runtime_operations_errors_total[5m])) > 0.1
+    for: 10m
+    summary: "Kubelet runtime operation errors on {{ $labels.instance }}"
+    why: Failing CRI operations mean containers won't pull, create or start reliably — pods get stuck or crash-loop on that node.
+    investigate: "Open the runtime-errors-by-type panel to see which operation fails (image pull vs container create) and check runtime logs."
+    runbook: "For pull errors check registry auth/connectivity; for create/start errors check the container runtime and node resources; restart containerd if needed."
+    recovery: Clears when the runtime error rate stays below 0.1/s for 5m.
+    false_positives: A bad image reference causes legitimate pull errors that aren't a node fault.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: Kubelet /metrics requires auth and the scrape config or RBAC is wrong.
+    action: "Confirm `up{job=\"$job\"}` is 1; kubelet metrics are usually scraped via the apiserver proxy with a token that has `nodes/metrics` access."
+  - symptom: PLEG p99 looks fine but a node went NotReady
+    cause: The node failed for a non-PLEG reason (network, disk-pressure, kubelet crash).
+    action: Check node conditions and the kubelet's own up/down; this dashboard covers the agent, not every node failure mode.
+  - symptom: Running-pods line stops updating for one node
+    cause: That kubelet stopped being scraped (node down or scrape failing).
+    action: "Check `up` for the instance; a flat-then-gone series usually means the target disappeared."
+
+performance: >-
+  All rates use a 5m window (>=4x a 30s scrape). Latency quantiles aggregate the
+  histogram with `sum by (le, instance)` before `histogram_quantile`. On large fleets,
+  multi-selecting every node makes the per-node latency panels heavy; scope `$instance`
+  to a rack/pool, or back the PLEG panel with a recording rule.
+
+customization: >-
+  Tune the 3s/10s PLEG and 1s/5s pod-worker thresholds to your runtime and node class.
+  The 110 running-pods threshold matches the default `--max-pods`; raise it if you
+  configured a higher cap. Scope `$instance` to a node pool to keep the per-node panels
+  readable on big clusters.

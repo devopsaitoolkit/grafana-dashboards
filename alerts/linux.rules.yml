@@ -1,0 +1,396 @@
+# Alerting rules for the linux dashboards.
+# Generated from tools/specs/linux/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: linux.rules
+  rules:
+  - alert: HostHighCPUSaturation
+    expr: 100 * (1 - avg by (instance, job) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 90
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} CPU busy > 90% for 10m
+      description: Sustained high CPU starves request handling and increases latency/queueing.
+      runbook: Identify the top process (top/pidstat); if steal is high, the hypervisor is oversubscribed
+        — move or resize the VM.
+      dashboard: dashboards/linux/cpu.json
+  - alert: HostCPUStealHigh
+    expr: 100 * avg by (instance, job) (rate(node_cpu_seconds_total{mode="steal"}[5m])) > 10
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} losing >10% CPU to steal
+      description: High steal means the hypervisor is denying the guest CPU it asked for — app slowness
+        with idle-looking guest metrics.
+      runbook: Migrate the VM to a less contended hypervisor or resize the flavour.
+      dashboard: dashboards/linux/cpu.json
+  - alert: HostDiskUtilisationHigh
+    expr: 100 * rate(node_disk_io_time_seconds_total{device!~"loop.*|ram.*|dm-.*"}[5m]) > 95
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Disk {{ $labels.device }} on {{ $labels.instance }} > 95% utilised for 10m
+      description: A device pinned near 100% util is the bottleneck; every additional request queues,
+        so application latency rises non-linearly.
+      runbook: Move hot data to faster storage, raise the cloud volume's provisioned IOPS/throughput,
+        or shed the IO source (compaction, backup, log spew).
+      dashboard: dashboards/linux/disk-io.json
+  - alert: HostDiskLatencyHigh
+    expr: rate(node_disk_io_time_weighted_seconds_total{device!~"loop.*|ram.*|dm-.*"}[5m]) / clamp_min(rate(node_disk_reads_completed_total{device!~"loop.*|ram.*|dm-.*"}[5m])
+      + rate(node_disk_writes_completed_total{device!~"loop.*|ram.*|dm-.*"}[5m]), 1) > 0.1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Disk {{ $labels.device }} on {{ $labels.instance }} average latency > 100ms for 10m
+      description: High average await means requests are spending most of their time queued or on slow
+        media — a direct hit to user-facing latency.
+      runbook: If util is high, reduce load or add IOPS; if util is low but latency high, the underlying
+        media or network-attached volume is degraded — escalate to storage.
+      dashboard: dashboards/linux/disk-io.json
+  - alert: HostFilesystemPredictedFull
+    expr: predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"}[6h],
+      24 * 3600) < 0 and node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"} > 0
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} predicted full within 24h
+      description: A linear fit projects this mount hitting 0 bytes within a day; acting on the trend
+        gives you hours of lead time instead of a 3am page.
+      runbook: Rotate or ship logs, prune old artifacts/images, expand the volume, or move data off the
+        mount. Re-check the slope afterwards.
+      dashboard: dashboards/linux/filesystem.json
+  - alert: HostFilesystemAlmostFull
+    expr: 100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"})
+      > 95
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} over 95% full
+      description: Past ~95% many filesystems slow down (fragmentation, reserved-block limits) and writes
+        start failing — databases and logs are the first to break.
+      runbook: Free space immediately (logs, temp, old releases) or expand the volume; for root mounts,
+        clear the package cache and journal first.
+      dashboard: dashboards/linux/filesystem.json
+  - alert: HostFilesystemReadOnly
+    expr: node_filesystem_readonly{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"} == 1
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} is read-only
+      description: The kernel typically remounts a filesystem read-only after IO errors; every write now
+        fails, often silently corrupting application state.
+      runbook: Fsck or replace the failing device, restore from snapshot if corrupted, and remount read-write
+        only after the underlying fault is fixed.
+      dashboard: dashboards/linux/filesystem.json
+  - alert: HostSensorOverheating
+    expr: node_hwmon_temp_celsius > 90
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Sensor {{ $labels.sensor }} on {{ $labels.instance }} above 90°C
+      description: Past ~90°C most CPUs thermally throttle and, if it climbs further, shut down to protect
+        the silicon — slow service now, hard outage soon.
+      runbook: Clear airflow blockages, replace failed fans, check thermal paste and rack/room cooling;
+        drain the host if the temperature will not come down.
+      dashboard: dashboards/linux/hardware-sensors.json
+  - alert: HostCPUThrottling
+    expr: avg by (instance, job) (node_cpu_scaling_frequency_hertz) < 0.6 * max by (instance, job) (node_cpu_scaling_frequency_hertz)
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} CPU frequency held well below its maximum
+      description: A frequency stuck far below the ceiling means the CPU is being throttled — thermal
+        or power capped — costing performance invisibly to software metrics.
+      runbook: Resolve cooling if thermal; otherwise check the scaling governor (set performance), BIOS
+        power limits, and PSU/rack power capping.
+      dashboard: dashboards/linux/hardware-sensors.json
+  - alert: HostFileDescriptorsExhausting
+    expr: 100 * node_filefd_allocated / clamp_min(node_filefd_maximum, 1) > 90
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Host {{ $labels.instance }} file descriptors > 90% of the system limit
+      description: Near the file-max limit, opens, sockets and accepts fail with ENFILE/EMFILE and services
+        refuse work while CPU and memory look fine.
+      runbook: Restart or fix the leaking process; raising `fs.file-max`/`LimitNOFILE` is a stopgap, not
+        a fix for a leak.
+      dashboard: dashboards/linux/kernel.json
+  - alert: HostConntrackTableNearLimit
+    expr: 100 * node_nf_conntrack_entries / clamp_min(node_nf_conntrack_entries_limit, 1) > 90
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Host {{ $labels.instance }} conntrack table > 90% full
+      description: A full conntrack table makes the kernel drop new connections and log an nf_conntrack
+        table-full message — the host refuses traffic while looking idle.
+      runbook: Raise `net.netfilter.nf_conntrack_max`, shorten conntrack timeouts, or NOTRACK high-volume
+        stateless flows.
+      dashboard: dashboards/linux/kernel.json
+  - alert: HostEntropyLow
+    expr: node_entropy_available_bits < 200
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} available entropy below 200 bits
+      description: A starved entropy pool can block /dev/random-backed crypto, stalling TLS handshakes
+        and key generation on hosts without a hardware RNG.
+      runbook: Install and run a CSPRNG seeder (rng-tools/haveged) or attach a virtio-rng device; modern
+        kernels (5.6+) largely remove the blocking behaviour.
+      dashboard: dashboards/linux/kernel.json
+  - alert: HostLoadExceedsCores
+    expr: node_load1 / count without (cpu, mode) (node_cpu_seconds_total{mode="idle"}) > 1.5
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} normalized load > 1.5 for 15m
+      description: Sustained load above 1.5× cores means processes are spending significant time waiting
+        for a CPU or IO slot, adding queueing latency to everything.
+      runbook: If runnable-bound, find and rightsize the hot process or scale out; if blocked-bound, fix
+        the slow storage path (see Linux / Disk IO).
+      dashboard: dashboards/linux/load.json
+  - alert: HostBlockedProcessesHigh
+    expr: node_procs_blocked > 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} has > 10 blocked processes for 10m
+      description: Many processes stuck in uninterruptible sleep inflate load while CPUs sit idle — the
+        bottleneck is storage or a stuck mount, not compute.
+      runbook: Resolve the slow IO path — failing disk, throttled cloud volume, or hung NFS server; a
+        hung mount may require recovering the server or a lazy unmount.
+      dashboard: dashboards/linux/load.json
+  - alert: HostMemoryAvailableLow
+    expr: 100 * node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} has < 10% memory available for 10m
+      description: Below ~10% available the kernel starts aggressive reclaim, which evicts page cache
+        and pushes the host toward swapping and OOM.
+      runbook: Identify the top RSS consumers (ps aux --sort=-rss / top); restart or rightsize the offending
+        service, or add memory. If it is cache, no action is needed.
+      dashboard: dashboards/linux/memory.json
+  - alert: HostSwapUtilisationHigh
+    expr: 100 * (node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes) / (node_memory_SwapTotal_bytes
+      > 0) > 75
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} swap > 75% used for 15m
+      description: Heavy swap use means the working set no longer fits in RAM; latency becomes dominated
+        by disk paging and gets dramatically worse under load.
+      runbook: Reduce memory demand (rightsize/limit services) or add RAM; if swap is only holding idle
+        pages and swap-in is flat, no urgent action is needed.
+      dashboard: dashboards/linux/memory.json
+  - alert: HostOOMKilled
+    expr: increase(node_vmstat_oom_kill[10m]) > 0
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: Host {{ $labels.instance }} OOM-killed a process
+      description: The kernel killed a process to reclaim memory — something on the host already lost
+        work, and it will recur until demand drops.
+      runbook: Add a memory limit or rightsize the offending workload; if the victim is a critical service,
+        add RAM or move it off the host.
+      dashboard: dashboards/linux/memory.json
+  - alert: HostNetworkPacketDrops
+    expr: rate(node_network_receive_drop_total{device!~"lo"}[5m]) + rate(node_network_transmit_drop_total{device!~"lo"}[5m])
+      > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Interface {{ $labels.device }} on {{ $labels.instance }} dropping > 1 pkt/s for 10m
+      description: Packet drops trigger TCP retransmits and collapse effective throughput long before
+        bandwidth graphs look full.
+      runbook: Raise NIC ring-buffer sizes (ethtool -G), tune the qdisc, or shed load; for cloud NICs,
+        check the instance's packet-per-second allowance.
+      dashboard: dashboards/linux/network.json
+  - alert: HostNetworkReceiveErrors
+    expr: rate(node_network_receive_errs_total{device!~"lo"}[5m]) > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Interface {{ $labels.device }} on {{ $labels.instance }} > 1 rx error/s for 10m
+      description: Receive errors (CRC/frame/FIFO) indicate a physical-layer or driver fault that silently
+        corrupts and discards frames.
+      runbook: Reseat or replace the cable/SFP, move to another switch port, or update the NIC driver/firmware;
+        drain the host if errors persist.
+      dashboard: dashboards/linux/network.json
+  - alert: HostConntrackTableNearLimit
+    expr: 100 * node_nf_conntrack_entries / clamp_min(node_nf_conntrack_entries_limit, 1) > 90
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Host {{ $labels.instance }} conntrack table > 90% full
+      description: When the connection-tracking table fills, the kernel drops new connections and logs
+        an nf_conntrack table-full message — the host refuses traffic while looking otherwise healthy.
+      runbook: Raise `net.netfilter.nf_conntrack_max`, shorten conntrack timeouts, or stop the connection
+        source; consider NOTRACK rules for high-volume stateless traffic.
+      dashboard: dashboards/linux/network.json
+  - alert: HostMemoryPressureFull
+    expr: rate(node_pressure_memory_stalled_seconds_total[5m]) > 0.2
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Host {{ $labels.instance }} full memory pressure over 20%
+      description: Full memory pressure means every task was blocked on memory for over a fifth of the
+        time — the host is thrashing and OOM is imminent.
+      runbook: Shed or rightsize the memory hog, add RAM, or move workloads off the host before the OOM
+        killer makes the choice for you.
+      dashboard: dashboards/linux/pressure-stall.json
+  - alert: HostIOPressureHigh
+    expr: rate(node_pressure_io_waiting_seconds_total[5m]) > 0.5
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} IO pressure (some) over 50%
+      description: Tasks spent more than half the time waiting on IO — storage is the bottleneck even
+        if disk throughput looks unremarkable.
+      runbook: Move hot data to faster storage, raise provisioned IOPS, or reduce the IO source (compaction,
+        backup, log volume).
+      dashboard: dashboards/linux/pressure-stall.json
+  - alert: HostCPUPressureHigh
+    expr: rate(node_pressure_cpu_waiting_seconds_total[5m]) > 0.5
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} CPU pressure (some) over 50%
+      description: Tasks spent more than half the time waiting for a CPU — real scheduling contention
+        that utilisation averages can hide.
+      runbook: Rightsize or scale out the contended workload, or relieve oversubscription by moving tasks
+        off the host.
+      dashboard: dashboards/linux/pressure-stall.json
+  - alert: HostFileDescriptorsExhausting
+    expr: 100 * node_filefd_allocated / clamp_min(node_filefd_maximum, 1) > 90
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Host {{ $labels.instance }} file descriptors > 90% of the system limit
+      description: Near the file-max limit, new opens, sockets and accepts fail with ENFILE/EMFILE — services
+        refuse connections while CPU and memory look healthy.
+      runbook: Restart or fix the leaking process; raise `fs.file-max` and per-process `LimitNOFILE` only
+        as a stopgap, not a fix for a leak.
+      dashboard: dashboards/linux/processes.json
+  - alert: HostContextSwitchStorm
+    expr: rate(node_context_switches_total[5m]) > 5 * avg_over_time(rate(node_context_switches_total[5m])[1h:5m])
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} context-switch rate 5× its hourly baseline
+      description: A context-switch storm burns CPU in the scheduler instead of the application and usually
+        signals lock contention or CPU oversubscription.
+      runbook: Reduce contention (fix locking, pin threads, lower thread-pool sizes) or relieve oversubscription
+        by moving workloads off the host.
+      dashboard: dashboards/linux/processes.json
+  - alert: HostForkRateHigh
+    expr: rate(node_forks_total[5m]) > 1000
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} forking > 1000 procs/s
+      description: A runaway fork rate is the signature of a fork bomb or a crash-restart loop that exhausts
+        PIDs and CPU.
+      runbook: Stop or fix the offending supervisor/script; apply a cgroup `pids.max` limit to contain
+        it.
+      dashboard: dashboards/linux/processes.json
+  - alert: HostSystemdUnitFailed
+    expr: node_systemd_unit_state{state="failed"} == 1
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Unit {{ $labels.name }} failed on {{ $labels.instance }}
+      description: A failed unit means a service the host is supposed to run is down — and it stays down
+        until something restarts it.
+      runbook: Fix the root cause (config, dependency, resource), then `systemctl reset-failed {{ $labels.name
+        }} && systemctl restart {{ $labels.name }}`.
+      dashboard: dashboards/linux/systemd.json
+  - alert: HostManySystemdFailures
+    expr: sum by (instance, job) (node_systemd_unit_state{state="failed"} == 1) > 3
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} has more than 3 failed units
+      description: Several units failing together usually points at a shared root cause — a full disk,
+        a missing mount, a failed dependency, or a bad config rollout.
+      runbook: Fix the shared cause first (e.g. remount the failed filesystem) then reset-failed the dependent
+        units; they often recover together.
+      dashboard: dashboards/linux/systemd.json
+  - alert: HostClockNotSynchronised
+    expr: node_timex_sync_status == 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} clock is not synchronised
+      description: A free-running clock drifts and will eventually break auth tokens, TLS validity windows
+        and log correlation across the fleet.
+      runbook: Restart chrony/ntpd, verify reachable and trusted upstream time servers, and confirm UDP/123
+        is not blocked by a firewall.
+      dashboard: dashboards/linux/time-sync.json
+  - alert: HostClockOffsetHigh
+    expr: abs(node_timex_offset_seconds) > 0.1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Host {{ $labels.instance }} clock offset over 100ms
+      description: An offset above 100ms is enough to fail tight TLS/Kerberos validity checks and to misorder
+        events in distributed systems.
+      runbook: Correct the source (replace the bad upstream or fix the local daemon); on VMs, ensure the
+        host time source and guest agent are healthy.
+      dashboard: dashboards/linux/time-sync.json
+  - alert: VolumePredictedFullThisWeek
+    expr: predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"}[7d],
+      7 * 86400) < 0 and node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"} > 0
+    for: 1h
+    labels:
+      severity: warning
+    annotations:
+      summary: Volume {{ $labels.mountpoint }} on {{ $labels.instance }} predicted full within 7 days
+      description: A 7-day projection crossing zero gives enough lead time to approve and execute a volume
+        expansion before it becomes an incident.
+      runbook: Plan an expansion or data-retention change now; for cloud volumes, schedule the resize;
+        for logs/artifacts, tighten retention.
+      dashboard: dashboards/linux/volume-capacity.json
+  - alert: VolumeLowFreeSpace
+    expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|fuse.*"}
+      < 0.10
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Volume {{ $labels.mountpoint }} on {{ $labels.instance }} below 10% free
+      description: Under 10% free a volume has little planning runway left; without action it becomes
+        an operational disk-full page soon.
+      runbook: Expand the volume or reclaim space; coordinate with the team that owns the data on that
+        mount.
+      dashboard: dashboards/linux/volume-capacity.json

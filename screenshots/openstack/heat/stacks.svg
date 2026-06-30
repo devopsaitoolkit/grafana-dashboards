@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1404" height="882" viewBox="0 0 1404 882" font-family="Inter, Roboto, Arial, sans-serif">
+<rect width="1404" height="882" fill="#0b0c0e"/>
+<text x="16" y="30" fill="#d8d9da" font-size="16" font-weight="600">OpenStack / Heat — Orchestration Stacks</text>
+<text x="16" y="48" fill="#8e8e8e" font-size="11">Schematic layout · datasource: prometheus · uid: openstack-heat-stacks</text>
+<rect x="16" y="56" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="75" fill="#d8d9da" font-size="12" font-weight="600">▾ Orchestration health — read these first</text>
+<rect x="18" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="88" width="260" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="106" fill="#d8d9da" font-size="11" font-weight="500">Failed stacks</text>
+<text x="26" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="148" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="282" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="282" y="88" width="260" height="3" fill="#3274d9" rx="2"/>
+<text x="290" y="106" fill="#d8d9da" font-size="11" font-weight="500">In progress</text>
+<text x="290" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="412" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="546" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="88" width="260" height="3" fill="#3274d9" rx="2"/>
+<text x="554" y="106" fill="#d8d9da" font-size="11" font-weight="500">Complete</text>
+<text x="554" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="676" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="810" y="88" width="260" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="810" y="88" width="260" height="3" fill="#3274d9" rx="2"/>
+<text x="818" y="106" fill="#d8d9da" font-size="11" font-weight="500">Total stacks</text>
+<text x="818" y="120" fill="#8e8e8e" font-size="9">stat · short</text>
+<text x="940" y="222" fill="#3274d9" font-size="20" font-weight="700" text-anchor="middle">●</text>
+<rect x="16" y="326" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="345" fill="#d8d9da" font-size="12" font-weight="600">▾ Status breakdown</text>
+<rect x="18" y="358" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="358" width="524" height="3" fill="#73bf69" rx="2"/>
+<text x="26" y="376" fill="#d8d9da" font-size="11" font-weight="500">Stacks by status</text>
+<text x="26" y="390" fill="#8e8e8e" font-size="9">piechart · short</text>
+<rect x="28" y="476" width="252" height="5" fill="#73bf69" opacity="0.70" rx="2"/>
+<rect x="28" y="485" width="328" height="5" fill="#73bf69" opacity="0.55" rx="2"/>
+<rect x="28" y="494" width="403" height="5" fill="#73bf69" opacity="0.40" rx="2"/>
+<rect x="546" y="358" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="358" width="524" height="3" fill="#8e8e8e" rx="2"/>
+<text x="554" y="376" fill="#d8d9da" font-size="11" font-weight="500">Failed stacks</text>
+<text x="554" y="390" fill="#8e8e8e" font-size="9">table · short</text>
+<rect x="556" y="476" width="252" height="5" fill="#8e8e8e" opacity="0.70" rx="2"/>
+<rect x="556" y="485" width="328" height="5" fill="#8e8e8e" opacity="0.55" rx="2"/>
+<rect x="556" y="494" width="403" height="5" fill="#8e8e8e" opacity="0.40" rx="2"/>
+<rect x="16" y="596" width="1056" height="26" fill="#22252b" rx="3"/>
+<text x="26" y="615" fill="#d8d9da" font-size="12" font-weight="600">▾ Trends</text>
+<rect x="18" y="628" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="18" y="628" width="524" height="3" fill="#3274d9" rx="2"/>
+<text x="26" y="646" fill="#d8d9da" font-size="11" font-weight="500">Stacks by status over time</text>
+<text x="26" y="660" fill="#8e8e8e" font-size="9">timeseries · short</text>
+<polyline points="28,758 112,744 196,758 280,744 364,758 448,744 532,758" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="546" y="628" width="524" height="234" fill="#181b1f" stroke="#2c3235" rx="3"/>
+<rect x="546" y="628" width="524" height="3" fill="#3274d9" rx="2"/>
+<text x="554" y="646" fill="#d8d9da" font-size="11" font-weight="500">Failed stacks over time</text>
+<text x="554" y="660" fill="#8e8e8e" font-size="9">timeseries · short</text>
+<polyline points="556,758 640,744 724,758 808,744 892,758 976,744 1060,758" fill="none" stroke="#3274d9" stroke-width="1.5" opacity="0.8"/>
+<rect x="1088" y="56" width="284" height="810" fill="#181b1f" stroke="#2c3235" rx="4"/>
+<text x="1100" y="78" fill="#d8d9da" font-size="12" font-weight="700">What to look for</text>
+<circle cx="1106" cy="94" r="4" fill="#3274d9"/>
+<text x="1118" y="98" fill="#8e8e8e" font-size="10">How many stacks are in a *_FAILED state</text>
+<text x="1118" y="111" fill="#8e8e8e" font-size="10">right now?</text>
+<circle cx="1106" cy="128" r="4" fill="#3274d9"/>
+<text x="1118" y="132" fill="#8e8e8e" font-size="10">How many stacks are mid-operation</text>
+<text x="1118" y="145" fill="#8e8e8e" font-size="10">(CREATE/UPDATE/DELETE_IN_PROGRESS)?</text>
+<circle cx="1106" cy="162" r="4" fill="#3274d9"/>
+<text x="1118" y="166" fill="#8e8e8e" font-size="10">Which specific stacks failed (name and</text>
+<text x="1118" y="179" fill="#8e8e8e" font-size="10">status) so I can act?</text>
+<circle cx="1106" cy="196" r="4" fill="#3274d9"/>
+<text x="1118" y="200" fill="#8e8e8e" font-size="10">Is the failed/in-progress mix trending</text>
+<text x="1118" y="213" fill="#8e8e8e" font-size="10">worse over time?</text>
+<circle cx="1106" cy="230" r="4" fill="#73bf69"/>
+<text x="1118" y="234" fill="#8e8e8e" font-size="10">Green: within expected range</text>
+<circle cx="1106" cy="251" r="4" fill="#f2cc0c"/>
+<text x="1118" y="255" fill="#8e8e8e" font-size="10">Yellow: investigate — approaching a</text>
+<text x="1118" y="268" fill="#8e8e8e" font-size="10">limit</text>
+<circle cx="1106" cy="285" r="4" fill="#e02f44"/>
+<text x="1118" y="289" fill="#8e8e8e" font-size="10">Red: act now — threshold breached</text>
+</svg>

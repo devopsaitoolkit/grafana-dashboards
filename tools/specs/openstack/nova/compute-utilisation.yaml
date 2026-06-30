@@ -1,0 +1,242 @@
+# Resource utilisation vs allocation. Leads with the fleet overcommit ratio and how
+# much allocatable headroom is left against your configured allocation ratios.
+title: OpenStack / Nova Compute Utilisation
+description: >-
+  Allocated-vs-physical resource utilisation for an OpenStack Nova fleet from
+  openstack-exporter: how far vCPU and memory are committed past physical capacity,
+  the overcommit ratio in use, allocatable headroom against your configured ratios,
+  and utilisation broken out per aggregate. Answers "how oversubscribed are we, and
+  how much more can we safely place?".
+datasource: prometheus
+tags: [openstack, nova, utilisation, overcommit, openstack-exporter]
+seo_phrase: OpenStack Nova overcommit Grafana dashboard
+refresh: 1m
+time_from: now-24h
+
+questions:
+  - "What is the fleet's current vCPU overcommit ratio?"
+  - "How much allocatable headroom is left against the configured allocation ratios?"
+  - "Is memory or vCPU the binding constraint on further overcommit?"
+  - "Which aggregate is the most oversubscribed?"
+  - "Are we allocating past physical memory (which has no safe overcommit)?"
+
+production_lessons: >-
+  vCPU overcommit is a lever you can pull; memory overcommit is a cliff you fall off.
+  This dashboard separates the two on purpose: the fleet can safely run several vCPUs
+  per physical core, but once allocated memory passes physical RAM the host swaps and
+  every instance on it suffers — so the memory panels treat 100% of *physical* as the
+  hard line while vCPU is measured against your chosen ratio. The "allocatable headroom"
+  number is the one capacity reviews actually use: it answers "how many more average
+  instances can we place before the configured ratio is spent", which is far more
+  actionable than a raw utilisation percentage. Watching utilisation per aggregate keeps
+  one overcommitted tier from hiding inside a comfortable fleet average.
+
+data_sources:
+  - "`openstack-exporter` (github.com/openstack-exporter/openstack-exporter) scraping
+    the Nova hypervisor-stats API: `openstack_nova_vcpus` / `openstack_nova_vcpus_used`
+    and `openstack_nova_memory_mb` / `openstack_nova_memory_used_mb`, labelled by
+    `hostname` and `aggregate`. Physical totals come from the un-suffixed metrics; the
+    `_used` series are Nova's committed allocation, not live OS usage."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_nova_vcpus, job)
+    description: Prometheus scrape job for your openstack-exporter target.
+    multi: false
+    includeAll: false
+  - name: aggregate
+    label: Aggregate
+    query: label_values(openstack_nova_vcpus{job="$job"}, aggregate)
+    description: Host aggregate / availability zone to scope to; All for the whole fleet.
+    multi: false
+    includeAll: true
+  - name: ratio
+    label: vCPU ratio
+    type: custom
+    options: ["4", "8", "16"]
+    description: Your configured cpu_allocation_ratio, used to compute allocatable vCPU headroom.
+
+rows:
+  - title: Overcommit & headroom — read these first
+    panels:
+      - type: stat
+        title: Fleet vCPU overcommit
+        description: Allocated vCPUs ÷ physical cores across the fleet. Compare against your cpu_allocation_ratio.
+        unit: short
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 3}
+          - {color: red, value: 6}
+        targets:
+          - expr: >-
+              sum(openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate"})
+              / sum(openstack_nova_vcpus{job="$job", aggregate=~"$aggregate"}) or vector(0)
+            instant: true
+            legend: ratio
+      - type: gauge
+        title: Allocatable vCPU headroom
+        description: Percent of allocatable vCPU (physical × ratio) still free. Drives "how many more instances can we place".
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 15}
+          - {color: green, value: 30}
+        targets:
+          - expr: >-
+              100 * (1 -
+                sum(openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate"})
+                / (sum(openstack_nova_vcpus{job="$job", aggregate=~"$aggregate"}) * $ratio)
+              )
+            instant: true
+            legend: headroom
+      - type: gauge
+        title: Memory allocated (of physical)
+        description: Allocated memory as a percent of physical RAM. Past 100% the fleet has no safe overcommit left.
+        unit: percent
+        min: 0
+        max: 110
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 100}
+        targets:
+          - expr: >-
+              100 * sum(openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate"})
+              / sum(openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate"}) or vector(0)
+            instant: true
+            legend: memory
+      - type: stat
+        title: Free allocatable vCPUs
+        description: Remaining vCPUs you can still commit before the configured ratio is spent.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 50}
+          - {color: green, value: 200}
+        targets:
+          - expr: >-
+              clamp_min(
+                sum(openstack_nova_vcpus{job="$job", aggregate=~"$aggregate"}) * $ratio
+                - sum(openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate"}), 0
+              ) or vector(0)
+            instant: true
+            legend: free vcpu
+
+  - title: Utilisation per aggregate
+    panels:
+      - type: bargauge
+        title: vCPU allocation per aggregate
+        description: Allocated ÷ physical vCPU by aggregate. The tallest bar is your most oversubscribed tier.
+        unit: percentunit
+        min: 0
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 2}
+          - {color: red, value: 4}
+        targets:
+          - expr: >-
+              sum by (aggregate) (openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate"})
+              / sum by (aggregate) (openstack_nova_vcpus{job="$job", aggregate=~"$aggregate"})
+            instant: true
+            legend: "{{aggregate}}"
+      - type: bargauge
+        title: Memory allocation per aggregate
+        description: Allocated ÷ physical memory by aggregate. Anything near 100% has no overcommit headroom.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 85}
+          - {color: red, value: 100}
+        targets:
+          - expr: >-
+              100 * sum by (aggregate) (openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate"})
+              / sum by (aggregate) (openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate"})
+            instant: true
+            legend: "{{aggregate}}"
+
+  - title: Allocated vs physical over time
+    panels:
+      - type: timeseries
+        title: vCPU — allocated vs physical & allocatable
+        description: Committed vCPUs against physical cores and the allocatable ceiling (physical × ratio).
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(openstack_nova_vcpus_used{job="$job", aggregate=~"$aggregate"})
+            legend: allocated
+          - expr: sum(openstack_nova_vcpus{job="$job", aggregate=~"$aggregate"})
+            legend: physical cores
+          - expr: sum(openstack_nova_vcpus{job="$job", aggregate=~"$aggregate"}) * $ratio
+            legend: allocatable ceiling
+      - type: timeseries
+        title: Memory — allocated vs physical
+        description: Committed memory against physical RAM. The allocated line crossing physical is the overcommit cliff.
+        unit: decmbytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(openstack_nova_memory_used_mb{job="$job", aggregate=~"$aggregate"})
+            legend: allocated
+          - expr: sum(openstack_nova_memory_mb{job="$job", aggregate=~"$aggregate"})
+            legend: physical
+
+alerts:
+  - name: NovaMemoryOvercommitted
+    severity: critical
+    expr: >-
+      100 * sum(openstack_nova_memory_used_mb) / sum(openstack_nova_memory_mb) > 100
+    for: 10m
+    summary: "Nova fleet memory allocated past physical ({{ $value | printf \"%.0f\" }}%)"
+    why: Memory has no safe overcommit — past 100% of physical, hosts swap and every instance on the affected nodes degrades, with no warning in guest metrics.
+    investigate: "Open Nova Compute Utilisation; find the over-allocated aggregate and the offending hosts on the capacity dashboard."
+    runbook: "Stop scheduling to the affected tier, migrate instances out, or add RAM; set ram_allocation_ratio to 1.0 unless you genuinely run KSM/ballooning."
+    recovery: Clears when allocated memory drops back below 100% of physical for 5m.
+    false_positives: Clouds running KSM/memory-ballooning intentionally above 1.0 — raise the threshold to that ratio for the relevant aggregate.
+  - name: NovaVcpuAllocatableHeadroomLow
+    severity: warning
+    expr: >-
+      100 * (1 - sum(openstack_nova_vcpus_used) / (sum(openstack_nova_vcpus) * 4)) < 15
+    for: 30m
+    summary: "vCPU allocatable headroom below 15% (at 4× ratio)"
+    why: With little allocatable vCPU left, larger flavours start failing to schedule and you cannot drain a host without builds backing up.
+    investigate: "Check per-aggregate allocation; decide whether to add hosts or, if steal is low, raise the cpu_allocation_ratio."
+    runbook: "Add compute capacity or rebalance; only increase the ratio after confirming acceptable steal time on the busiest hosts."
+    recovery: Clears when allocatable vCPU headroom rises above 15% for 10m.
+    false_positives: The hard-coded 4× in this rule may not match your ratio — align it with your configured cpu_allocation_ratio.
+
+troubleshooting:
+  - symptom: Headroom panels change when I pick a different vCPU ratio
+    cause: Allocatable headroom is physical × the selected ratio; the dropdown deliberately models different overcommit policies.
+    action: Set the ratio to your real cpu_allocation_ratio for an accurate number.
+  - symptom: Memory-of-physical reads above 100% but nothing is on fire
+    cause: KSM or ballooning lets the cloud allocate slightly past physical; or stale exporter data during a scrape gap.
+    action: Confirm your ram_allocation_ratio policy; treat sustained >100% as real risk.
+  - symptom: Utilisation is high but live CPU usage on hosts is low
+    cause: These metrics track committed allocation, not OS usage; idle instances still reserve their flavour.
+    action: Plan placement against allocation here; use node_exporter dashboards for live load.
+
+performance: >-
+  All panels are fleet- or aggregate-level `sum()` over one-series-per-host gauges, so
+  cost is independent of instance count. The `$ratio` variable is a constant folded into
+  the query, adding no series. A 24h default window and 1m refresh suit slow-moving
+  allocation; there is nothing here that benefits from sub-minute refresh.
+
+customization: >-
+  Add your real allocation ratios to the `ratio` dropdown options, and align the alert's
+  hard-coded 4× with it. If you run a non-trivial ram_allocation_ratio, raise the memory
+  thresholds accordingly. Scope `$aggregate` to review one tier; switch the memory
+  timeseries unit to `decbytes` if you prefer base-1000 byte scaling on your Grafana.

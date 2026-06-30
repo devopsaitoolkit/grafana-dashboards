@@ -1,0 +1,589 @@
+# Alerting rules for the kubernetes dashboards.
+# Generated from tools/specs/kubernetes/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: kubernetes.rules
+  rules:
+  - alert: APIServerHighErrorRate
+    expr: 100 * sum by (job) (rate(apiserver_request_total{code=~"5.."}[5m])) / sum by (job) (rate(apiserver_request_total[5m]))
+      > 5
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: API server 5xx error ratio above 5% on {{ $labels.job }}
+      description: A high server-error ratio means controllers, kubelets and operators are failing their
+        API calls — the cluster stops converging.
+      runbook: Correlate with etcd health (fsync/commit p99). If etcd is healthy, check apiserver logs
+        for panics, admission webhook timeouts and authn/authz backends.
+      dashboard: dashboards/kubernetes/apiserver.json
+  - alert: APIServerHighReadLatency
+    expr: histogram_quantile(0.99, sum by (le, job) (rate(apiserver_request_duration_seconds_bucket{verb=~"GET|LIST"}[5m])))
+      > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: API server read p99 latency above 1s on {{ $labels.job }}
+      description: Slow reads back up controllers and kubectl, and usually signal etcd pressure or an
+        expensive unindexed LIST.
+      runbook: Identify the offending resource in the p99-by-verb panel; add pagination/field selectors
+        to the client, or scale/repair etcd.
+      dashboard: dashboards/kubernetes/apiserver.json
+  - alert: APIServerFlowControlRejecting
+    expr: sum by (job) (rate(apiserver_flowcontrol_rejected_requests_total[5m])) > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: API server is rejecting requests via API Priority & Fairness on {{ $labels.job }}
+      description: APF rejections mean the apiserver is at its concurrency limit and shedding load; some
+        clients are getting 429s.
+      runbook: Identify the noisy client driving load; tune its request rate or adjust the FlowSchema/PriorityLevelConfiguration
+        concurrency shares.
+      dashboard: dashboards/kubernetes/apiserver.json
+  - alert: KubeHPAMaxedOut
+    expr: kube_horizontalpodautoscaler_status_current_replicas >= kube_horizontalpodautoscaler_spec_max_replicas
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} pinned at max replicas
+        for 15m
+      description: An HPA at its ceiling has exhausted its ability to scale — any further load increase
+        is absorbed as higher latency or dropped requests, not more pods.
+      runbook: Raise maxReplicas if cluster capacity allows, scale the cluster to make room, or fix the
+        upstream cause of the load.
+      dashboard: dashboards/kubernetes/autoscaling.json
+  - alert: KubeHPADesiredAboveMax
+    expr: kube_horizontalpodautoscaler_status_desired_replicas > kube_horizontalpodautoscaler_spec_max_replicas
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} wants more replicas than
+        its max
+      description: When desired exceeds max, the autoscaler is explicitly asking for capacity it is not
+        allowed to create — the cap is now the direct cause of under-provisioning.
+      runbook: Raise maxReplicas (and add nodes if the cluster is full), or reduce load; if the metric
+        is wrong, fix the HPA target.
+      dashboard: dashboards/kubernetes/autoscaling.json
+  - alert: KubeClusterCPUHeadroomLow
+    expr: 100 * (1 - sum(kube_pod_container_resource_requests{resource="cpu"}) / sum(kube_node_status_allocatable{resource="cpu"}))
+      < 10
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Cluster CPU headroom below 10%
+      description: Under 10% headroom the cluster cannot absorb a rolling update, a node failure, or an
+        autoscaling event without producing Pending pods.
+      runbook: Add nodes (or enable/expand the cluster autoscaler), right-size the heaviest requests,
+        or reschedule low-priority workloads.
+      dashboard: dashboards/kubernetes/cluster-capacity.json
+  - alert: KubeClusterPodSlotsLow
+    expr: 100 * (1 - sum(kube_pod_status_phase{phase="Running"}) / sum(kube_node_status_allocatable{resource="pods"}))
+      < 10
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Cluster pod-slot headroom below 10%
+      description: Pods have a hard per-node cap (default 110); hitting it produces Pending pods even
+        when CPU and memory look plentiful — a failure mode CPU-only dashboards miss.
+      runbook: Add nodes, raise the kubelet maxPods where the OS/CNI allows, or consolidate many tiny
+        pods into fewer.
+      dashboard: dashboards/kubernetes/cluster-capacity.json
+  - alert: KubeClusterNodeNotReady
+    expr: count(kube_node_info) - sum(kube_node_status_condition{condition="Ready", status="true"}) >
+      0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: '{{ $value }} node(s) NotReady in the cluster'
+      description: A NotReady node has stopped scheduling and its pods will be evicted, shrinking capacity
+        and risking cascading Pending pods.
+      runbook: Restart kubelet/containerd or drain and replace the node; if many nodes flap together,
+        suspect the control plane or network.
+      dashboard: dashboards/kubernetes/cluster-overview.json
+  - alert: KubeClusterPodsPending
+    expr: sum(kube_pod_status_phase{phase="Pending"}) > 10
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $value }} pods Pending cluster-wide for 15m'
+      description: Sustained Pending pods mean the scheduler cannot place work — usually exhausted CPU/memory
+        allocatable or unsatisfiable affinity.
+      runbook: Add nodes (or let the cluster autoscaler), lower requests, or fix the scheduling constraint
+        the events report.
+      dashboard: dashboards/kubernetes/cluster-overview.json
+  - alert: KubeClusterCPUOvercommitted
+    expr: 100 * sum(kube_pod_container_resource_requests{resource="cpu"}) / sum(kube_node_status_allocatable{resource="cpu"})
+      > 90
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Cluster CPU requests at {{ $value | printf "%.0f" }}% of allocatable
+      description: With requests above 90% of allocatable there is almost no room for the next pod, restart
+        or rolling update — the cluster is one deploy from Pending.
+      runbook: Right-size requests to actual usage, add capacity, or enforce quotas on the heaviest namespaces.
+      dashboard: dashboards/kubernetes/cluster-overview.json
+  - alert: CoreDNSHighServfailRate
+    expr: 100 * sum by (job) (rate(coredns_dns_responses_total{rcode="SERVFAIL"}[5m])) / sum by (job)
+      (rate(coredns_dns_responses_total[5m])) > 2
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: CoreDNS SERVFAIL ratio above 2% on {{ $labels.job }}
+      description: SERVFAIL means real resolution failures; clients across the cluster will see intermittent
+        connection errors and timeouts.
+      runbook: Verify upstream DNS reachability and the forward plugin config; check for a recent Corefile
+        change; confirm upstream resolvers aren't rate-limiting.
+      dashboard: dashboards/kubernetes/coredns.json
+  - alert: CoreDNSHighLatency
+    expr: histogram_quantile(0.99, sum by (le, job) (rate(coredns_dns_request_duration_seconds_bucket[5m])))
+      > 0.1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: CoreDNS query p99 latency above 100ms on {{ $labels.job }}
+      description: Slow DNS turns into application-level timeouts and retries everywhere, since almost
+        every connection starts with a lookup.
+      runbook: Scale CoreDNS replicas, raise cache TTL/size, and verify upstream resolver latency; check
+        node CPU on the CoreDNS pods.
+      dashboard: dashboards/kubernetes/coredns.json
+  - alert: CoreDNSPanicking
+    expr: increase(coredns_panics_total[5m]) > 0
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: CoreDNS panic on {{ $labels.instance }}
+      description: A panic crashes the CoreDNS process; that replica stops answering until it restarts,
+        shrinking DNS capacity.
+      runbook: Roll back the most recent Corefile/plugin change; if it recurs, capture logs and open an
+        upstream issue, and ensure enough replicas to absorb one crashing.
+      dashboard: dashboards/kubernetes/coredns.json
+  - alert: KubeDaemonSetNotFullyRolledOut
+    expr: kube_daemonset_status_number_ready < kube_daemonset_status_desired_number_scheduled
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} not fully covered for 15m
+      description: An uncovered node is silently missing whatever the daemon provides — logging, networking,
+        storage or metrics — and that gap is invisible from the affected node's own perspective.
+      runbook: Add the missing toleration/affinity, free resources on the node, or delete the stuck daemon
+        pod so it reschedules.
+      dashboard: dashboards/kubernetes/daemonsets.json
+  - alert: KubeDaemonSetFullyDown
+    expr: kube_daemonset_status_number_ready == 0 and kube_daemonset_status_desired_number_scheduled >
+      0
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: DaemonSet {{ $labels.namespace }}/{{ $labels.daemonset }} has zero ready pods
+      description: A DaemonSet with no ready pods means the capability is missing cluster-wide — every
+        node has lost its log agent, CNI, or CSI driver.
+      runbook: Roll back the DaemonSet to the last working revision; if it is an admission/image issue,
+        fix it then force a rollout restart.
+      dashboard: dashboards/kubernetes/daemonsets.json
+  - alert: KubeDeploymentReplicasMismatch
+    expr: kube_deployment_status_replicas_available < kube_deployment_spec_replicas
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Deployment {{ $labels.namespace }}/{{ $labels.deployment }} below desired replicas for
+        15m
+      description: A deployment short of replicas for 15 minutes is not a slow rollout — it is stuck,
+        serving below capacity and one failure away from an outage.
+      runbook: Fix the underlying pod failure (image, config, probe, capacity) or roll back the deployment
+        to the last healthy revision.
+      dashboard: dashboards/kubernetes/deployments.json
+  - alert: KubeDeploymentUnavailableReplicas
+    expr: kube_deployment_status_replicas_unavailable > 0 and kube_deployment_spec_replicas <= 2
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Deployment {{ $labels.namespace }}/{{ $labels.deployment }} has unavailable replicas (low
+        replica count)
+      description: On a small deployment a single unavailable replica is a large fraction of capacity
+        — for a 1- or 2-replica service it may be a full or half outage.
+      runbook: Restore the replica (fix the pod or reschedule it); consider raising the replica count
+        so one failure is not a half outage.
+      dashboard: dashboards/kubernetes/deployments.json
+  - alert: EtcdNoLeader
+    expr: etcd_server_has_leader == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: etcd member {{ $labels.instance }} has no leader
+      description: A member without a leader cannot serve writes; if a majority lose the leader the cluster
+        loses quorum and the API server stops accepting changes.
+      runbook: Check the member's logs and disk/network health; if a minority is affected it should re-join,
+        if a majority is down restore quorum from a healthy member or backup.
+      dashboard: dashboards/kubernetes/etcd.json
+  - alert: EtcdHighFsyncDuration
+    expr: histogram_quantile(0.99, sum by (le, instance, job) (rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])))
+      > 0.05
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: etcd WAL fsync p99 above 50ms on {{ $labels.instance }}
+      description: Slow fsync stalls the Raft log; heartbeats miss, elections flap and API server latency
+        climbs across the whole cluster.
+      runbook: Move etcd to dedicated low-latency SSD/NVMe; remove any disk sharing; verify the storage
+        is not throttled or degraded.
+      dashboard: dashboards/kubernetes/etcd.json
+  - alert: EtcdDatabaseQuotaNearFull
+    expr: etcd_mvcc_db_total_size_in_bytes / 2147483648 > 0.8
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: etcd database above 80% of the default 2 GiB quota on {{ $labels.instance }}
+      description: When the database hits its space quota etcd switches to read-only (NOSPACE alarm) and
+        the cluster can no longer accept writes.
+      runbook: Trigger compaction and run `etcdctl defrag` on each member; if usage is legitimately high,
+        raise `--quota-backend-bytes` and provision more disk.
+      dashboard: dashboards/kubernetes/etcd.json
+  - alert: IngressNginxHigh5xxRate
+    expr: 100 * sum by (job) (rate(nginx_ingress_controller_requests{status=~"5.."}[5m])) / sum by (job)
+      (rate(nginx_ingress_controller_requests[5m])) > 5
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: ingress-nginx 5xx ratio above 5% on {{ $labels.job }}
+      description: A high 5xx ratio at the front door means users are seeing errors right now — usually
+        an unhealthy upstream service.
+      runbook: Check the failing backend's pods/endpoints and health; if the controller itself is saturated
+        (active connections), scale the controller replicas.
+      dashboard: dashboards/kubernetes/ingress-nginx.json
+  - alert: IngressNginxHighLatency
+    expr: histogram_quantile(0.99, sum by (le, job) (rate(nginx_ingress_controller_request_duration_seconds_bucket[5m])))
+      > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: ingress-nginx request p99 latency above 1s on {{ $labels.job }}
+      description: Slow requests at the ingress mean slow pages for users regardless of which backend
+        is responsible.
+      runbook: Scale or fix the slow backend; check controller CPU and active connections for saturation;
+        review any recent ingress annotation/timeout change.
+      dashboard: dashboards/kubernetes/ingress-nginx.json
+  - alert: IngressNginxTLSCertExpiringSoon
+    expr: (nginx_ingress_controller_ssl_expire_time_seconds - time()) < 1209600
+    for: 1h
+    labels:
+      severity: warning
+    annotations:
+      summary: TLS certificate for {{ $labels.host }} expires within 14 days
+      description: An expired certificate fails every TLS handshake — a total outage for that host with
+        no warning if you don't watch the clock.
+      runbook: Renew the certificate (or fix the failing cert-manager Order/Challenge); verify the new
+        secret is mounted and the controller reloaded.
+      dashboard: dashboards/kubernetes/ingress-nginx.json
+  - alert: KubeletNodeConfigError
+    expr: kubelet_node_config_error == 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Kubelet on {{ $labels.instance }} reports a config error
+      description: A kubelet with a config error may refuse to start or update pods, so the node silently
+        stops accepting work correctly.
+      runbook: Fix or roll back the kubelet/dynamic-config change; restart the kubelet and confirm the
+        metric clears.
+      dashboard: dashboards/kubernetes/kubelet.json
+  - alert: KubeletPLEGLatencyHigh
+    expr: histogram_quantile(0.99, sum by (le, instance, job) (rate(kubelet_pleg_relist_duration_seconds_bucket[5m])))
+      > 10
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Kubelet PLEG relist p99 above 10s on {{ $labels.instance }}
+      description: A slow PLEG is the canonical precursor to a node flipping NotReady; the kubelet can't
+        keep up with container state.
+      runbook: Check containerd/CRI health and disk IO on the node; restart the runtime if it is wedged;
+        reduce pod density if the node is overloaded.
+      dashboard: dashboards/kubernetes/kubelet.json
+  - alert: KubeletRuntimeOperationErrors
+    expr: sum by (instance, job) (rate(kubelet_runtime_operations_errors_total[5m])) > 0.1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Kubelet runtime operation errors on {{ $labels.instance }}
+      description: Failing CRI operations mean containers won't pull, create or start reliably — pods
+        get stuck or crash-loop on that node.
+      runbook: For pull errors check registry auth/connectivity; for create/start errors check the container
+        runtime and node resources; restart containerd if needed.
+      dashboard: dashboards/kubernetes/kubelet.json
+  - alert: KubeNamespaceQuotaAlmostFull
+    expr: 100 * kube_resourcequota{resource="requests.cpu", type="used"} / ignoring(type) kube_resourcequota{resource="requests.cpu",
+      type="hard"} > 95
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Namespace {{ $labels.namespace }} CPU quota at {{ $value | printf "%.0f" }}%
+      description: A namespace at its ResourceQuota cannot create new pods — deploys and scale-ups silently
+        fail with quota errors, not capacity errors.
+      runbook: Raise the quota, right-size the namespace's requests to actual usage, or remove idle workloads
+        holding reservations.
+      dashboard: dashboards/kubernetes/namespaces.json
+  - alert: KubeNamespaceCPUHeavyConsumer
+    expr: sum by (namespace) (rate(container_cpu_usage_seconds_total{container!="", pod!=""}[5m])) > 0.4
+      * sum(rate(container_cpu_usage_seconds_total{container!="", pod!=""}[5m]))
+    for: 30m
+    labels:
+      severity: info
+    annotations:
+      summary: Namespace {{ $labels.namespace }} using over 40% of cluster CPU
+      description: A single namespace dominating cluster CPU is a noisy-neighbour and capacity-planning
+        risk worth a deliberate review.
+      runbook: Apply or tighten a ResourceQuota, move the workload to a dedicated node pool, or scale
+        the cluster for the new baseline.
+      dashboard: dashboards/kubernetes/namespaces.json
+  - alert: KubeNodeNotReady
+    expr: kube_node_status_condition{condition="Ready", status="true"} == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Node {{ $labels.node }} NotReady for 5m
+      description: A NotReady node evicts its pods and removes its capacity, pushing load and Pending
+        pressure onto the rest of the cluster.
+      runbook: Restart kubelet/containerd; if the node does not recover, drain and replace it. Investigate
+        the host (disk full, OOM, network).
+      dashboard: dashboards/kubernetes/nodes.json
+  - alert: KubeNodeMemoryPressure
+    expr: 100 * sum by (node) (container_memory_working_set_bytes{container!="", pod!=""}) / sum by (node)
+      (kube_node_status_allocatable{resource="memory"}) > 92
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Node {{ $labels.node }} memory at {{ $value | printf "%.0f" }}% of allocatable
+      description: Memory cannot burst beyond the node — past ~92% the kubelet begins evicting pods, and
+        an OOM kill of a system daemon can take the node NotReady.
+      runbook: Evict or reschedule memory-heavy pods, lower memory requests/limits, or add nodes; cordon
+        the node if it is flapping.
+      dashboard: dashboards/kubernetes/nodes.json
+  - alert: PersistentVolumeFailed
+    expr: kube_persistentvolume_status_phase{phase="Failed"} == 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: PersistentVolume {{ $labels.persistentvolume }} is in the Failed phase
+      description: A Failed PV means automatic reclamation or provisioning errored; the capacity is stuck
+        and won't be reused.
+      runbook: Resolve the underlying backend error; manually reclaim or delete the PV once the data is
+        handled and confirm the storage backend freed the volume.
+      dashboard: dashboards/kubernetes/persistent-volumes.json
+  - alert: PersistentVolumeClaimPending
+    expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} stuck Pending
+      description: A PVC that can't bind blocks its pod from starting — a real outage for that workload.
+      runbook: Create/fix the missing StorageClass or provisioner, free backend capacity, or (for static
+        provisioning) supply a matching PV; check CSI driver health.
+      dashboard: dashboards/kubernetes/persistent-volumes.json
+  - alert: PersistentVolumesReleasedAccumulating
+    expr: sum(kube_persistentvolume_status_phase{phase="Released"}) > 10
+    for: 1h
+    labels:
+      severity: info
+    annotations:
+      summary: More than 10 PVs are stuck in the Released phase
+      description: Released PVs under a Retain policy never return to the pool; over time this silently
+        leaks real storage capacity and cost.
+      runbook: Back up if needed, then delete the released PVs (and their backing volumes), or switch
+        the storage class reclaim policy to Delete for ephemeral data.
+      dashboard: dashboards/kubernetes/persistent-volumes.json
+  - alert: KubePodCrashLooping
+    expr: sum by (namespace, pod, container) (kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"})
+      > 0
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Pod {{ $labels.namespace }}/{{ $labels.pod }} container {{ $labels.container }} is CrashLoopBackOff
+      description: A crash-looping container serves no traffic and burns the node restarting it; if it
+        is a critical service the namespace is effectively down.
+      runbook: Roll back to the last working image, fix the failing config/secret, or correct the failing
+        health/liveness probe, then redeploy.
+      dashboard: dashboards/kubernetes/pods.json
+  - alert: KubePodImagePullFailing
+    expr: sum by (namespace, pod, container) (kube_pod_container_status_waiting_reason{reason=~"ImagePullBackOff|ErrImagePull"})
+      > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Pod {{ $labels.namespace }}/{{ $labels.pod }} cannot pull its image
+      description: An unpullable image means the pod will never start — a typo'd tag, deleted image, or
+        broken registry credentials blocks the whole rollout.
+      runbook: Fix the image reference or registry credentials, or push the missing tag, then delete the
+        pod to retry the pull.
+      dashboard: dashboards/kubernetes/pods.json
+  - alert: KubePodNotReady
+    expr: sum by (namespace, pod) (kube_pod_status_ready{condition="true"}) == 0 and on (namespace, pod)
+      sum by (namespace, pod) (kube_pod_status_phase{phase="Running"}) > 0
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Pod {{ $labels.namespace }}/{{ $labels.pod }} Running but NotReady for 15m
+      description: A Running-but-NotReady pod is failing its readiness probe, so it receives no traffic
+        yet still counts as a replica — capacity you think you have but do not.
+      runbook: Fix the failing dependency or correct an over-strict readiness probe; if the probe is wrong,
+        adjust its timeout/threshold.
+      dashboard: dashboards/kubernetes/pods.json
+  - alert: PVCNearFull
+    expr: kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes > 0.85
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is over 85% full
+      description: A volume nearing full risks failing application writes; many storage classes can't
+        be expanded instantly, so you need lead time.
+      runbook: Expand the PVC if the storage class allows `allowVolumeExpansion`; otherwise clean up data,
+        rotate logs, or migrate to a larger volume.
+      dashboard: dashboards/kubernetes/pvc-usage.json
+  - alert: PVCCriticallyFull
+    expr: kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes > 0.95
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is over 95% full
+      description: At this fill level write failures and data corruption are imminent, and the application
+        may already be degrading silently.
+      runbook: Free space immediately (truncate/rotate logs, clear temp data) and expand the volume; if
+        expansion isn't supported, migrate to a larger PVC urgently.
+      dashboard: dashboards/kubernetes/pvc-usage.json
+  - alert: PVCWillFillSoon
+    expr: predict_linear(kubelet_volume_stats_available_bytes[6h], 4 * 86400) < 0 and (kubelet_volume_stats_used_bytes
+      / kubelet_volume_stats_capacity_bytes) > 0.7
+    for: 1h
+    labels:
+      severity: warning
+    annotations:
+      summary: PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} projected to fill within
+        4 days
+      description: Catching a fill trend days ahead converts a 3am "disk full" page into a planned capacity
+        ticket.
+      runbook: Plan and apply a volume expansion, or reduce the growth source (log rotation, retention
+        policy) before the projection lands.
+      dashboard: dashboards/kubernetes/pvc-usage.json
+  - alert: SchedulerPendingPodsHigh
+    expr: sum by (job) (scheduler_pending_pods) > 50
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: More than 50 pods pending in the scheduler queue on {{ $labels.job }}
+      description: A sustained backlog means workloads aren't starting — usually no capacity fits, sometimes
+        the scheduler is stalled.
+      runbook: If pods are unschedulable, scale nodes / fix taints/affinity (or check the cluster-autoscaler);
+        if the scheduler is slow or erroring, inspect its logs and API server health.
+      dashboard: dashboards/kubernetes/scheduler.json
+  - alert: SchedulerHighAttemptLatency
+    expr: histogram_quantile(0.99, sum by (le, job) (rate(scheduler_scheduling_attempt_duration_seconds_bucket[5m])))
+      > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Scheduler attempt p99 latency above 1s on {{ $labels.job }}
+      description: A slow scheduling cycle throttles placement throughput and delays every new pod, independent
+        of capacity.
+      runbook: Check scheduler CPU and API server latency; reduce scheduling load (fewer custom plugins/large
+        pod specs) or scale control-plane resources.
+      dashboard: dashboards/kubernetes/scheduler.json
+  - alert: SchedulerErrors
+    expr: sum by (job) (rate(scheduler_schedule_attempts_total{result="error"}[5m])) > 0.1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: kube-scheduler is returning scheduling errors on {{ $labels.job }}
+      description: Errors (distinct from unschedulable) mean the scheduler failed to complete a cycle
+        — often an API/binding failure, not a capacity issue.
+      runbook: Inspect scheduler logs for bind/preemption failures and API server errors; roll back any
+        recent scheduler config/plugin change.
+      dashboard: dashboards/kubernetes/scheduler.json
+  - alert: KubeStatefulSetReplicasMismatch
+    expr: kube_statefulset_status_replicas_ready < kube_statefulset_replicas
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} below desired replicas for
+        15m
+      description: A stateful workload short of replicas for 15 minutes usually means a pod is stuck Pending
+        or failing readiness, and a sequential update will not advance past it.
+      runbook: Resolve the blocking pod (PVC, node placement, probe, or a bad image), then let the ordered
+        rollout continue; roll back if the new revision is bad.
+      dashboard: dashboards/kubernetes/statefulsets.json
+  - alert: KubeStatefulSetBelowQuorum
+    expr: kube_statefulset_status_replicas_ready < (kube_statefulset_replicas / 2) and kube_statefulset_replicas
+      >= 3
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: StatefulSet {{ $labels.namespace }}/{{ $labels.statefulset }} below majority of replicas
+      description: For a quorum-based cluster (etcd, Kafka, many databases) fewer than half the replicas
+        ready risks loss of quorum — writes stall and the system may go read-only or unavailable.
+      runbook: Restore failed members fast (storage, scheduling); do not start risky maintenance while
+        below quorum. Engage the data-store owner.
+      dashboard: dashboards/kubernetes/statefulsets.json
+  - alert: KubeWorkloadCPUThrottled
+    expr: sum by (namespace, pod) (rate(container_cpu_cfs_throttled_periods_total{container!="", pod!=""}[5m]))
+      / clamp_min(sum by (namespace, pod) (rate(container_cpu_cfs_periods_total{container!="", pod!=""}[5m])),
+      1) > 0.5
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Pod {{ $labels.namespace }}/{{ $labels.pod }} CPU-throttled over 50% of periods
+      description: Heavy CPU throttling means the container wants more CPU than its limit allows — latency
+        and queueing climb while the pod's CPU graph looks deceptively idle.
+      runbook: Raise or remove the CPU limit (keep the request), or scale the workload out so each replica
+        needs less CPU.
+      dashboard: dashboards/kubernetes/workload-resources.json
+  - alert: KubeWorkloadMemoryNearLimit
+    expr: sum by (namespace, pod, container) (container_memory_working_set_bytes{container!="", pod!=""})
+      / on (namespace, pod, container) sum by (namespace, pod, container) (kube_pod_container_resource_limits{resource="memory"})
+      > 0.95
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Container {{ $labels.namespace }}/{{ $labels.pod }} above 95% of its memory limit
+      description: Crossing the memory limit triggers an immediate OOM kill with no grace period — the
+        container dies mid-request and restarts, often in a loop.
+      runbook: Raise the memory limit if the workload genuinely needs it, fix the leak, or reduce in-app
+        cache/heap sizing to fit the limit.
+      dashboard: dashboards/kubernetes/workload-resources.json

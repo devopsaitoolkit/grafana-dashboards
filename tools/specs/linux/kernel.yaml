@@ -1,0 +1,241 @@
+# Kernel-level resource limits for Linux hosts scraped by node_exporter.
+uid: linux-kernel
+title: Linux / Kernel
+description: >-
+  Kernel-level resource limits and internals for Linux hosts scraped by
+  node_exporter: file-descriptor and conntrack table headroom, major page faults,
+  context switches, available entropy and vmstat paging counters. Answers "are we
+  about to hit a kernel limit?" — the exhaustion modes that take down a host without
+  touching CPU, memory or disk graphs.
+datasource: prometheus
+tags: [linux, kernel, limits, node-exporter]
+seo_phrase: Node Exporter kernel Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are we running out of file descriptors or conntrack entries?"
+  - "Is the kernel taking major page faults (working set spilling off RAM)?"
+  - "Is the context-switch rate abnormal (contention / oversubscription)?"
+  - "Is the entropy pool starved enough to block cryptographic operations?"
+
+production_lessons: >-
+  The outages that confuse people most are the ones where CPU, memory and disk all look fine
+  and the host still refuses to work — because a **kernel table filled up**. This dashboard
+  collects those limits in one place: file descriptors (`filefd`), connection tracking
+  (`nf_conntrack`), and the paging/scheduler counters from `vmstat`/`stat`. The two that
+  page you are fd and conntrack utilisation, so they lead. Entropy starvation
+  (`node_entropy_available_bits` near zero) is rarer on modern kernels but still stalls
+  `/dev/random`-backed crypto on some appliances and VMs without a hardware RNG. Treating
+  these as percent-of-limit gauges — not raw counts — is what makes "70% and climbing"
+  legible before it becomes "100% and broken".
+
+data_sources:
+  - "`node_exporter` `filefd` (`node_filefd_allocated`, `node_filefd_maximum`),
+    `conntrack` (`node_nf_conntrack_entries`, `node_nf_conntrack_entries_limit`),
+    `vmstat` (`node_vmstat_pgmajfault`), `stat` (`node_context_switches_total`) and
+    `entropy` (`node_entropy_available_bits`, where present) collectors."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job for your node_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(node_uname_info{job="$job"}, instance)
+    description: Host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Kernel limits — read these first
+    panels:
+      - type: gauge
+        title: Max file descriptors used
+        description: Highest system-wide file-descriptor utilisation. At 100% every open()/accept() fails with ENFILE.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 70}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(100 * node_filefd_allocated{job="$job", instance=~"$instance"}
+              / clamp_min(node_filefd_maximum{job="$job", instance=~"$instance"}, 1)) or vector(0)
+            instant: true
+            legend: max fd
+      - type: gauge
+        title: Max conntrack used
+        description: Highest connection-tracking table utilisation. At 100% the kernel drops new connections.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 70}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(100 * node_nf_conntrack_entries{job="$job", instance=~"$instance"}
+              / clamp_min(node_nf_conntrack_entries_limit{job="$job", instance=~"$instance"}, 1)) or vector(0)
+            instant: true
+            legend: max conntrack
+      - type: stat
+        title: Major page faults/s
+        description: Fleet major-fault rate. Sustained values mean the working set no longer fits in RAM.
+        unit: ops
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 50}
+          - {color: red, value: 500}
+        targets:
+          - expr: sum(rate(node_vmstat_pgmajfault{job="$job", instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: majflt/s
+      - type: stat
+        title: Lowest entropy
+        description: Smallest available entropy pool across hosts. Below ~200 bits, /dev/random-backed crypto can block.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 200}
+          - {color: green, value: 1000}
+        targets:
+          - expr: min(node_entropy_available_bits{job="$job", instance=~"$instance"}) or vector(4096)
+            instant: true
+            legend: min entropy
+
+  - title: Table headroom
+    panels:
+      - type: timeseries
+        title: File descriptors used % per host
+        description: Per-host allocated ÷ maximum file descriptors. A steady climb is an fd leak.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * node_filefd_allocated{job="$job", instance=~"$instance"}
+              / clamp_min(node_filefd_maximum{job="$job", instance=~"$instance"}, 1)
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Conntrack used % per host
+        description: Per-host tracked connections ÷ table limit. Climbs under connection floods or leaks.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * node_nf_conntrack_entries{job="$job", instance=~"$instance"}
+              / clamp_min(node_nf_conntrack_entries_limit{job="$job", instance=~"$instance"}, 1)
+            legend: "{{instance}}"
+
+  - title: Paging and scheduler
+    panels:
+      - type: timeseries
+        title: Major page faults per host
+        description: Per-host major fault rate — isolates which box is paging from disk.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_vmstat_pgmajfault{job="$job", instance=~"$instance"}[5m])
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Context switches per host
+        description: Per-host context-switch rate — spikes mean lock contention or CPU oversubscription.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: rate(node_context_switches_total{job="$job", instance=~"$instance"}[5m])
+            legend: "{{instance}}"
+
+  - title: Entropy
+    panels:
+      - type: timeseries
+        title: Available entropy per host
+        description: Kernel entropy pool in bits. Persistent low values stall blocking crypto on hosts without a hardware RNG.
+        unit: short
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 200}
+        targets:
+          - expr: node_entropy_available_bits{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+
+alerts:
+  - name: HostFileDescriptorsExhausting
+    severity: critical
+    expr: 100 * node_filefd_allocated / clamp_min(node_filefd_maximum, 1) > 90
+    for: 10m
+    summary: "Host {{ $labels.instance }} file descriptors > 90% of the system limit"
+    why: Near the file-max limit, opens, sockets and accepts fail with ENFILE/EMFILE and services refuse work while CPU and memory look fine.
+    investigate: "Find the top fd holders (lsof / counting /proc/*/fd); a steady climb on the per-host panel is a leak."
+    runbook: "Restart or fix the leaking process; raising `fs.file-max`/`LimitNOFILE` is a stopgap, not a fix for a leak."
+    recovery: Clears when fd utilisation falls below 90% for 5m.
+    false_positives: Hosts with large legitimate connection pools — size file-max for them and tune the threshold.
+  - name: HostConntrackTableNearLimit
+    severity: critical
+    expr: 100 * node_nf_conntrack_entries / clamp_min(node_nf_conntrack_entries_limit, 1) > 90
+    for: 5m
+    summary: "Host {{ $labels.instance }} conntrack table > 90% full"
+    why: A full conntrack table makes the kernel drop new connections and log an nf_conntrack table-full message — the host refuses traffic while looking idle.
+    investigate: "Check for a connection flood or leak (conntrack -L, ss -s) and correlate with new-connection spikes."
+    runbook: "Raise `net.netfilter.nf_conntrack_max`, shorten conntrack timeouts, or NOTRACK high-volume stateless flows."
+    recovery: Clears when utilisation falls below 90% for 5m.
+    false_positives: Load balancers that legitimately track many flows — size the table and raise the threshold for them.
+  - name: HostEntropyLow
+    severity: warning
+    expr: node_entropy_available_bits < 200
+    for: 15m
+    summary: "Host {{ $labels.instance }} available entropy below 200 bits"
+    why: A starved entropy pool can block /dev/random-backed crypto, stalling TLS handshakes and key generation on hosts without a hardware RNG.
+    investigate: "Check whether the host is a VM without virtio-rng and which process is draining entropy (rngd status, /proc/sys/kernel/random/entropy_avail)."
+    runbook: "Install and run a CSPRNG seeder (rng-tools/haveged) or attach a virtio-rng device; modern kernels (5.6+) largely remove the blocking behaviour."
+    recovery: Clears when available entropy stays above 200 bits for 5m.
+    false_positives: Kernels using the modern non-blocking CSPRNG report low pool sizes without any functional impact — verify before acting.
+
+troubleshooting:
+  - symptom: Conntrack or entropy panels show "No data"
+    cause: The relevant collector is disabled, or netfilter conntrack/HW-RNG is not present.
+    action: Enable the conntrack/entropy collectors; the gauges fall back to safe defaults so empty headline stats are expected on such hosts.
+  - symptom: fd usage climbs forever then the host breaks
+    cause: A file-descriptor leak in a long-running process.
+    action: Restart the process to confirm, then fix the leak; do not just raise the limit.
+  - symptom: Entropy looks dangerously low but nothing is broken
+    cause: Modern kernels expose a small pool while using a non-blocking CSPRNG.
+    action: Treat the entropy alert as informational on 5.6+ kernels; it matters mainly on appliances/old VMs.
+
+performance: >-
+  All ratios are instant reads guarded with `clamp_min(...,1)` to avoid NaN; rate panels use
+  a 5m window (≥4× a 15s scrape). The headline gauges aggregate to a single value with
+  `max`/`min`. Entropy and conntrack series are low cardinality (one per host), so this
+  dashboard stays cheap even on large fleets.
+
+customization: >-
+  Tune the 90% fd/conntrack thresholds and the 200-bit entropy floor to your platform —
+  drop the entropy row entirely on modern non-blocking kernels. Scope `$instance` by role to
+  separate connection-heavy gateways from ordinary application hosts.

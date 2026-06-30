@@ -1,0 +1,226 @@
+# Meta-monitoring: are the targets Prometheus is supposed to scrape actually up?
+uid: prometheus-scrape-targets
+title: Prometheus / Scrape Targets
+description: >-
+  Scrape-side health for a Prometheus server: which targets are down, how long
+  scrapes take, and which jobs are hitting sample limits. Answers "is my
+  monitoring data complete, or am I blind to part of the fleet?"
+datasource: prometheus
+tags: [prometheus, scrape, targets, meta-monitoring]
+seo_phrase: Prometheus scrape targets Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which targets are down right now, and in which jobs?"
+  - "Are any scrapes slow enough to risk timing out?"
+  - "Are targets hitting the per-scrape sample limit (silently truncated)?"
+  - "How does scrape duration distribute across the fleet?"
+  - "Which job has the most missing targets?"
+
+production_lessons: >-
+  A down target is not just one missing host — it is a hole in every dashboard and
+  alert that depends on it, and Prometheus will happily stay green while you fly
+  blind. The two signals that catch this early are targets reporting up == 0 and
+  scrape durations creeping toward the scrape timeout. Sample-limit truncation is
+  the sneakiest failure: the target is up, the scrape succeeds, but series past the
+  limit are dropped, so panels look fine while data is quietly incomplete.
+
+data_sources:
+  - "`prometheus` and the `up`, `scrape_duration_seconds`,
+    `prometheus_target_scrape_pool_targets` and
+    `prometheus_target_scrapes_exceeded_sample_limit_total` series it exposes."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(up, job)
+    description: Scrape job to inspect; All shows every job.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Coverage — read these first
+    panels:
+      - type: stat
+        title: Targets down
+        description: Count of selected targets currently reporting up == 0. Anything above zero is a hole in your visibility.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(up{job=~"$job"} == 0) or vector(0)
+            instant: true
+            legend: down
+      - type: stat
+        title: Slowest scrape
+        description: Longest current scrape duration across selected targets — compare to your scrape_timeout.
+        unit: s
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 2}
+          - {color: red, value: 5}
+        targets:
+          - expr: max(scrape_duration_seconds{job=~"$job"}) or vector(0)
+            instant: true
+            legend: max
+      - type: stat
+        title: Sample-limit hits (5m)
+        description: Scrapes truncated by the per-target sample limit in the last 5m — data is silently incomplete.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(increase(prometheus_target_scrapes_exceeded_sample_limit_total[5m])) or vector(0)
+            instant: true
+            legend: exceeded
+      - type: stat
+        title: Targets configured
+        description: Total targets across the selected scrape pools.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(prometheus_target_scrape_pool_targets) or vector(0)
+            instant: true
+            legend: targets
+
+  - title: Who is down
+    panels:
+      - type: table
+        title: Down targets
+        description: Every target currently failing its scrape — start here in an incident.
+        unit: short
+        filterable: true
+        transformations:
+          - id: organize
+            options:
+              excludeByName: {Time: true, Value: true, __name__: true}
+        targets:
+          - expr: up{job=~"$job"} == 0
+            instant: true
+            format: table
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Targets up by job
+        description: Count of healthy targets per job over time — a step down marks the moment coverage dropped.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (job) (up{job=~"$job"})
+            legend: "{{job}}"
+
+  - title: Scrape timing
+    panels:
+      - type: heatmap
+        title: Scrape duration distribution
+        description: How scrape durations spread across the fleet — a fattening right tail warns of impending timeouts.
+        unit: s
+        calculate: true
+        targets:
+          - expr: scrape_duration_seconds{job=~"$job"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Scrape duration p95 by job
+        description: 95th-percentile scrape time per job — the line that creeps toward scrape_timeout.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5}
+        targets:
+          - expr: quantile by (job) (0.95, scrape_duration_seconds{job=~"$job"})
+            legend: "{{job}}"
+
+  - title: Sample limits
+    panels:
+      - type: timeseries
+        title: Sample-limit exceeded per second
+        description: Rate of truncated scrapes — every increment is series being dropped from a healthy-looking target.
+        unit: ops
+        min: 0
+        legend: table
+        drawStyle: bars
+        fillOpacity: 50
+        targets:
+          - expr: sum by (job) (rate(prometheus_target_scrapes_exceeded_sample_limit_total[5m]))
+            legend: "{{job}}"
+      - type: bargauge
+        title: Slowest targets
+        description: Top scrape durations right now — the targets most at risk of timing out.
+        unit: s
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 2}
+          - {color: red, value: 5}
+        targets:
+          - expr: topk(10, scrape_duration_seconds{job=~"$job"})
+            instant: true
+            legend: "{{instance}}"
+
+alerts:
+  - name: PrometheusTargetDown
+    severity: critical
+    expr: up == 0
+    for: 5m
+    summary: "Target {{ $labels.instance }} ({{ $labels.job }}) is down"
+    why: A down target leaves a gap in every dashboard and alert that depends on it, and Prometheus stays green while you go blind.
+    investigate: "Open Prometheus / Scrape Targets, find the target in the down table, then check reachability and the exporter on that host."
+    runbook: "Restart the exporter / fix the endpoint or firewall; if the target is gone for good, remove it from service discovery to stop the noise."
+    recovery: Clears when the target reports up for 5m.
+    false_positives: Rolling deploys and autoscaling churn cause brief down states — covered by the 5m for, or use absent-style alerts for ephemeral targets.
+  - name: PrometheusScrapeSampleLimitExceeded
+    severity: warning
+    expr: increase(prometheus_target_scrapes_exceeded_sample_limit_total[10m]) > 0
+    for: 10m
+    summary: "Scrapes hitting the sample limit in job {{ $labels.job }}"
+    why: Truncated scrapes drop series silently — the target looks healthy but its data is incomplete.
+    investigate: "Identify the high-cardinality metric on the target; check whether a recent change added a label."
+    runbook: "Reduce cardinality at the source or via metric_relabel_configs, or raise sample_limit deliberately if the growth is legitimate."
+    recovery: Clears when no scrapes are truncated for 10m.
+    false_positives: A deliberately raised limit during onboarding can still trip this until the limit is updated.
+  - name: PrometheusScrapeSlow
+    severity: warning
+    expr: scrape_duration_seconds > 5
+    for: 10m
+    summary: "Scrape of {{ $labels.instance }} taking >5s"
+    why: A scrape approaching the timeout will eventually fail outright and the target will flap up/down.
+    investigate: "Check the exporter's own load and the number of series it exposes; look for a slow collector."
+    runbook: "Trim expensive collectors, raise scrape_timeout to match interval, or split the target's metrics."
+    recovery: Clears when scrape duration drops below 5s for 5m.
+    false_positives: Very large exporters (kube-state-metrics, cAdvisor) are legitimately slow — scope the rule per job.
+
+troubleshooting:
+  - symptom: Down table is empty but you expect a failure
+    cause: The target was dropped from service discovery, so there is no up series to be zero.
+    action: Check the Targets page in the Prometheus UI for dropped/absent targets.
+  - symptom: p95 scrape duration panel is blank
+    cause: Only one target per job, so the quantile collapses, or no data in the window.
+    action: Use the heatmap or the slowest-targets bargauge instead for single-target jobs.
+  - symptom: Sample-limit counter rising with no obvious metric
+    cause: A relabel rule is multiplying series via a high-cardinality label.
+    action: Inspect the raw scrape with `curl` and count series by name.
+
+performance: >-
+  Counter panels use 5m rates; the down table and bargauge are instant queries so
+  they reflect the current scrape cycle. The heatmap calculates buckets from the
+  raw gauge in Grafana rather than a server-side histogram, which is cheap for
+  fleets up to a few thousand targets — above that, prefer a recording rule.
+
+customization: >-
+  Tune the 5s slow-scrape and 2s warn thresholds to your scrape_timeout. Scope
+  `$job` to a tier to cut noise. For ephemeral targets (CI runners, autoscaled
+  pods) replace the up == 0 alert with an absent()-based check to avoid flapping.

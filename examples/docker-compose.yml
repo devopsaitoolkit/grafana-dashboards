@@ -1,0 +1,53 @@
+# Minimal end-to-end stack to try these dashboards locally.
+#
+#   cd examples && docker compose up -d
+#   open http://localhost:3000  (admin / admin)
+#
+# Brings up Prometheus + node_exporter + cAdvisor and a Grafana that auto-provisions
+# the Prometheus datasource and every dashboard in ../dashboards via the sidecar-free
+# file provider. Tear down with `docker compose down -v`.
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./provisioning/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../recording-rules:/etc/prometheus/recording-rules:ro
+      - ../alerts:/etc/prometheus/alerts:ro
+    ports:
+      - "9090:9090"
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    pid: host
+    command:
+      - --path.rootfs=/host
+    volumes:
+      - /:/host:ro,rslave
+    ports:
+      - "9100:9100"
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8080:8080"
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./provisioning/grafana-datasources.yml:/etc/grafana/provisioning/datasources/ds.yml:ro
+      - ./provisioning/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/db.yml:ro
+      - ../dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus

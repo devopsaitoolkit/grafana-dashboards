@@ -1,0 +1,234 @@
+title: Node Exporter / Scrape Health
+description: >-
+  Meta-monitoring for your Prometheus scrape pipeline: which targets are down, how
+  long scrapes take, and how many samples each target returns. When a dashboard shows
+  "No data", this is the board that tells you whether the exporter died, the scrape
+  timed out, or the target simply stopped being discovered.
+datasource: prometheus
+tags: [prometheus, scrape, node-exporter, meta-monitoring, reliability]
+seo_phrase: Prometheus scrape health Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many targets are down right now, and which ones?"
+  - "Are any scrapes slow enough to risk timing out?"
+  - "Has any target's sample count suddenly dropped (a half-broken exporter)?"
+  - "Is scrape duration trending up as the fleet grows?"
+
+production_lessons: >-
+  Most "the dashboard is broken" pages are really "the scrape is broken" pages. A
+  target that disappears from service discovery, an exporter that hangs past the
+  scrape timeout, or a relabel rule that silently drops samples all look identical on
+  a business dashboard — they show "No data". We lead with the **down count** because
+  a missing target is invisible everywhere else, then watch **scrape duration** (a
+  scrape slower than its timeout is effectively down) and **samples scraped** (a sudden
+  drop means an exporter is half-alive, the worst kind of failure to debug blind).
+
+data_sources:
+  - "Prometheus itself: the per-target `up`, `scrape_duration_seconds` and
+    `scrape_samples_scraped` series it records for every scrape. No exporter config is
+    needed beyond having targets in a scrape job."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(up, job)
+    description: Scrape job(s) to inspect. Select All to watch every job.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Scrape health — read these first
+    panels:
+      - type: stat
+        title: Targets down
+        description: Targets whose most recent scrape failed. Anything above zero is the priority.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(up{job=~"$job"} == 0) or vector(0)
+            instant: true
+            legend: down
+      - type: stat
+        title: Targets up
+        description: Targets scraping successfully.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: count(up{job=~"$job"} == 1) or vector(0)
+            instant: true
+            legend: up
+      - type: gauge
+        title: Scrape success rate
+        description: Share of selected targets currently up.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 95}
+          - {color: green, value: 100}
+        targets:
+          - expr: 100 * avg(up{job=~"$job"}) or vector(0)
+            instant: true
+            legend: success
+      - type: stat
+        title: Slowest scrape
+        description: Longest scrape duration across selected targets — compare to your scrape timeout.
+        unit: s
+        decimals: 2
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 2}
+          - {color: red, value: 5}
+        targets:
+          - expr: max(scrape_duration_seconds{job=~"$job"}) or vector(0)
+            instant: true
+            legend: slowest
+
+  - title: Availability over time
+    panels:
+      - type: state-timeline
+        title: Target up/down timeline
+        description: Per-target reachability. Red bands are scrape failures you can correlate to deploys.
+        unit: short
+        legend: hidden
+        mappings:
+          - type: value
+            options:
+              "0": {text: down, color: red}
+              "1": {text: up, color: green}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: up{job=~"$job"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Targets down (count)
+        description: Fleet-wide failure count over time — a spike means a correlated outage.
+        unit: short
+        min: 0
+        drawStyle: bars
+        fillOpacity: 50
+        legend: hidden
+        targets:
+          - expr: count(up{job=~"$job"} == 0) or vector(0)
+            legend: down
+
+  - title: Scrape duration & volume
+    panels:
+      - type: timeseries
+        title: Scrape duration by job
+        description: How long scrapes take per job. A line approaching your timeout will start dropping samples.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5}
+        targets:
+          - expr: max by (job) (scrape_duration_seconds{job=~"$job"})
+            legend: "{{job}}"
+      - type: heatmap
+        title: Scrape duration distribution
+        description: Distribution of scrape latencies — a fattening tail is your early warning.
+        unit: s
+        targets:
+          - expr: scrape_duration_seconds{job=~"$job"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Samples scraped by job
+        description: Series returned per scrape. A sudden drop means an exporter is returning a partial response.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (job) (scrape_samples_scraped{job=~"$job"})
+            legend: "{{job}}"
+
+  - title: Who is down
+    panels:
+      - type: table
+        title: Down targets
+        description: The exact instances failing to scrape right now, with their job.
+        unit: short
+        filterable: true
+        targets:
+          - expr: up{job=~"$job"} == 0
+            instant: true
+            format: table
+            legend: "{{instance}}"
+      - type: table
+        title: Slowest targets
+        description: Targets with the highest scrape duration — tune their timeout or fix the exporter.
+        unit: s
+        filterable: true
+        targets:
+          - expr: topk(10, scrape_duration_seconds{job=~"$job"})
+            instant: true
+            format: table
+            legend: "{{instance}}"
+
+alerts:
+  - name: ScrapeTargetDown
+    severity: critical
+    expr: up == 0
+    for: 5m
+    summary: "Target {{ $labels.instance }} ({{ $labels.job }}) is down"
+    why: A down target means Prometheus has no data for it — every dashboard and alert that depends on it is silently blind.
+    investigate: "Open Node Exporter / Scrape Health, find the instance in the down-targets table, and check the exporter process and network path."
+    runbook: "Restart the exporter; verify firewall/security-group rules to the scrape port; confirm the target is still in service discovery."
+    recovery: Clears as soon as one scrape succeeds.
+    false_positives: Planned maintenance — silence the instance for the window.
+  - name: ScrapeDurationHigh
+    severity: warning
+    expr: scrape_duration_seconds > 5
+    for: 10m
+    summary: "Scrape of {{ $labels.instance }} taking {{ printf \"%.1f\" $value }}s"
+    why: A scrape that approaches the scrape timeout will start failing intermittently and dropping samples — flaky data that is hard to diagnose later.
+    investigate: "Check whether the exporter is overloaded or exposing far more series than expected (cardinality blowup)."
+    runbook: "Reduce the exporter's metric surface (disable unused collectors), raise the scrape timeout, or move the target to a less contended host."
+    recovery: Clears when duration falls below 5s for 5m.
+    false_positives: Large exporters (kube-state-metrics, cAdvisor on dense hosts) can legitimately take seconds — raise the threshold per job.
+  - name: ScrapeReturnsNoSamples
+    severity: warning
+    expr: scrape_samples_scraped == 0
+    for: 10m
+    summary: "{{ $labels.instance }} scraped but returned 0 samples"
+    why: A target that responds but returns nothing is a half-broken exporter — `up` is 1, so it looks healthy while delivering no data.
+    investigate: "curl the target's /metrics endpoint directly; check for a crashed collector or an over-aggressive metric_relabel_configs."
+    runbook: "Restart the exporter and review relabel rules that may be dropping every series."
+    recovery: Clears when samples are returned again.
+    false_positives: A target intentionally exposing no series after a relabel drop — exclude it.
+
+troubleshooting:
+  - symptom: Success rate gauge shows red at 100%
+    cause: The threshold steps are ordered so only an exact 100% is green by design.
+    action: This is intentional — anything below 100% means at least one target is down.
+  - symptom: Heatmap is empty
+    cause: Only one scrape interval of data is in range, so there is no distribution yet.
+    action: Widen the time range to several hours.
+  - symptom: Down-targets table is empty during an outage
+    cause: The targets were removed from service discovery, so `up` no longer exists for them.
+    action: Compare against `count(up)` history; a falling target count points at SD, not the exporter.
+
+performance: >-
+  These queries touch only Prometheus-internal series (`up`, `scrape_*`), which are
+  tiny and cheap. The heatmap is the heaviest panel; narrow the time range or scope
+  `$job` if it lags on very large target counts.
+
+customization: >-
+  Set the scrape-duration thresholds to match each job's actual scrape timeout. Add a
+  `instance` template variable to drill into one noisy target. Pair this board with a
+  Prometheus-self dashboard (TSDB head series, WAL) for full pipeline visibility.

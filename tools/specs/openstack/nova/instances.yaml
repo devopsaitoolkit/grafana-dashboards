@@ -1,0 +1,213 @@
+# Instance inventory & states. Leads with the two states operators chase: instances in
+# ERROR and instances stuck in a transitional state that should have settled by now.
+title: OpenStack / Nova Instances
+description: >-
+  Instance inventory and state breakdown for OpenStack Nova from openstack-exporter:
+  how many servers are ACTIVE, SHUTOFF, ERROR or stuck in a transitional state, and how
+  they split across projects. Answers "what is the fleet of instances actually doing,
+  and which ones need attention?".
+datasource: prometheus
+tags: [openstack, nova, instances, inventory, openstack-exporter]
+seo_phrase: OpenStack Nova instances Grafana dashboard
+refresh: 1m
+time_from: now-6h
+
+questions:
+  - "How many instances are in ERROR right now?"
+  - "How many are stuck in a transitional state (BUILD, REBUILD, MIGRATING, RESIZE)?"
+  - "What is the overall split of instance states?"
+  - "Which projects own the most instances — and the most ERROR ones?"
+  - "Is the ACTIVE count steady, or churning from mass reboots/rebuilds?"
+
+production_lessons: >-
+  Most instance incidents are not "the cloud is down" — they are a slow accumulation of
+  servers wedged in ERROR or stuck half-way through a transition that the owner never
+  notices. This dashboard leads with ERROR and transitional counts because those are the
+  ones a human has to act on; ACTIVE and SHUTOFF are just inventory. The per-project
+  table is the panel that ends arguments: when capacity is tight or ERROR is climbing it
+  shows whether one tenant's runaway automation is the cause, so you can throttle the
+  right project instead of adding hardware for everyone. A standing pool of SHUTOFF
+  instances is its own quiet lesson — they still reserve disk and addresses while doing
+  no work.
+
+data_sources:
+  - "`openstack-exporter` (github.com/openstack-exporter/openstack-exporter) scraping
+    the Nova API: `openstack_nova_server_status` (one series per instance, with `status`,
+    `name`, `id` and tenant labels) and `openstack_nova_total_vms`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_nova_server_status, job)
+    description: Prometheus scrape job for your openstack-exporter target.
+    multi: false
+    includeAll: false
+  - name: cloud
+    label: Cloud
+    query: label_values(openstack_nova_server_status{job="$job"}, cloud)
+    description: Cloud/region in multi-cloud mode; All if single-cloud.
+    multi: false
+    includeAll: true
+
+rows:
+  - title: Instances needing attention — read these first
+    panels:
+      - type: stat
+        title: Instances in ERROR
+        description: Servers Nova reports in ERROR — failed builds, migrations, reboots or volume attach.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status="ERROR"}) or vector(0)
+            instant: true
+            legend: error
+      - type: stat
+        title: Stuck in transition
+        description: >-
+          Instances in BUILD, REBUILD, MIGRATING, RESIZE or VERIFY_RESIZE — states that
+          should settle in minutes. A standing count means something is wedged.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 20}
+        targets:
+          - expr: >-
+              count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status=~"BUILD|REBUILD|MIGRATING|RESIZE|VERIFY_RESIZE"}) or vector(0)
+            instant: true
+            legend: transitional
+      - type: stat
+        title: Total instances
+        description: Every server Nova knows about, in any state.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: >-
+              sum(openstack_nova_total_vms{job="$job", cloud=~"$cloud"}) or count(openstack_nova_server_status{job="$job", cloud=~"$cloud"}) or vector(0)
+            instant: true
+            legend: total
+      - type: stat
+        title: Shut-off instances
+        description: Powered-off servers — still reserving disk and IPs while doing no work.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 20}
+        targets:
+          - expr: count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status="SHUTOFF"}) or vector(0)
+            instant: true
+            legend: shutoff
+
+  - title: State breakdown
+    panels:
+      - type: piechart
+        title: Instances by status
+        description: Share of the fleet in each Nova status. ERROR and transitional slices should be thin.
+        unit: short
+        pieType: donut
+        targets:
+          - expr: count by (status) (openstack_nova_server_status{job="$job", cloud=~"$cloud"})
+            instant: true
+            legend: "{{status}}"
+      - type: timeseries
+        title: Transitional & failed states over time
+        description: ERROR plus transitional counts. A flat-but-nonzero ERROR line is the accumulation of abandoned instances.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status="ERROR"}) or vector(0)
+            legend: error
+          - expr: count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status="BUILD"}) or vector(0)
+            legend: build
+          - expr: >-
+              count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status=~"MIGRATING|RESIZE|VERIFY_RESIZE|REBUILD"}) or vector(0)
+            legend: migrate/resize
+
+  - title: By project
+    panels:
+      - type: table
+        title: Instances per project
+        description: Instance count by tenant. Sort to find the project driving growth or ERROR.
+        unit: short
+        filterable: true
+        sortBy:
+          - {displayName: Value, desc: true}
+        targets:
+          - expr: count by (tenant_id) (openstack_nova_server_status{job="$job", cloud=~"$cloud"})
+            instant: true
+            format: table
+            legend: "{{tenant_id}}"
+      - type: bargauge
+        title: ERROR instances per project
+        description: Which tenants own the failed instances — throttle or contact the noisy one.
+        unit: short
+        min: 0
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: count by (tenant_id) (openstack_nova_server_status{job="$job", cloud=~"$cloud", status="ERROR"})
+            instant: true
+            legend: "{{tenant_id}}"
+
+alerts:
+  - name: NovaInstancesInError
+    severity: warning
+    expr: count(openstack_nova_server_status{status="ERROR"}) > 5
+    for: 15m
+    summary: "{{ $value }} Nova instances in ERROR"
+    why: Each ERROR instance is a customer-visible failure; a growing pool usually points at capacity, a sick back-end, or a tenant's bad automation.
+    investigate: "Use the ERROR-per-project bargauge to find the owner; `openstack server show` a sample to read the fault."
+    runbook: "Fix the root cause (capacity/back-end), then rebuild or delete the affected instances; contact the tenant if one project dominates."
+    recovery: Clears when fewer than 5 instances are in ERROR for 5m.
+    false_positives: Intentional failure testing in a tenant — scope by tenant_id or raise the threshold.
+  - name: NovaInstancesStuckTransitioning
+    severity: warning
+    expr: >-
+      count(openstack_nova_server_status{status=~"BUILD|REBUILD|MIGRATING|RESIZE|VERIFY_RESIZE"}) > 20
+    for: 15m
+    summary: "{{ $value }} Nova instances stuck transitioning"
+    why: Transitional states should clear in minutes; a standing pool means stuck migrations/resizes holding resources and risking corruption if forced.
+    investigate: "Check the transitional-states timeseries and current_workload per host; look for a slow volume/image back-end."
+    runbook: "Resolve the back-end, then reset-state and retry or roll back the stuck operations; never hard-delete a MIGRATING instance mid-flight."
+    recovery: Clears when fewer than 20 instances are transitioning for 5m.
+    false_positives: A planned mass resize/migration window — silence during the maintenance.
+
+troubleshooting:
+  - symptom: Per-project table shows blank tenant labels
+    cause: The exporter build does not expose a tenant label on server_status, or RBAC hides it.
+    action: "Confirm with `openstack server list --all-projects -c Project`; grant the exporter an admin-scoped role to read tenant ids."
+  - symptom: Total instances disagrees with the status pie sum
+    cause: "`openstack_nova_total_vms` and per-instance `server_status` are collected from different API calls and can differ briefly."
+    action: Treat the pie (per-instance count) as authoritative for state; total_vms is a fast headline number.
+  - symptom: ERROR count never falls
+    cause: Abandoned ERROR instances are never cleaned up.
+    action: Delete or rebuild stale ERROR instances; the metric counts every server that exists.
+
+performance: >-
+  `openstack_nova_server_status` is one series per instance, so always reduce with
+  `count` / `count by (status, tenant_id)` — never graph the raw series, which can be
+  thousands of lines on a busy cloud. The status filters use regex alternation on the
+  `status` label, evaluated cheaply at query time. A 1m refresh matches how fast states
+  change.
+
+customization: >-
+  Adjust the transitional `status=~` set if your workflows use additional states, and the
+  thresholds (5/20) to your fleet size. To focus on one tenant, add a `tenant_id` selector.
+  Swap the per-project table's reducer to `ERROR`-only if you only care about failures by team.

@@ -1,0 +1,224 @@
+# Meta-monitoring: the TSDB internals that decide whether Prometheus survives.
+uid: prometheus-tsdb
+title: Prometheus / TSDB Internals
+description: >-
+  The storage engine under Prometheus: head-block cardinality growth, block
+  compaction timing and rate, WAL corruptions, reload failures and on-disk
+  footprint. Answers "is the time-series database healthy, or about to fall over?"
+datasource: prometheus
+tags: [prometheus, tsdb, storage, meta-monitoring]
+seo_phrase: Prometheus TSDB Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is active-series (head) cardinality growing without bound?"
+  - "Have any WAL corruptions occurred (data-integrity risk)?"
+  - "Is compaction keeping up, or are durations spiking?"
+  - "Are TSDB reloads failing after a config/rule change?"
+  - "How much resident memory is the storage engine consuming?"
+
+production_lessons: >-
+  TSDB problems are quiet until they are catastrophic. A WAL corruption can cost
+  you the unflushed head on the next restart, and a cardinality runaway ends in an
+  OOM kill — both invisible on a request-rate dashboard. We lead with cardinality
+  growth and WAL corruptions because those are the two failure modes that lose
+  data, then cover compaction (the background job that bounds disk and query cost)
+  and reload failures (the silent reason a new rule never took effect).
+
+data_sources:
+  - "`prometheus` exposing its own `/metrics` (the `prometheus_tsdb_*` and
+    `process_*` series)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(prometheus_tsdb_head_series, job)
+    description: Scrape job under which Prometheus scrapes itself.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(prometheus_tsdb_head_series{job="$job"}, instance)
+    description: Prometheus server instance(s).
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Integrity & cardinality — read first
+    panels:
+      - type: stat
+        title: Head series
+        description: Active in-memory series. Watch the trend, not the absolute — sustained growth is a cardinality leak.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 2000000}
+          - {color: red, value: 5000000}
+        targets:
+          - expr: sum(prometheus_tsdb_head_series{job="$job", instance=~"$instance"})
+            instant: true
+            legend: series
+      - type: stat
+        title: WAL corruptions (1h)
+        description: Write-ahead-log corruptions detected in the last hour. Any non-zero value is a data-integrity incident.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(increase(prometheus_tsdb_wal_corruptions_total{job="$job", instance=~"$instance"}[1h])) or vector(0)
+            instant: true
+            legend: corruptions
+      - type: stat
+        title: Reload failures (1h)
+        description: Failed TSDB reloads in the last hour — a new config or rule set may not have applied.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: sum(increase(prometheus_tsdb_reloads_failures_total{job="$job", instance=~"$instance"}[1h])) or vector(0)
+            instant: true
+            legend: failures
+      - type: stat
+        title: Head chunks
+        description: In-memory chunks held by the head block — tracks alongside series and memory.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(prometheus_tsdb_head_chunks{job="$job", instance=~"$instance"})
+            instant: true
+            legend: chunks
+
+  - title: Head growth
+    panels:
+      - type: timeseries
+        title: Head series & chunks over time
+        description: The shape that matters — a straight diagonal line is a leak; a sawtooth is healthy compaction.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (prometheus_tsdb_head_series{job="$job", instance=~"$instance"})
+            legend: "{{instance}} series"
+          - expr: sum by (instance) (prometheus_tsdb_head_chunks{job="$job", instance=~"$instance"})
+            legend: "{{instance}} chunks"
+      - type: timeseries
+        title: Samples appended per second
+        description: Head ingestion throughput — a step change here usually explains a step change in series.
+        unit: wps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (rate(prometheus_tsdb_head_samples_appended_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{instance}}"
+
+  - title: Compaction
+    panels:
+      - type: timeseries
+        title: Compactions per second
+        description: Rate of completed block compactions — the background job that bounds query cost and disk.
+        unit: ops
+        min: 0
+        legend: table
+        drawStyle: bars
+        fillOpacity: 40
+        targets:
+          - expr: sum by (instance) (rate(prometheus_tsdb_compactions_total{job="$job", instance=~"$instance"}[5m]))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Compaction duration p99
+        description: 99th-percentile compaction wall-clock. Spikes mean larger blocks or I/O pressure and can stall the head.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: histogram_quantile(0.99, sum by (le) (rate(prometheus_tsdb_compaction_duration_seconds_bucket{job="$job", instance=~"$instance"}[5m])))
+            legend: p99
+
+  - title: Stability & footprint
+    panels:
+      - type: timeseries
+        title: WAL corruptions & reload failures
+        description: Cumulative integrity events — any upward step is worth a page.
+        unit: short
+        min: 0
+        legend: table
+        drawStyle: bars
+        targets:
+          - expr: sum by (instance) (prometheus_tsdb_wal_corruptions_total{job="$job", instance=~"$instance"})
+            legend: "{{instance}} wal-corruptions"
+          - expr: sum by (instance) (prometheus_tsdb_reloads_failures_total{job="$job", instance=~"$instance"})
+            legend: "{{instance}} reload-failures"
+      - type: timeseries
+        title: Resident memory
+        description: Process RSS — the storage engine is the dominant consumer, so this tracks head cardinality closely.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: process_resident_memory_bytes{job="$job", instance=~"$instance"}
+            legend: "{{instance}}"
+
+alerts:
+  - name: PrometheusWALCorruption
+    severity: critical
+    expr: increase(prometheus_tsdb_wal_corruptions_total[10m]) > 0
+    for: 1m
+    summary: "Prometheus {{ $labels.instance }} detected a WAL corruption"
+    why: A corrupt write-ahead log risks losing the unflushed head block on the next restart — silent data loss.
+    investigate: "Check disk health and free space on the data volume; review recent OOMs or unclean shutdowns in the logs."
+    runbook: "Snapshot the data dir; replace failing storage; if needed, let Prometheus truncate the corrupt segment on restart and accept the gap."
+    recovery: Fires once per detection; acknowledge after confirming storage is healthy.
+    false_positives: Effectively none — treat every corruption as real.
+  - name: PrometheusTSDBReloadFailing
+    severity: warning
+    expr: increase(prometheus_tsdb_reloads_failures_total[10m]) > 0
+    for: 5m
+    summary: "Prometheus {{ $labels.instance }} TSDB reloads are failing"
+    why: A failed reload means a recent config or block change did not take effect, so the server may be running stale state.
+    investigate: "Check the Prometheus log around the reload time and verify free disk on the data volume."
+    runbook: "Resolve the underlying disk/permission error and trigger a clean reload; validate the config with promtool first."
+    recovery: Clears when no reload failures occur for 5m.
+    false_positives: A transient disk-full that self-resolves can trip this briefly.
+  - name: PrometheusHeadCardinalityGrowing
+    severity: warning
+    expr: deriv(prometheus_tsdb_head_series[30m]) > 1000
+    for: 30m
+    summary: "Prometheus {{ $labels.instance }} head series growing >1k/s"
+    why: Sustained linear growth in active series is the classic cardinality bomb that ends in an OOM kill.
+    investigate: "Use topk by __name__ on series count to find the metric and the newly added high-cardinality label."
+    runbook: "Drop or aggregate the offending label via metric_relabel_configs; impose a sample limit on the noisy scrape job."
+    recovery: Clears when the growth slope flattens for 5m.
+    false_positives: Legitimate onboarding of new targets causes temporary growth — confirm against a deploy.
+
+troubleshooting:
+  - symptom: Compaction duration p99 is empty
+    cause: No compactions have completed in the window, or the bucket metric is filtered out.
+    action: Widen the time range; confirm the server has been up long enough to compact a block.
+  - symptom: Head series sawtooths instead of climbing
+    cause: This is healthy — the head truncates to disk on each compaction cycle.
+    action: No action; watch the floor of the sawtooth for the real baseline.
+  - symptom: Reload failures with no config change
+    cause: Disk full or permission error on the data directory during background reload.
+    action: Free space / fix permissions on the TSDB volume and reload.
+
+performance: >-
+  Counter panels use 5m rates so they survive restarts; the compaction p99 reads a
+  native histogram bucket aggregated by `le` only, keeping series count flat. WAL
+  and reload panels use raw counters so a single increment is unmistakable.
+
+customization: >-
+  Adjust the 5M head-series and per-second growth thresholds to your provisioned
+  memory and ingestion profile. On multi-server setups keep `$instance` on All to
+  compare replicas; scope to one instance when chasing a specific OOM.

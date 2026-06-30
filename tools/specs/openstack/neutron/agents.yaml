@@ -1,0 +1,227 @@
+title: OpenStack / Neutron — Agent Fleet
+description: >-
+  Per-agent up/down state, flapping detection and L3-agent-to-router distribution
+  for a Neutron deployment scraped by openstack-exporter. Answers "which agents
+  are dead, which are unstable, and is any one network node carrying too many
+  routers?" — the three failure modes that take tenant networking down.
+datasource: prometheus
+tags: [openstack, neutron, agents, openstack-exporter, networking]
+seo_phrase: OpenStack Neutron agents Grafana dashboard
+
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which Neutron agents are down right now, and of what type?"
+  - "Are any agents flapping (repeatedly toggling alive/dead)?"
+  - "Has an operator left agents admin-disabled by mistake?"
+  - "Is the L3 router load balanced across L3 agents, or piled on one host?"
+  - "Did a whole agent type just go dark (control-plane or messaging fault)?"
+
+production_lessons: >-
+  A single dead agent is an incident; a *flapping* agent is worse, because Neutron
+  keeps rescheduling resources onto and off it and tenant traffic blackholes during
+  each transition. This dashboard separates the two: a hard-down panel for the
+  obvious failures and a `changes()` panel that surfaces the agents toggling state.
+  The L3 distribution panel exists because of one recurring outage shape — after a
+  network node reboots, every router it used to host gets rescheduled onto the
+  remaining agents, and the survivors quietly become the next bottleneck. Watching
+  routers-per-agent lets you rebalance before the overloaded node falls over too.
+
+data_sources:
+  - "`openstack-exporter` with Neutron enabled — exposes
+    `openstack_neutron_agent_state` (labels `agent`, `adminState`, `hostname`;
+    1 = alive) and `openstack_neutron_l3_agent_of_router` (one series per
+    router scheduled to an L3 agent host)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_neutron_agent_state, job)
+    description: Prometheus scrape job for your openstack-exporter target(s).
+    multi: false
+    includeAll: false
+  - name: agent
+    label: Agent type
+    query: label_values(openstack_neutron_agent_state{job="$job"}, agent)
+    description: Filter to one or more Neutron agent types.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Down agents — read these first
+    panels:
+      - type: stat
+        title: Agents down
+        description: Total agents reporting dead across selected types.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count(openstack_neutron_agent_state{job="$job", agent=~"$agent"} == 0) or vector(0)
+            instant: true
+            legend: down
+      - type: bargauge
+        title: Down agents by type
+        description: Which agent type is failing — a whole type down points at messaging or the Neutron server.
+        unit: short
+        decimals: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: count by (agent) (openstack_neutron_agent_state{job="$job", agent=~"$agent"} == 0)
+            instant: true
+            legend: "{{agent}}"
+      - type: gauge
+        title: Fleet availability
+        description: Share of selected agents alive.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 95}
+          - {color: green, value: 100}
+        targets:
+          - expr: 100 * avg(openstack_neutron_agent_state{job="$job", agent=~"$agent"}) or vector(0)
+            instant: true
+            legend: available
+      - type: stat
+        title: Admin-disabled agents
+        description: Agents with admin state down — usually drained on purpose, but easy to forget to re-enable.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+        targets:
+          - expr: count(openstack_neutron_agent_state{job="$job", agent=~"$agent", adminState="down"}) or vector(0)
+            instant: true
+            legend: disabled
+
+  - title: State & stability
+    panels:
+      - type: state-timeline
+        title: Agent state timeline
+        description: Per-agent up/down over time — pinpoint the exact host and minute of each failure.
+        unit: short
+        mappings:
+          - {type: value, options: {"0": {text: dead, color: red}, "1": {text: alive, color: green}}}
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: openstack_neutron_agent_state{job="$job", agent=~"$agent"}
+            legend: "{{agent}} @ {{hostname}}"
+      - type: timeseries
+        title: Flapping agents (state changes/hour)
+        description: Counts alive/dead transitions per agent in the last hour — anything above zero is unstable.
+        unit: short
+        min: 0
+        drawStyle: bars
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 2}
+        targets:
+          - expr: changes(openstack_neutron_agent_state{job="$job", agent=~"$agent"}[1h])
+            legend: "{{agent}} @ {{hostname}}"
+
+  - title: L3 router distribution
+    panels:
+      - type: bargauge
+        title: Routers per L3 agent
+        description: How many routers each L3 agent host carries — flag the overloaded survivors after a node loss.
+        unit: short
+        decimals: 0
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 50}
+          - {color: red, value: 100}
+        targets:
+          - expr: count by (l3_agent_host) (openstack_neutron_l3_agent_of_router{job="$job"})
+            instant: true
+            legend: "{{l3_agent_host}}"
+      - type: stat
+        title: Routers scheduled
+        description: Total router-to-L3-agent bindings (HA routers count once per agent).
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: blue, value: null}
+        targets:
+          - expr: count(openstack_neutron_l3_agent_of_router{job="$job"}) or vector(0)
+            instant: true
+            legend: bindings
+      - type: timeseries
+        title: Scheduling balance over time
+        description: Routers per L3 agent host through time — a diverging line means an unbalanced fleet after a reschedule.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: count by (l3_agent_host) (openstack_neutron_l3_agent_of_router{job="$job"})
+            legend: "{{l3_agent_host}}"
+
+alerts:
+  - name: NeutronAgentDown
+    severity: critical
+    expr: openstack_neutron_agent_state == 0
+    for: 5m
+    summary: "Neutron {{ $labels.agent }} on {{ $labels.hostname }} is dead"
+    why: A dead agent stops serving DHCP, routing, metadata or OVS programming for every port it owns.
+    investigate: "Open OpenStack / Neutron — Agent Fleet, locate the host on the state timeline, then check the agent service and message bus."
+    runbook: "Restart the failed agent service; if it won't register, verify RabbitMQ connectivity and clock sync (agent heartbeats are time-based)."
+    recovery: Clears when the agent reports alive for 5m.
+    false_positives: Hosts drained for maintenance — set the agent admin-state down or silence the host.
+  - name: NeutronAgentFlapping
+    severity: warning
+    expr: changes(openstack_neutron_agent_state[1h]) > 3
+    for: 10m
+    summary: "Neutron {{ $labels.agent }} on {{ $labels.hostname }} flapping (>3 changes/h)"
+    why: A flapping agent triggers repeated rescheduling; tenant traffic blackholes on every transition, which is harder to debug than a clean outage.
+    investigate: "Check messaging latency and the agent's heartbeat interval; look for an overloaded or memory-starved network node."
+    runbook: "Stabilise the message bus or move the agent to a healthier host; raise `agent_down_time` if heartbeats are merely late, not lost."
+    recovery: Clears when transitions drop to zero for the window.
+    false_positives: A one-off restart shows as a couple of changes — the `>3` threshold and 10m `for` filter those out.
+  - name: NeutronL3AgentOverloaded
+    severity: warning
+    expr: count by (l3_agent_host, job) (openstack_neutron_l3_agent_of_router) > 100
+    for: 15m
+    summary: "L3 agent {{ $labels.l3_agent_host }} hosts more than 100 routers"
+    why: An L3 agent carrying too many routers becomes a single point of failure and a latency bottleneck; losing it reschedules a huge blast radius.
+    investigate: "Compare routers-per-agent across hosts; check whether a recent node loss piled routers onto the survivors."
+    runbook: "Rebalance with `neutron l3-agent-router-remove`/`-add` or enable L3 HA so routers spread across agents."
+    recovery: Clears when the per-agent router count falls below 100.
+    false_positives: Deliberately dense small-router deployments — raise the threshold to match your sizing.
+
+troubleshooting:
+  - symptom: Routers-per-agent panels are empty
+    cause: "`openstack_neutron_l3_agent_of_router` not exported (older exporter) or no routers scheduled."
+    action: Confirm the exporter version exposes the series and that L3 agents have routers bound.
+  - symptom: An agent shows dead but the process is running
+    cause: Heartbeats are arriving late due to clock skew or a slow message bus.
+    action: Sync NTP across network nodes and check RabbitMQ queue depth.
+  - symptom: Admin-disabled count is non-zero unexpectedly
+    cause: An agent left admin-state down after maintenance.
+    action: Re-enable it with `neutron agent-update --admin-state-up`.
+
+performance: >-
+  The hard-down and balance panels aggregate with `count by`, keeping cardinality to
+  one series per agent type or host. Only the state timeline and flapping panels are
+  per-agent — scope them with `$agent` on very large fleets. `changes(...[1h])` is
+  evaluated once per agent and is cheap.
+
+customization: >-
+  Adjust the routers-per-agent thresholds (50/100) to your L3 sizing. If you run L3
+  HA, expect each router to appear under multiple agents — divide the thresholds
+  accordingly. Add a `region` template variable for multi-region exporters.

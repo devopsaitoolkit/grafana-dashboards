@@ -1,0 +1,234 @@
+# Meta-monitoring: split Mimir health into its write path and its read path.
+uid: mimir-reads-writes
+title: Mimir / Reads & Writes
+description: >-
+  The two halves of a Mimir cluster on one screen: write-path request rate and
+  latency (distributor and ingester push) versus read-path query rate and latency
+  (query-frontend). Answers "is it the ingest side or the query side that is
+  hurting right now?"
+datasource: prometheus
+tags: [mimir, cortex, read-write, meta-monitoring]
+seo_phrase: Mimir read write path Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is write-path or read-path latency the problem right now?"
+  - "What is the push request rate versus the query rate?"
+  - "Which routes are returning 5xx on each path?"
+  - "Are queries from the query-frontend keeping up?"
+  - "Is ingester write latency tracking distributor latency?"
+
+production_lessons: >-
+  Mimir incidents almost always belong cleanly to one path: ingest is failing
+  (writes rejected, ingesters saturated) or queries are slow (store-gateway, object
+  storage, expensive PromQL). Mixing both on a generic dashboard wastes minutes you
+  do not have, so this view splits them. We lead with write-vs-read p99 side by side
+  plus each path's error share, because that one comparison tells on-call which team
+  and which runbook to reach for before any deeper drill-down.
+
+data_sources:
+  - "`mimir` / `cortex` exposing `cortex_request_duration_seconds_*` (with the
+    `route` and `status_code` labels), `cortex_ingester_ingested_samples_total` and
+    `cortex_query_frontend_queries_total`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(cortex_request_duration_seconds_count, job)
+    description: Component job to scope to (distributor, ingester, query-frontend).
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Path latency & errors — read these first
+    panels:
+      - type: stat
+        title: Write p99
+        description: 99th-percentile latency on push routes — the ingest-path SLO.
+        unit: s
+        decimals: 3
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 0.5}
+          - {color: red, value: 2}
+        targets:
+          - expr: histogram_quantile(0.99, sum by (le) (rate(cortex_request_duration_seconds_bucket{route=~".*push.*|.*write.*"}[5m]))) or vector(0)
+            instant: true
+            legend: write p99
+      - type: stat
+        title: Read p99
+        description: 99th-percentile latency on query routes — the read-path SLO.
+        unit: s
+        decimals: 3
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: histogram_quantile(0.99, sum by (le) (rate(cortex_request_duration_seconds_bucket{route=~".*query.*|.*prom.*"}[5m]))) or vector(0)
+            instant: true
+            legend: read p99
+      - type: stat
+        title: Write 5xx ratio
+        description: Server-error share on the push routes — rejected writes that the client must retry or lose.
+        unit: percent
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum(rate(cortex_request_duration_seconds_count{route=~".*push.*|.*write.*", status_code=~"5.."}[5m]))
+              / clamp_min(sum(rate(cortex_request_duration_seconds_count{route=~".*push.*|.*write.*"}[5m])), 1)
+            instant: true
+            legend: write 5xx%
+      - type: stat
+        title: Read 5xx ratio
+        description: Server-error share on the query routes — failed queries that break dashboards and alerts.
+        unit: percent
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum(rate(cortex_request_duration_seconds_count{route=~".*query.*|.*prom.*", status_code=~"5.."}[5m]))
+              / clamp_min(sum(rate(cortex_request_duration_seconds_count{route=~".*query.*|.*prom.*"}[5m])), 1)
+            instant: true
+            legend: read 5xx%
+
+  - title: Write path
+    panels:
+      - type: timeseries
+        title: Write request rate by route
+        description: Requests per second across push/write routes — your ingest request volume.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (route) (rate(cortex_request_duration_seconds_count{job=~"$job", route=~".*push.*|.*write.*"}[5m]))
+            legend: "{{route}}"
+      - type: timeseries
+        title: Write latency p99 by route
+        description: Push-route p99 over time — rising here points at saturated distributors or ingesters.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 2}
+        targets:
+          - expr: histogram_quantile(0.99, sum by (le, route) (rate(cortex_request_duration_seconds_bucket{job=~"$job", route=~".*push.*|.*write.*"}[5m])))
+            legend: "{{route}}"
+
+  - title: Read path
+    panels:
+      - type: timeseries
+        title: Query rate
+        description: Queries per second leaving the query-frontend — the read-path request volume.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(cortex_query_frontend_queries_total{job=~"$job"}[5m]))
+            legend: queries
+      - type: timeseries
+        title: Read latency p99 by route
+        description: Query-route p99 over time — rising here points at store-gateway / object-storage slowness.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5}
+        targets:
+          - expr: histogram_quantile(0.99, sum by (le, route) (rate(cortex_request_duration_seconds_bucket{job=~"$job", route=~".*query.*|.*prom.*"}[5m])))
+            legend: "{{route}}"
+
+  - title: Errors & ingest confirmation
+    panels:
+      - type: timeseries
+        title: 5xx per second by route
+        description: Server errors per second across all routes — the raw failure stream behind the ratios above.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (route) (rate(cortex_request_duration_seconds_count{job=~"$job", status_code=~"5.."}[5m]))
+            legend: "{{route}}"
+      - type: timeseries
+        title: Ingester ingested samples per second
+        description: Samples actually written by ingesters — confirms the write path is landing data, not just accepting requests.
+        unit: wps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(cortex_ingester_ingested_samples_total{job=~"$job"}[5m]))
+            legend: ingested
+
+alerts:
+  - name: MimirWritePathLatencyHigh
+    severity: warning
+    expr: >-
+      histogram_quantile(0.99, sum by (le, route) (rate(cortex_request_duration_seconds_bucket{route=~".*push.*|.*write.*"}[5m]))) > 2
+    for: 10m
+    summary: "Mimir write path p99 above 2s on {{ $labels.route }}"
+    why: Slow writes cause Prometheus remote_write upstreams to buffer and eventually drop samples.
+    investigate: "Open Mimir / Reads & Writes, confirm whether distributors or ingesters are the slow tier, and check ingester CPU/GC."
+    runbook: "Scale ingesters/distributors; review per-tenant ingest limits; check the hash-ring for unhealthy ingesters."
+    recovery: Clears when write p99 drops below 2s for 5m.
+    false_positives: A rollout briefly elevates push latency — the 10m for absorbs it.
+  - name: MimirReadPathLatencyHigh
+    severity: warning
+    expr: >-
+      histogram_quantile(0.99, sum by (le, route) (rate(cortex_request_duration_seconds_bucket{route=~".*query.*|.*prom.*"}[5m]))) > 5
+    for: 10m
+    summary: "Mimir read path p99 above 5s on {{ $labels.route }}"
+    why: Slow queries break Grafana panels and recording/alerting rules that read from Mimir.
+    investigate: "Check query-frontend queue, store-gateway latency and object-storage response times."
+    runbook: "Enable results caching, raise querier concurrency, or split heavy queries; scale store-gateways."
+    recovery: Clears when read p99 drops below 5s for 5m.
+    false_positives: A burst of expensive ad-hoc queries can trip this briefly.
+  - name: MimirPathErrorsHigh
+    severity: critical
+    expr: >-
+      100 * sum by (route) (rate(cortex_request_duration_seconds_count{status_code=~"5.."}[5m]))
+      / clamp_min(sum by (route) (rate(cortex_request_duration_seconds_count[5m])), 1) > 5
+    for: 10m
+    summary: "Mimir route {{ $labels.route }} 5xx ratio above 5%"
+    why: A route-level error spike means a specific read or write path is failing, dropping data or breaking queries.
+    investigate: "Identify the route's owning component and inspect its logs and saturation."
+    runbook: "Scale or roll back the failing component; verify object storage and the hash-ring health."
+    recovery: Clears when the route's 5xx ratio falls below 5% for 5m.
+    false_positives: Low-traffic routes can show a high ratio on a handful of errors — the clamp guards the denominator but consider a minimum-rate gate.
+
+troubleshooting:
+  - symptom: Write or read p99 stat is empty
+    cause: The route regex does not match your build's route names.
+    action: List route label values in Explore and adjust the regex to your Mimir version.
+  - symptom: Query rate is zero but dashboards work
+    cause: Queries bypass the query-frontend (direct querier access).
+    action: Route reads through the query-frontend, or use request-duration on query routes instead.
+  - symptom: High write 5xx with healthy ingesters
+    cause: Distributor-side rejection (per-tenant rate limits, validation errors).
+    action: Check distributor logs and per-tenant ingestion limits.
+
+performance: >-
+  Latency panels read native histograms aggregated by `le` plus `route`. Route
+  selection uses regexes so the same panels work whether your build labels the path
+  `push`, `write`, `query` or `prometheus`. Ratios guard the denominator with
+  `clamp_min(..., 1)`.
+
+customization: >-
+  Adjust the route regexes to your Mimir version's route names, and the 2s/5s
+  latency thresholds to your SLOs. Add a minimum-rate gate to the route error alert
+  if low-traffic routes produce noisy ratios.

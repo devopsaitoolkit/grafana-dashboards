@@ -1,0 +1,253 @@
+# MySQL InnoDB internals. Leads with the buffer-pool hit ratio and row-lock waits —
+# the cache-efficiency and contention signals behind most InnoDB latency.
+uid: mysql-innodb
+title: MySQL / InnoDB
+description: >-
+  InnoDB engine internals for MySQL and MariaDB via mysqld_exporter: buffer-pool hit
+  ratio and usage, free vs total pages, row-lock waits and wait time, and the row
+  operation mix. Answers "is the buffer pool big enough, and is row-level locking
+  serialising my writes?".
+datasource: prometheus
+tags: [mysql, mariadb, database, mysqld-exporter, innodb]
+seo_phrase: MySQL InnoDB Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Is the InnoDB buffer pool still absorbing reads, or are they hitting disk?"
+  - "How much of the buffer pool is free vs in use?"
+  - "Are row-lock waits serialising writes right now?"
+  - "How long are transactions waiting on row locks?"
+  - "What is the read/write row-operation mix?"
+
+production_lessons: >-
+  Two InnoDB numbers explain most database latency that is not a missing index. The
+  **buffer-pool hit ratio**: a healthy OLTP server sits above 99%, and every percent
+  below that is reads turning into disk I/O — the buffer pool is too small for the
+  working set. And **row-lock waits**: InnoDB locks at the row level, so hot rows
+  (counters, queue heads, a single account row) serialise concurrent writers and the
+  wait time balloons under load. This dashboard leads with both, then shows pages-free
+  so you can tell a cold-but-fine cache from one genuinely starved for memory.
+
+data_sources:
+  - "`mysqld_exporter` with InnoDB status enabled (the
+    `mysql_global_status_innodb_buffer_pool_*` and
+    `mysql_global_status_innodb_row_lock_*` series, plus the
+    `mysql_global_status_commands_total` command counters)."
+
+templating:
+  - name: instance
+    label: Instance
+    query: label_values(mysql_up, instance)
+    description: MySQL/MariaDB server(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Engine health — read these first
+    panels:
+      - type: gauge
+        title: Buffer pool hit ratio
+        description: Share of InnoDB logical reads served from the buffer pool over 5m. OLTP servers should stay above 99%.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 95}
+          - {color: green, value: 99}
+        targets:
+          - expr: >-
+              100 * (1 - sum(rate(mysql_global_status_innodb_buffer_pool_reads{instance=~"$instance"}[5m]))
+              / clamp_min(sum(rate(mysql_global_status_innodb_buffer_pool_read_requests{instance=~"$instance"}[5m])), 1))
+            instant: true
+            legend: hit ratio
+      - type: stat
+        title: Row lock waits
+        description: Row-lock wait events per second. A sustained rate means hot rows are serialising writers.
+        unit: ops
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 10}
+        targets:
+          - expr: sum(rate(mysql_global_status_innodb_row_lock_waits{instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: lock waits/s
+      - type: stat
+        title: Avg row lock wait
+        description: Mean time a transaction waited for a row lock, derived from lock time over lock waits.
+        unit: ms
+        decimals: 1
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 50}
+          - {color: red, value: 200}
+        targets:
+          - expr: >-
+              sum(rate(mysql_global_status_innodb_row_lock_time{instance=~"$instance"}[5m]))
+              / clamp_min(sum(rate(mysql_global_status_innodb_row_lock_waits{instance=~"$instance"}[5m])), 1)
+            instant: true
+            legend: avg wait
+      - type: gauge
+        title: Buffer pool usage
+        description: Share of buffer-pool pages currently in use. Near 100% is normal once warmed; pair with the hit ratio.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 90}
+          - {color: red, value: 98}
+        targets:
+          - expr: >-
+              max(
+                100 * (1 - mysql_global_status_innodb_buffer_pool_pages_free{instance=~"$instance"}
+                / clamp_min(mysql_global_status_innodb_buffer_pool_pages_total{instance=~"$instance"}, 1))
+              ) or vector(0)
+            instant: true
+            legend: usage
+
+  - title: Buffer pool
+    panels:
+      - type: timeseries
+        title: Hit ratio over time
+        description: The headline hit ratio as a trend — spot the moment the working set outgrew the pool.
+        unit: percent
+        min: 0
+        max: 100
+        legend: hidden
+        targets:
+          - expr: >-
+              100 * (1 - sum(rate(mysql_global_status_innodb_buffer_pool_reads{instance=~"$instance"}[5m]))
+              / clamp_min(sum(rate(mysql_global_status_innodb_buffer_pool_read_requests{instance=~"$instance"}[5m])), 1))
+            legend: hit ratio
+      - type: timeseries
+        title: Logical reads vs disk reads
+        description: Buffer-pool read requests against the subset that fell through to disk. A widening gap is good.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(mysql_global_status_innodb_buffer_pool_read_requests{instance=~"$instance"}[5m]))
+            legend: logical reads/s
+          - expr: sum(rate(mysql_global_status_innodb_buffer_pool_reads{instance=~"$instance"}[5m]))
+            legend: disk reads/s
+      - type: timeseries
+        title: Buffer pool pages
+        description: Free vs total pages per instance. A persistently high free count means the pool is oversized.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: mysql_global_status_innodb_buffer_pool_pages_total{instance=~"$instance"}
+            legend: "{{instance}} total"
+          - expr: mysql_global_status_innodb_buffer_pool_pages_free{instance=~"$instance"}
+            legend: "{{instance}} free"
+
+  - title: Row locking
+    panels:
+      - type: timeseries
+        title: Row lock waits
+        description: Lock-wait events per second. Correlate spikes with deploys or hot-row write bursts.
+        unit: ops
+        min: 0
+        drawStyle: bars
+        fillOpacity: 50
+        targets:
+          - expr: sum(rate(mysql_global_status_innodb_row_lock_waits{instance=~"$instance"}[5m]))
+            legend: lock waits/s
+      - type: timeseries
+        title: Average lock wait time
+        description: Mean wait per lock event. Rising time with steady waits means contention is deepening.
+        unit: ms
+        min: 0
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 200}
+        targets:
+          - expr: >-
+              sum(rate(mysql_global_status_innodb_row_lock_time{instance=~"$instance"}[5m]))
+              / clamp_min(sum(rate(mysql_global_status_innodb_row_lock_waits{instance=~"$instance"}[5m])), 1)
+            legend: avg wait
+
+  - title: Row operations
+    panels:
+      - type: timeseries
+        title: Row operation mix
+        description: Read vs write balance at the SQL command layer — context for the locking above.
+        unit: ops
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: sum(rate(mysql_global_status_commands_total{instance=~"$instance", command="select"}[5m]))
+            legend: select/s
+          - expr: sum(rate(mysql_global_status_commands_total{instance=~"$instance", command="insert"}[5m]))
+            legend: insert/s
+          - expr: sum(rate(mysql_global_status_commands_total{instance=~"$instance", command="update"}[5m]))
+            legend: update/s
+          - expr: sum(rate(mysql_global_status_commands_total{instance=~"$instance", command="delete"}[5m]))
+            legend: delete/s
+
+alerts:
+  - name: MySQLInnoDBBufferPoolHitLow
+    severity: warning
+    expr: >-
+      100 * (1 - sum by (instance) (rate(mysql_global_status_innodb_buffer_pool_reads[5m]))
+      / clamp_min(sum by (instance) (rate(mysql_global_status_innodb_buffer_pool_read_requests[5m])), 1)) < 99
+    for: 15m
+    summary: "MySQL {{ $labels.instance }} InnoDB buffer pool hit ratio below 99%"
+    why: Reads are falling through to disk, so query latency has already risen — the working set no longer fits in RAM.
+    investigate: "Compare buffer-pool size to the active data set; check for a large scan or a cold cache after restart."
+    runbook: "Increase innodb_buffer_pool_size (up to ~70% of RAM), or add the missing index causing the scan."
+    recovery: Clears when the ratio recovers above 99% for 5m.
+    false_positives: Expected for the minutes after a restart while the pool warms, or during a deliberate full-table report.
+  - name: MySQLInnoDBRowLockWaitsHigh
+    severity: warning
+    expr: sum by (instance) (rate(mysql_global_status_innodb_row_lock_waits[5m])) > 10
+    for: 10m
+    summary: "MySQL {{ $labels.instance }} InnoDB row-lock waits above 10/s"
+    why: Hot rows are serialising concurrent writers, increasing latency and risking lock-wait timeouts.
+    investigate: "Identify the hot table/row; look for a counter, queue head or account row updated by many sessions."
+    runbook: "Shorten transactions, batch or shard the hot row, or move the counter to a different store."
+    recovery: Clears when row-lock waits drop below 10/s for 5m.
+    false_positives: Brief bursts during a migration or a nightly batch are usually benign.
+  - name: MySQLInnoDBBufferPoolExhausted
+    severity: warning
+    expr: >-
+      mysql_global_status_innodb_buffer_pool_pages_free
+      / clamp_min(mysql_global_status_innodb_buffer_pool_pages_total, 1) < 0.02
+    for: 15m
+    summary: "MySQL {{ $labels.instance }} InnoDB buffer pool has <2% free pages"
+    why: With almost no free pages, InnoDB evicts on every new read; combined with a low hit ratio this means memory pressure.
+    investigate: "Check the hit ratio alongside this — full-but-high-hit is fine; full-and-low-hit means the pool is too small."
+    runbook: "Increase innodb_buffer_pool_size if the host has RAM, or reduce the working set."
+    recovery: Clears when free pages rise above 2% for 5m.
+    false_positives: A fully warmed pool is normally near-full; this is only a problem when the hit ratio is also low.
+
+troubleshooting:
+  - symptom: Hit ratio sits at exactly 100%
+    cause: No InnoDB reads in the window, so the clamp dominates the ratio.
+    action: Read it together with logical-reads/s; the ratio is only meaningful under load.
+  - symptom: Average lock wait is zero while waits climb
+    cause: row_lock_time is reported in milliseconds and rounds to zero for very short waits.
+    action: Watch the waits-per-second panel; tiny but frequent waits still indicate contention.
+  - symptom: Buffer pool usage pinned at 100%
+    cause: The pool is fully warmed, which is normal and healthy.
+    action: Only act when usage is high and the hit ratio is simultaneously low.
+
+performance: >-
+  All counters use a 5m rate window so a restart never spikes them. Derived ratios
+  clamp their denominator with `clamp_min(...,1)` to stay defined at zero traffic, and
+  per-instance aggregations keep series count proportional to servers.
+
+customization: >-
+  Tune the 99% hit-ratio target to your engine — analytics workloads run lower by
+  design. If your exporter exposes `mysql_global_status_innodb_rows_read/inserted/...`,
+  swap the row-operation panel to those for a truer engine-level view than the SQL
+  command counters.

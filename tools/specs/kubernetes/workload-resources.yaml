@@ -1,0 +1,279 @@
+# Workload resources — actual usage vs requests vs limits, and throttling.
+uid: kubernetes-workload-resources
+title: Kubernetes / Workload Resources
+description: >-
+  Right-sizing and saturation view for workloads: actual CPU and memory usage from
+  cAdvisor against the requests and limits set on each pod, plus CPU throttling and
+  pods running close to their memory limit. Answers "is this workload starved,
+  wasteful, or about to be OOM-killed?" — the data behind every requests/limits
+  decision.
+datasource: prometheus
+tags: [kubernetes, resources, cadvisor, throttling, right-sizing]
+seo_phrase: Kubernetes requests limits usage Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Which workloads are being CPU-throttled by their limit right now?"
+  - "Which pods are running close to their memory limit and risk an OOM kill?"
+  - "Where are requests set far above actual usage (wasted, unschedulable capacity)?"
+  - "Is usage bursting above requests (the scheduler under-counted this workload)?"
+
+production_lessons: >-
+  Requests and limits are guesses until you put usage next to them, and both wrong
+  directions hurt: requests set far above usage waste schedulable capacity and cause
+  false "cluster full" Pending pods, while a CPU limit set too low silently throttles
+  the app — latency climbs with CPU sitting "idle" because the cgroup is capping it.
+  Memory limits are harsher still: cross the limit and the kernel OOM-kills the
+  container with no grace. This dashboard leads with throttled workloads and pods
+  near their memory limit (the two that cause user-visible pain), then shows usage
+  against requests and limits so you can right-size with evidence instead of vibes.
+  The most common fix it surfaces: remove or raise CPU limits while keeping requests,
+  and set memory requests equal to limits for predictable, non-bursty workloads.
+
+data_sources:
+  - "`cAdvisor`/kubelet for actual usage and CPU throttling
+    (`container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`,
+    `container_cpu_cfs_throttled_periods_total`, `container_cpu_cfs_periods_total`)."
+  - "`kube-state-metrics` for configured requests and limits
+    (`kube_pod_container_resource_requests`, `kube_pod_container_resource_limits`)."
+
+templating:
+  - name: cluster
+    label: Cluster
+    query: label_values(kube_node_info, cluster)
+    description: Cluster to scope to. Select All on single-cluster setups.
+    multi: false
+    includeAll: true
+  - name: namespace
+    label: Namespace
+    query: label_values(kube_pod_container_resource_requests{cluster=~"$cluster"}, namespace)
+    description: Namespace(s) to inspect; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Saturation — read these first
+    panels:
+      - type: stat
+        title: Pods being CPU-throttled
+        description: Pods whose containers are throttled more than 25% of CFS periods by their CPU limit.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              count(
+                sum by (namespace, pod) (rate(container_cpu_cfs_throttled_periods_total{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""}[5m]))
+                / clamp_min(sum by (namespace, pod) (rate(container_cpu_cfs_periods_total{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""}[5m])), 1)
+                > 0.25
+              ) or vector(0)
+            instant: true
+            legend: throttled
+      - type: stat
+        title: Pods near memory limit
+        description: Pods using more than 90% of their configured memory limit — the next GC pause from an OOM kill.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              count(
+                sum by (namespace, pod, container) (container_memory_working_set_bytes{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""})
+                / on (namespace, pod, container)
+                sum by (namespace, pod, container) (kube_pod_container_resource_limits{cluster=~"$cluster", namespace=~"$namespace", resource="memory"})
+                > 0.9
+              ) or vector(0)
+            instant: true
+            legend: near_limit
+      - type: gauge
+        title: CPU usage vs requests (cluster)
+        description: Actual CPU usage as a share of CPU requests. Far below 100% means over-requested, wasted capacity; above 100% means bursting beyond what the scheduler reserved.
+        unit: percent
+        min: 0
+        max: 200
+        thresholds:
+          - {color: yellow, value: null}
+          - {color: green, value: 50}
+          - {color: yellow, value: 110}
+          - {color: red, value: 150}
+        targets:
+          - expr: >-
+              100
+              * sum(rate(container_cpu_usage_seconds_total{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""}[5m]))
+              / sum(kube_pod_container_resource_requests{cluster=~"$cluster", namespace=~"$namespace", resource="cpu"})
+            instant: true
+            legend: cpu
+      - type: gauge
+        title: Memory usage vs requests (cluster)
+        description: Actual working-set memory as a share of memory requests across the selection.
+        unit: percent
+        min: 0
+        max: 200
+        thresholds:
+          - {color: yellow, value: null}
+          - {color: green, value: 50}
+          - {color: yellow, value: 110}
+          - {color: red, value: 150}
+        targets:
+          - expr: >-
+              100
+              * sum(container_memory_working_set_bytes{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""})
+              / sum(kube_pod_container_resource_requests{cluster=~"$cluster", namespace=~"$namespace", resource="memory"})
+            instant: true
+            legend: memory
+
+  - title: CPU — usage, limits and throttling
+    panels:
+      - type: timeseries
+        title: CPU cores — usage vs requests vs limits
+        description: Cluster-wide actual CPU against what is requested and capped. Usage hugging the limit line is where throttling happens.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(rate(container_cpu_usage_seconds_total{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""}[5m]))
+            legend: usage
+          - expr: sum(kube_pod_container_resource_requests{cluster=~"$cluster", namespace=~"$namespace", resource="cpu"})
+            legend: requests
+          - expr: sum(kube_pod_container_resource_limits{cluster=~"$cluster", namespace=~"$namespace", resource="cpu"})
+            legend: limits
+      - type: bargauge
+        title: Top pods by CPU throttling %
+        description: Share of CFS periods in which each pod was throttled by its CPU limit. High values mean the limit is too low for the load.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 25}
+          - {color: red, value: 50}
+        targets:
+          - expr: >-
+              topk(15,
+                100
+                * sum by (namespace, pod) (rate(container_cpu_cfs_throttled_periods_total{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""}[5m]))
+                / clamp_min(sum by (namespace, pod) (rate(container_cpu_cfs_periods_total{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""}[5m])), 1)
+              )
+            instant: true
+            legend: "{{namespace}}/{{pod}}"
+
+  - title: Memory — usage vs limits
+    panels:
+      - type: timeseries
+        title: Memory bytes — usage vs requests vs limits
+        description: Cluster-wide working-set memory against requests and limits. Usage above the request line means the scheduler under-counted this workload.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: sum(container_memory_working_set_bytes{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""})
+            legend: usage
+          - expr: sum(kube_pod_container_resource_requests{cluster=~"$cluster", namespace=~"$namespace", resource="memory"})
+            legend: requests
+          - expr: sum(kube_pod_container_resource_limits{cluster=~"$cluster", namespace=~"$namespace", resource="memory"})
+            legend: limits
+      - type: bargauge
+        title: Top pods by memory vs limit %
+        description: Each pod's working-set memory as a share of its memory limit. Anything near 100% is one allocation away from an OOM kill.
+        unit: percent
+        min: 0
+        max: 100
+        orientation: horizontal
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 80}
+          - {color: red, value: 95}
+        targets:
+          - expr: >-
+              topk(15,
+                100
+                * sum by (namespace, pod) (container_memory_working_set_bytes{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""})
+                / clamp_min(sum by (namespace, pod) (kube_pod_container_resource_limits{cluster=~"$cluster", namespace=~"$namespace", resource="memory"}), 1)
+              )
+            instant: true
+            legend: "{{namespace}}/{{pod}}"
+
+  - title: Right-sizing
+    panels:
+      - type: table
+        title: Most over-provisioned (CPU requested but idle)
+        description: Pods reserving the most CPU above what they actually use — reclaimable capacity. Values are wasted cores (requests minus usage).
+        unit: short
+        targets:
+          - expr: >-
+              topk(15,
+                sum by (namespace, pod) (kube_pod_container_resource_requests{cluster=~"$cluster", namespace=~"$namespace", resource="cpu"})
+                - sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{cluster=~"$cluster", namespace=~"$namespace", container!="", pod!=""}[5m]))
+              )
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{pod}}"
+      - type: table
+        title: No CPU limit set
+        description: Pods with CPU requests but no CPU limit. Often deliberate (avoids throttling) — listed so the choice is explicit, not accidental.
+        unit: short
+        targets:
+          - expr: >-
+              sum by (namespace, pod) (kube_pod_container_resource_requests{cluster=~"$cluster", namespace=~"$namespace", resource="cpu"})
+              unless sum by (namespace, pod) (kube_pod_container_resource_limits{cluster=~"$cluster", namespace=~"$namespace", resource="cpu"})
+            instant: true
+            format: table
+            legend: "{{namespace}}/{{pod}}"
+
+alerts:
+  - name: KubeWorkloadCPUThrottled
+    severity: warning
+    expr: >-
+      sum by (namespace, pod) (rate(container_cpu_cfs_throttled_periods_total{container!="", pod!=""}[5m]))
+      / clamp_min(sum by (namespace, pod) (rate(container_cpu_cfs_periods_total{container!="", pod!=""}[5m])), 1)
+      > 0.5
+    for: 15m
+    summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} CPU-throttled over 50% of periods"
+    why: Heavy CPU throttling means the container wants more CPU than its limit allows — latency and queueing climb while the pod's CPU graph looks deceptively idle.
+    investigate: "Compare the pod's CPU usage with its limit; correlate the throttling with a latency or queue-depth spike in the app's own dashboard."
+    runbook: "Raise or remove the CPU limit (keep the request), or scale the workload out so each replica needs less CPU."
+    recovery: Clears when throttling stays below 50% of periods for 5m.
+    false_positives: Short batch spikes that throttle briefly and finish — raise `for` or the threshold for bursty jobs.
+  - name: KubeWorkloadMemoryNearLimit
+    severity: critical
+    expr: >-
+      sum by (namespace, pod, container) (container_memory_working_set_bytes{container!="", pod!=""})
+      / on (namespace, pod, container)
+      sum by (namespace, pod, container) (kube_pod_container_resource_limits{resource="memory"})
+      > 0.95
+    for: 10m
+    summary: "Container {{ $labels.namespace }}/{{ $labels.pod }} above 95% of its memory limit"
+    why: Crossing the memory limit triggers an immediate OOM kill with no grace period — the container dies mid-request and restarts, often in a loop.
+    investigate: "Check whether usage is growing steadily (a leak) or stepped up after a deploy; review the app's heap/cache configuration."
+    runbook: "Raise the memory limit if the workload genuinely needs it, fix the leak, or reduce in-app cache/heap sizing to fit the limit."
+    recovery: Clears when working set falls below 95% of the limit for 5m.
+    false_positives: Cache-heavy apps that report high working set but reclaim under pressure without OOM — confirm against actual OOMKilled events.
+
+troubleshooting:
+  - {symptom: Throttling panels are empty, cause: Containers have no CPU limit (no CFS quota, so no throttling), action: Expected — the "No CPU limit set" table lists those pods; throttling only exists where a limit does.}
+  - {symptom: Memory-vs-limit panel empty for a workload, cause: That workload has no memory limit set, action: Without a limit there is no denominator; set limits or watch usage vs requests instead.}
+  - {symptom: CPU usage-vs-requests gauge over 100%, cause: Workloads bursting above their requests, action: Normal for burstable QoS — only a concern if it coincides with node CPU saturation.}
+
+performance: >-
+  Usage and throttling use 5m rate windows over cAdvisor counters (reset-safe).
+  Aggregations are bounded with `sum by (namespace, pod[, container])`; keep
+  $namespace scoped on very large clusters and prefer recording rules for the
+  cluster-total timeseries. `clamp_min(..., 1)` guards every ratio denominator
+  (periods, limits) against divide-by-zero.
+
+customization: >-
+  Tune the 25%/50% throttling and 90%/95% memory thresholds to your latency
+  tolerance. Switch aggregation from `(namespace, pod)` to a workload label if your
+  relabeling adds one, to roll pods up to their Deployment/StatefulSet. Use the
+  over-provisioned table to feed a VerticalPodAutoscaler or a quarterly right-sizing
+  pass.

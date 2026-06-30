@@ -1,0 +1,226 @@
+# Meta-monitoring: is the Loki log backend ingesting and serving without dropping?
+uid: loki-overview
+title: Loki / Overview
+description: >-
+  Top-level health of a Loki deployment: lines and bytes ingested, ingester chunks
+  and streams in memory, request latency and error ratio by route, and chunk-flush
+  rate. Answers "is the logging backend keeping up, and are queries healthy?"
+datasource: prometheus
+tags: [loki, logs, ingestion, meta-monitoring]
+seo_phrase: Grafana Loki Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "What is the current log ingest rate in lines and bytes per second?"
+  - "What fraction of requests are returning 5xx?"
+  - "How many streams and chunks are the ingesters holding in memory?"
+  - "Where is request latency highest across routes?"
+  - "Are chunks flushing to storage at a steady rate?"
+
+production_lessons: >-
+  Loki's pain is almost always stream cardinality, not raw byte volume — a label
+  with unbounded values (request_id, pod IP) explodes in-memory streams and OOMs the
+  ingesters long before bandwidth becomes the problem. So we lead with ingest rate,
+  the 5xx ratio and memory streams together: streams is the early-warning capacity
+  signal, the error ratio is the SLO, and the byte/line rate is the workload. Chunk
+  flush rate then confirms data is actually reaching long-term storage rather than
+  piling up in memory.
+
+data_sources:
+  - "`loki` components exposing the `loki_distributor_*`, `loki_ingester_*` and
+    `loki_request_duration_seconds_*` series (Loki publishes Prometheus metrics)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(loki_request_duration_seconds_count, job)
+    description: Loki component job (distributor, ingester, querier, ...).
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Backend health — read these first
+    panels:
+      - type: stat
+        title: Lines ingested per second
+        description: Log lines accepted by the distributors — the workload's line rate.
+        unit: ops
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(loki_distributor_lines_received_total[5m])) or vector(0)
+            instant: true
+            legend: lines/s
+      - type: stat
+        title: Bytes ingested per second
+        description: Log volume accepted by the distributors — the bandwidth and storage-cost driver.
+        unit: Bps
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(loki_distributor_bytes_received_total[5m])) or vector(0)
+            instant: true
+            legend: bytes/s
+      - type: stat
+        title: 5xx error ratio
+        description: Share of requests returning 5xx across all routes — the reliability SLO.
+        unit: percent
+        decimals: 2
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum(rate(loki_request_duration_seconds_count{status_code=~"5.."}[5m]))
+              / clamp_min(sum(rate(loki_request_duration_seconds_count[5m])), 1)
+            instant: true
+            legend: 5xx%
+      - type: stat
+        title: In-memory streams
+        description: Active streams held by the ingesters — the cardinality number that drives memory and OOMs.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 100000}
+          - {color: red, value: 500000}
+        targets:
+          - expr: sum(loki_ingester_memory_streams) or vector(0)
+            instant: true
+            legend: streams
+
+  - title: Ingestion
+    panels:
+      - type: timeseries
+        title: Lines per second by tenant
+        description: Per-tenant line rate — isolates which tenant is driving ingest volume.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (tenant) (rate(loki_distributor_lines_received_total[5m]))
+            legend: "{{tenant}}"
+      - type: timeseries
+        title: Bytes per second by tenant
+        description: Per-tenant byte rate — the storage-cost view of the same workload.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (tenant) (rate(loki_distributor_bytes_received_total[5m]))
+            legend: "{{tenant}}"
+
+  - title: Latency & errors
+    panels:
+      - type: timeseries
+        title: Request latency p99 by route
+        description: 99th-percentile request duration per route — separates slow pushes from slow queries.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: histogram_quantile(0.99, sum by (le, route) (rate(loki_request_duration_seconds_bucket{job=~"$job"}[5m])))
+            legend: "{{route}}"
+      - type: timeseries
+        title: 5xx ratio by route
+        description: Error share per route — pinpoints a single failing endpoint versus a cluster-wide issue.
+        unit: percent
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5}
+        targets:
+          - expr: >-
+              100 * sum by (route) (rate(loki_request_duration_seconds_count{job=~"$job", status_code=~"5.."}[5m]))
+              / clamp_min(sum by (route) (rate(loki_request_duration_seconds_count{job=~"$job"}[5m])), 1)
+            legend: "{{route}}"
+
+  - title: Ingester capacity
+    panels:
+      - type: timeseries
+        title: In-memory chunks & streams
+        description: Chunks and streams held in memory — both climb with cardinality and gate ingester memory.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (loki_ingester_memory_streams)
+            legend: "{{instance}} streams"
+          - expr: sum by (instance) (loki_ingester_memory_chunks)
+            legend: "{{instance}} chunks"
+      - type: timeseries
+        title: Chunk flush rate
+        description: Chunks flushed to storage per second — a stall here means data is stuck in memory and at risk on a crash.
+        unit: ops
+        min: 0
+        legend: table
+        drawStyle: bars
+        fillOpacity: 40
+        targets:
+          - expr: sum by (instance) (rate(loki_ingester_chunks_flushed_total[5m]))
+            legend: "{{instance}}"
+
+alerts:
+  - name: LokiHighErrorRatio
+    severity: critical
+    expr: >-
+      100 * sum(rate(loki_request_duration_seconds_count{status_code=~"5.."}[5m]))
+      / clamp_min(sum(rate(loki_request_duration_seconds_count[5m])), 1) > 5
+    for: 10m
+    summary: "Loki cluster 5xx ratio above 5%"
+    why: A high server-error ratio means log pushes are rejected or queries fail, so you lose logs or visibility during an incident.
+    investigate: "Open Loki / Overview, use 5xx ratio by route to find the failing path, then check that component's logs."
+    runbook: "Scale the failing tier (ingesters for writes, queriers for reads); check object storage availability and rate limits."
+    recovery: Clears when the 5xx ratio drops below 5% for 5m.
+    false_positives: Rollouts and rate-limit (429) pushback are normal — this rule counts only 5xx, but a restart can still spike it briefly.
+  - name: LokiStreamCardinalityHigh
+    severity: warning
+    expr: sum(loki_ingester_memory_streams) > 500000
+    for: 30m
+    summary: "Loki ingesters above 500k in-memory streams"
+    why: Excess streams come from high-cardinality labels and drive ingester memory straight toward an OOM kill.
+    investigate: "Find the tenant and label driving stream count; check for a dynamic label like request_id or pod IP."
+    runbook: "Remove the offending label in the client/pipeline, enforce per-tenant stream limits, and scale ingesters if legitimate."
+    recovery: Clears when in-memory streams fall below 500k for 5m.
+    false_positives: Large multi-tenant clusters — tune the threshold to your ingester memory.
+  - name: LokiRequestLatencyHigh
+    severity: warning
+    expr: >-
+      histogram_quantile(0.99, sum by (le, route) (rate(loki_request_duration_seconds_bucket[5m]))) > 2
+    for: 10m
+    summary: "Loki route {{ $labels.route }} p99 latency above 2s"
+    why: Slow requests stall log shipping or break log queries during the incidents you most need them.
+    investigate: "Identify the route, then check the owning component's CPU, GC and object-storage latency."
+    runbook: "Scale the component, enable query result caching for read routes, or split heavy queries."
+    recovery: Clears when p99 falls below 2s for 5m.
+    false_positives: Large backfill or expensive queries spike read-path latency briefly.
+
+troubleshooting:
+  - symptom: Per-tenant panels are empty
+    cause: This Loki build does not expose the tenant label on the distributor counters.
+    action: Drop the `by (tenant)` grouping or upgrade Loki; use the totals instead.
+  - symptom: Memory streams climbing fast
+    cause: A label with unbounded values (request_id, IP) is multiplying streams.
+    action: Strip the dynamic label in the pipeline_stages or client before ingest.
+  - symptom: Chunk flush rate at zero with rising memory chunks
+    cause: Object storage is unreachable, so chunks cannot flush.
+    action: Check storage credentials and connectivity from the ingesters.
+
+performance: >-
+  Latency panels read native `loki_request_duration_seconds_bucket` histograms
+  aggregated by `le` plus `route`. Ingest and flush panels use 5m rates and
+  aggregate per instance or tenant to bound cardinality. Error ratios guard the
+  denominator with `clamp_min(..., 1)`.
+
+customization: >-
+  Tune the 500k stream and 5% error thresholds to your ingester memory and SLO. Use
+  `$job` to scope to a single component. Lower the latency alert threshold for
+  read-heavy clusters that depend on fast log queries.

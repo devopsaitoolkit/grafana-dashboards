@@ -1,0 +1,219 @@
+# Meta-monitoring: is the Tempo trace backend ingesting spans and flushing blocks?
+uid: tempo-overview
+title: Tempo / Overview
+description: >-
+  Top-level health of a Tempo deployment: spans and bytes received, traces created,
+  request latency, block flush rate and blocklist length. Answers "is the tracing
+  backend ingesting spans and writing them to long-term storage cleanly?"
+datasource: prometheus
+tags: [tempo, tracing, ingestion, meta-monitoring]
+seo_phrase: Grafana Tempo Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "What is the current span ingest rate?"
+  - "Is request latency healthy across the trace API routes?"
+  - "Is the blocklist length growing (compaction falling behind)?"
+  - "Are ingesters flushing blocks to storage at a steady rate?"
+  - "How many traces and bytes are being created and received?"
+
+production_lessons: >-
+  Tempo is mostly a pipe to object storage, so its two real failure modes are
+  obvious once you watch the right signals: spans stop arriving (the collectors or
+  distributors broke) or blocks stop reaching storage and the blocklist balloons
+  (compaction or the backend is struggling). We lead with span ingest, request p99
+  and blocklist length because that trio covers "are we receiving data, serving it,
+  and storing it?" A blocklist that grows without bound eventually slows every read
+  and signals that compaction cannot keep pace with ingestion.
+
+data_sources:
+  - "`tempo` components exposing `tempo_distributor_spans_received_total`,
+    `tempo_distributor_bytes_received_total`, `tempo_ingester_traces_created_total`,
+    `tempo_ingester_blocks_flushed_total`, `tempodb_blocklist_length` and
+    `tempo_request_duration_seconds_*`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(tempo_request_duration_seconds_count, job)
+    description: Tempo component job (distributor, ingester, querier, compactor).
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Tracing health — read these first
+    panels:
+      - type: stat
+        title: Spans received per second
+        description: Spans accepted by the distributors — the tracing workload's ingest rate.
+        unit: ops
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(tempo_distributor_spans_received_total[5m])) or vector(0)
+            instant: true
+            legend: spans/s
+      - type: stat
+        title: Request p99
+        description: 99th-percentile latency across Tempo request routes — the read/write SLO in one number.
+        unit: s
+        decimals: 3
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: histogram_quantile(0.99, sum by (le) (rate(tempo_request_duration_seconds_bucket[5m]))) or vector(0)
+            instant: true
+            legend: p99
+      - type: stat
+        title: Blocklist length
+        description: Number of blocks the compactor tracks. Steady growth means compaction is falling behind and reads will slow.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1000}
+          - {color: red, value: 5000}
+        targets:
+          - expr: max(tempodb_blocklist_length) or vector(0)
+            instant: true
+            legend: blocks
+      - type: stat
+        title: Traces created per second
+        description: New traces assembled by the ingesters — confirms spans are being grouped into traces.
+        unit: ops
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(rate(tempo_ingester_traces_created_total[5m])) or vector(0)
+            instant: true
+            legend: traces/s
+
+  - title: Ingestion
+    panels:
+      - type: timeseries
+        title: Spans per second by instance
+        description: Per-distributor span rate — a node falling behind shows up as a divergence here.
+        unit: ops
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (rate(tempo_distributor_spans_received_total[5m]))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Bytes received per second
+        description: Trace volume into the distributors — the bandwidth and storage-cost driver.
+        unit: Bps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (instance) (rate(tempo_distributor_bytes_received_total[5m]))
+            legend: "{{instance}}"
+
+  - title: Latency
+    panels:
+      - type: timeseries
+        title: Request latency p99 by route
+        description: 99th-percentile request duration per route — separates slow ingest from slow trace queries.
+        unit: s
+        min: 0
+        legend: table
+        targets:
+          - expr: histogram_quantile(0.99, sum by (le, route) (rate(tempo_request_duration_seconds_bucket{job=~"$job"}[5m])))
+            legend: "{{route}}"
+      - type: timeseries
+        title: Request rate by route
+        description: Requests per second per route — the workload behind the latency numbers above.
+        unit: reqps
+        min: 0
+        legend: table
+        targets:
+          - expr: sum by (route) (rate(tempo_request_duration_seconds_count{job=~"$job"}[5m]))
+            legend: "{{route}}"
+
+  - title: Storage
+    panels:
+      - type: timeseries
+        title: Block flush rate
+        description: Blocks flushed to object storage per second — a stall means data is held in memory and at risk.
+        unit: ops
+        min: 0
+        legend: table
+        drawStyle: bars
+        fillOpacity: 40
+        targets:
+          - expr: sum by (instance) (rate(tempo_ingester_blocks_flushed_total[5m]))
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Blocklist length over time
+        description: Tracked blocks over time — a steady climb is the signature of compaction not keeping up.
+        unit: short
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 5000}
+        targets:
+          - expr: max by (instance) (tempodb_blocklist_length)
+            legend: "{{instance}}"
+
+alerts:
+  - name: TempoNoSpansReceived
+    severity: critical
+    expr: sum(rate(tempo_distributor_spans_received_total[5m])) == 0
+    for: 10m
+    summary: "Tempo is receiving no spans"
+    why: Zero span ingest means tracing has gone dark — either the collectors stopped sending or the distributors are broken.
+    investigate: "Open Tempo / Overview, check distributor request rate and the OTLP/Jaeger receiver endpoints from the agents."
+    runbook: "Verify the trace pipeline (agent/collector to distributor); restart wedged distributors; confirm the receive ports are open."
+    recovery: Clears when span ingest returns above zero for 5m.
+    false_positives: Genuinely idle environments (nights, dev) receive no spans — scope this to production or raise the `for`.
+  - name: TempoBlocklistGrowing
+    severity: warning
+    expr: tempodb_blocklist_length > 5000
+    for: 30m
+    summary: "Tempo blocklist on {{ $labels.instance }} above 5000 blocks"
+    why: A growing blocklist means compaction cannot keep up, which slows every trace read and inflates object-storage cost.
+    investigate: "Check the compactor's throughput and CPU, and whether ingestion recently increased."
+    runbook: "Scale the compactor, raise compaction concurrency, or reduce retention; confirm object storage is responsive."
+    recovery: Clears when the blocklist falls below 5000 for 5m.
+    false_positives: Large, high-retention clusters legitimately track many blocks — tune the threshold to your scale.
+  - name: TempoRequestLatencyHigh
+    severity: warning
+    expr: >-
+      histogram_quantile(0.99, sum by (le, route) (rate(tempo_request_duration_seconds_bucket[5m]))) > 5
+    for: 10m
+    summary: "Tempo route {{ $labels.route }} p99 latency above 5s"
+    why: Slow requests degrade trace ingest or make trace lookups unusable when an engineer is mid-incident.
+    investigate: "Identify the route, then check the owning component's CPU and object-storage latency."
+    runbook: "Scale the component, tune querier concurrency, or improve object-storage performance / caching."
+    recovery: Clears when p99 falls below 5s for 5m.
+    false_positives: A heavy trace-search query can spike read latency briefly.
+
+troubleshooting:
+  - symptom: Spans received is zero but apps are running
+    cause: The trace pipeline (agent/collector to Tempo) is broken, not Tempo itself.
+    action: Check the collector's exporter logs and the Tempo receiver ports.
+  - symptom: Blocklist climbs but flush rate looks fine
+    cause: Ingesters flush fine, but the compactor cannot merge blocks fast enough.
+    action: Scale the compactor and raise compaction concurrency.
+  - symptom: Latency by route is empty
+    cause: The route label differs in your Tempo version, or no traffic in the window.
+    action: List route label values in Explore and widen the time range.
+
+performance: >-
+  Latency panels read native `tempo_request_duration_seconds_bucket` histograms
+  aggregated by `le` plus `route`. Ingest and flush panels use 5m rates aggregated
+  per instance. The blocklist panel reads a gauge directly, so it is cheap.
+
+customization: >-
+  Tune the 5000-block and 5s latency thresholds to your retention and SLO. Scope
+  the no-spans alert to production with a label selector so idle dev environments do
+  not page. Use `$job` to focus on a single component.

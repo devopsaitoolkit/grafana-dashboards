@@ -1,0 +1,874 @@
+# Alerting rules for the openstack dashboards.
+# Generated from tools/specs/openstack/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: openstack.rules
+  rules:
+  - alert: CinderServiceDown
+    expr: openstack_cinder_service_state == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Cinder {{ $labels.service }} on {{ $labels.hostname }} is down
+      description: A down cinder-volume backend blocks attach/extend/delete; a down cinder-scheduler blocks
+        all new volume placement.
+      runbook: Restart the affected service; for cinder-volume verify the storage array/driver connectivity,
+        for cinder-scheduler check RabbitMQ and the database.
+      dashboard: dashboards/openstack/cinder/api.json
+  - alert: CinderVolumesInError
+    expr: sum(openstack_cinder_volume_status{status="error"}) > 5
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: More than 5 Cinder volumes are in the error state
+      description: Volumes in error mean failed create/attach/delete operations — tenant-visible storage
+        failures that won't self-heal.
+      runbook: Fix the backend cause (array capacity, driver auth, connectivity), then reset the stuck
+        volumes' state and retry the operation.
+      dashboard: dashboards/openstack/cinder/api.json
+  - alert: CinderExporterDown
+    expr: absent(openstack_cinder_service_state)
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Cinder metrics absent — openstack-exporter not scraping Cinder
+      description: With no service metrics you can't distinguish a healthy block-storage plane from a
+        dead one.
+      runbook: Restart openstack-exporter; verify the Cinder endpoint, admin credentials and project scope.
+      dashboard: dashboards/openstack/cinder/api.json
+  - alert: CinderPoolNearFull
+    expr: 100 * (1 - openstack_cinder_pool_capacity_free_gb / clamp_min(openstack_cinder_pool_capacity_total_gb,
+      1)) > 85
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Cinder pool {{ $labels.pool }} over 85% full
+      description: Once a pool fills, every volume the scheduler places there fails; thin-provisioned
+        backends can also start refusing writes to existing volumes.
+      runbook: Add capacity to the backend, migrate volumes to a roomier pool, or prune unused volumes/snapshots
+        on that pool.
+      dashboard: dashboards/openstack/cinder/storage-capacity.json
+  - alert: CinderPoolPredictedExhaustion
+    expr: predict_linear(openstack_cinder_pool_capacity_free_gb[24h], 7 * 86400) < 0
+    for: 1h
+    labels:
+      severity: critical
+    annotations:
+      summary: Cinder pool {{ $labels.pool }} projected to exhaust within 7 days
+      description: A dated deadline turns a slow capacity leak into a planned expansion instead of a midnight
+        outage.
+      runbook: Schedule a capacity expansion or migrate workloads; throttle the source of growth to buy
+        time.
+      dashboard: dashboards/openstack/cinder/storage-capacity.json
+  - alert: CinderVolumeQuotaNearLimit
+    expr: 100 * sum(openstack_cinder_limits_volume_used_gb) / clamp_min(sum(openstack_cinder_limits_volume_max_gb),
+      1) > 90
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Cinder volume quota over 90% used
+      description: Hitting the quota limit fails provisioning with a quota error even when the backend
+        has free space — a different fix from physical exhaustion.
+      runbook: Increase the Cinder volume quota for the project, or reclaim unused volumes to free allocation.
+      dashboard: dashboards/openstack/cinder/storage-capacity.json
+  - alert: CinderVolumesInError
+    expr: sum(openstack_cinder_volume_status{status="error"}) > 5
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: More than 5 Cinder volumes are in the error state
+      description: Error volumes are failed operations that hold quota and never recover on their own
+        — tenant-visible storage failures.
+      runbook: Fix the backend cause, then `cinder reset-state` and retry or delete the affected volumes.
+      dashboard: dashboards/openstack/cinder/volumes.json
+  - alert: CinderVolumesStuckCreating
+    expr: sum(openstack_cinder_volume_status{status="creating"}) > 5
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: More than 5 Cinder volumes stuck creating for 30m
+      description: Volumes should leave creating in seconds; a sustained backlog means the scheduler can't
+        place them or a backend is wedged.
+      runbook: Restart cinder-scheduler if it is wedged, free or add backend capacity, and reset any genuinely
+        stuck volumes.
+      dashboard: dashboards/openstack/cinder/volumes.json
+  - alert: CinderSnapshotRunaway
+    expr: increase(sum(openstack_cinder_snapshots)[1h:]) > 200
+    for: 30m
+    labels:
+      severity: info
+    annotations:
+      summary: Cinder snapshots grew by more than 200 in an hour
+      description: A runaway snapshot job can silently consume backend capacity far faster than volume
+        growth suggests, leading to a surprise out-of-space event.
+      runbook: Pause or rate-limit the snapshot automation and prune obsolete snapshots.
+      dashboard: dashboards/openstack/cinder/volumes.json
+  - alert: GlanceStoreNearFull
+    expr: 100 * sum(openstack_glance_image_bytes) / (2048 * 1073741824) > 85
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Glance image store over 85% full
+      description: When the image store fills, new image uploads and instance snapshots fail, blocking
+        deploys and backups.
+      runbook: Delete obsolete images/snapshots, deduplicate base images, or expand the image store backend.
+      dashboard: dashboards/openstack/glance/images.json
+  - alert: GlanceStoragePredictedExhaustion
+    expr: predict_linear(sum(openstack_glance_image_bytes)[24h:], 7 * 86400) > 2048 * 1073741824
+    for: 1h
+    labels:
+      severity: critical
+    annotations:
+      summary: Glance image store projected to fill within 7 days
+      description: A dated deadline lets you prune or expand on schedule rather than during a failed deploy.
+      runbook: Add a retention policy that prunes old images/snapshots, or expand the store; throttle
+        the producer to buy time.
+      dashboard: dashboards/openstack/glance/images.json
+  - alert: GlanceImageCountDrop
+    expr: sum(openstack_glance_images) < sum(openstack_glance_images offset 1h) * 0.8
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Glance image count dropped more than 20% in an hour
+      description: A sudden drop usually means a bulk deletion — accidental, malicious, or a misfired
+        cleanup job that removed images still in use.
+      runbook: If the deletion was unintended, restore images from backup and revoke the offending credential
+        or fix the cleanup job.
+      dashboard: dashboards/openstack/glance/images.json
+  - alert: HAProxyBackendDown
+    expr: haproxy_backend_up == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: HAProxy backend {{ $labels.backend }} is down (no healthy servers)
+      description: A backend with zero healthy servers means the OpenStack API behind it is unreachable
+        through the load balancer — a hard outage for that service.
+      runbook: Restart the failed API service on its hosts; confirm the HAProxy health-check path and
+        that the service is listening; check for a bad deploy.
+      dashboard: dashboards/openstack/haproxy/backends.json
+  - alert: HAProxyBackend5xxHigh
+    expr: 100 * sum by (backend, job) (rate(haproxy_backend_http_responses_total{code="5xx"}[5m])) / clamp_min(sum
+      by (backend, job) (rate(haproxy_backend_http_responses_total[5m])), 1) > 5
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Backend {{ $labels.backend }} serving >5% 5xx for 5m
+      description: A sustained 5xx ratio is a client-visible error even though HAProxy may still mark
+        servers up — the application behind the backend is failing requests.
+      runbook: Identify the failing member, drain it if isolated to one server, and fix the underlying
+        service (DB connection exhaustion, RPC timeout, bad release).
+      dashboard: dashboards/openstack/haproxy/backends.json
+  - alert: HAProxyServerRedundancyLow
+    expr: sum by (backend, job) (haproxy_server_up) < 2
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Backend {{ $labels.backend }} down to fewer than 2 healthy servers
+      description: A backend running on a single server has no redundancy left; the next failure is an
+        outage, so this is the early warning before HAProxyBackendDown.
+      runbook: Restore the failed members so the pool returns to its full size; do not start a risky deploy
+        while redundancy is degraded.
+      dashboard: dashboards/openstack/haproxy/backends.json
+  - alert: HAProxyFrontendSessionSaturation
+    expr: haproxy_frontend_current_sessions / 2000 > 0.9
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: HAProxy frontend {{ $labels.frontend }} above 90% of maxconn
+      description: Near maxconn the frontend queues or refuses new connections, so OpenStack clients see
+        timeouts while backends and CPU still look healthy.
+      runbook: Raise the frontend `maxconn` (and the global one and OS file-descriptor limits) if it is
+        genuine load, or add an edge node; if a client is leaking connections, fix or rate-limit it.
+      dashboard: dashboards/openstack/haproxy/frontends.json
+  - alert: HAProxyFrontendTrafficSpike
+    expr: sum by (frontend, job) (rate(haproxy_frontend_http_requests_total[5m])) > 3 * sum by (frontend,
+      job) (rate(haproxy_frontend_http_requests_total[5m] offset 1h))
+    for: 10m
+    labels:
+      severity: info
+    annotations:
+      summary: Frontend {{ $labels.frontend }} request rate 3x its level an hour ago
+      description: A sudden 3x jump in request rate is worth a look — a client retry storm, a runaway
+        script, or a real traffic event that may need capacity.
+      runbook: If abusive, rate-limit or block the source; if legitimate, confirm backend and database
+        capacity can absorb the new baseline.
+      dashboard: dashboards/openstack/haproxy/frontends.json
+  - alert: HeatStacksFailed
+    expr: count(openstack_heat_stack_status{status=~".*FAILED"}) > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $value }} Heat stack(s) in a FAILED state'
+      description: A failed stack is a broken deployment that will not self-heal; if a template or quota
+        issue is the cause, every new stack of that kind keeps failing until it is fixed.
+      runbook: Fix the root cause (template error, exhausted Nova/Neutron quota, missing image/flavor),
+        then update or delete-and-recreate the affected stacks.
+      dashboard: dashboards/openstack/heat/stacks.json
+  - alert: HeatStackStuckInProgress
+    expr: count(openstack_heat_stack_status{status=~".*IN_PROGRESS"}) > 20
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: More than 20 Heat stacks stuck in progress for 30m
+      description: A pile-up of long-running in-progress stacks usually means heat-engine is wedged or
+        a dependency (Nova capacity, Neutron quota) is blocking, stalling all orchestration.
+      runbook: Restart heat-engine if it is wedged; relieve the blocking dependency (add capacity or raise
+        quota), then let the stuck operations complete or roll back.
+      dashboard: dashboards/openstack/heat/stacks.json
+  - alert: HorizonDown
+    expr: probe_success == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: Horizon dashboard probe failing for {{ $labels.instance }}
+      description: A failing probe means operators and tenants cannot reach the OpenStack web UI — self-service
+        and operator visibility are down even if the APIs still work.
+      runbook: Restart the Horizon Apache/WSGI service, confirm it can reach Keystone, and check TLS certificate
+        validity and the host's disk/memory.
+      dashboard: dashboards/openstack/horizon/overview.json
+  - alert: HorizonHTTPError
+    expr: probe_http_status_code >= 500
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Horizon returning HTTP {{ $value }} for {{ $labels.instance }}
+      description: A 5xx from the dashboard means the web tier is erroring — usually Horizon cannot reach
+        Keystone or a backing API, so the UI loads but actions fail.
+      runbook: Fix the failing dependency (Keystone/session backend/memcached), then reload the Horizon
+        service.
+      dashboard: dashboards/openstack/horizon/overview.json
+  - alert: HorizonSlow
+    expr: probe_http_duration_seconds > 3
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Horizon HTTP response time above 3s for {{ $labels.instance }}
+      description: A slow dashboard frustrates operators during incidents and tenants during normal use;
+        sustained slowness usually means worker saturation or a slow Keystone/session backend.
+      runbook: Raise Apache `MaxRequestWorkers`/WSGI processes if workers are saturated, or fix the slow
+        backend (memcached/session store, Keystone).
+      dashboard: dashboards/openstack/horizon/overview.json
+  - alert: KeystoneAPIDown
+    expr: openstack_identity_up == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: Keystone identity API down on {{ $labels.instance }}
+      description: Every OpenStack service authenticates against Keystone; while it is down, Nova/Neutron/Cinder
+        calls fail with 401/503 and the whole control plane is effectively offline.
+      runbook: Restart the keystone API/apache workers, confirm the identity backend (SQL/LDAP) is reachable,
+        and verify the Fernet keys are present and in sync across nodes.
+      dashboard: dashboards/openstack/keystone/api.json
+  - alert: KeystoneUserCountCollapsed
+    expr: sum(openstack_identity_users) < 0.5 * sum(openstack_identity_users offset 1h)
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Keystone user count dropped >50% in the last hour
+      description: A sudden collapse in the user (or project) inventory almost always means a failed LDAP/identity
+        sync or an accidental bulk delete rather than real attrition.
+      runbook: Pause the sync job, restore the directory source of truth, and re-run a controlled sync;
+        if it was a delete, restore from the identity database backup.
+      dashboard: dashboards/openstack/keystone/api.json
+  - alert: KeystoneProjectGrowthSpike
+    expr: (sum(openstack_identity_projects) - sum(openstack_identity_projects offset 1h)) > 50
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Keystone created >50 projects in the last hour
+      description: A burst of project creation is either a large planned onboarding or a runaway automation
+        loop; both can exhaust quota-accounting and role-assignment capacity if unnoticed.
+      runbook: If unplanned, pause the offending automation and clean up the orphaned projects; if planned,
+        confirm quotas and control-plane capacity were sized for the new tenants.
+      dashboard: dashboards/openstack/keystone/tokens.json
+  - alert: KeystoneInventoryStale
+    expr: delta(sum(openstack_identity_users)[6h:1h]) == 0 and sum(openstack_identity_users) > 0
+    for: 6h
+    labels:
+      severity: info
+    annotations:
+      summary: Keystone user count unchanged for 6h
+      description: On an active cloud some churn is expected; a perfectly flat count for hours can mean
+        the exporter is serving a cached/stale value or the sync stopped.
+      runbook: Restart the exporter or the sync job; verify the service account still has list permissions.
+      dashboard: dashboards/openstack/keystone/tokens.json
+  - alert: GaleraNodeNotSynced
+    expr: mysql_global_status_wsrep_local_state != 4
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: Galera node {{ $labels.instance }} not Synced (state {{ $value }})
+      description: A node out of the Synced state is not reliably part of replication; OpenStack writes
+        routed there can fail or the cluster may exclude it, reducing redundancy.
+      runbook: If it is doing SST, let it finish; if stuck, check the node's error log, network to peers,
+        and restart it to rejoin (it will re-sync via SST/IST).
+      dashboard: dashboards/openstack/mariadb/galera.json
+  - alert: GaleraClusterSizeDegraded
+    expr: max(mysql_global_status_wsrep_cluster_size) < 3
+    for: 3m
+    labels:
+      severity: critical
+    annotations:
+      summary: Galera cluster size dropped below 3
+      description: Below the expected odd member count the cluster loses redundancy and is one failure
+        away from losing quorum and going read-only, which freezes the OpenStack control plane.
+      runbook: Recover the down node so it rejoins; never bootstrap a new primary component while others
+        are alive (split-brain risk).
+      dashboard: dashboards/openstack/mariadb/galera.json
+  - alert: GaleraFlowControlPausing
+    expr: mysql_global_status_wsrep_flow_control_paused > 0.1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Galera flow control pausing writes on {{ $labels.instance }}
+      description: Flow control pauses the whole cluster's writes to let a slow node catch up, so a single
+        lagging node adds latency to every OpenStack database write.
+      runbook: Relieve the slow node (faster storage, reduce its other load) or temporarily desync it
+        from the load balancer; tune `gcs.fc_limit` if pauses are chronic.
+      dashboard: dashboards/openstack/mariadb/galera.json
+  - alert: MariaDBConnectionSaturation
+    expr: 100 * mysql_global_status_threads_connected / mysql_global_variables_max_connections > 90
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: MariaDB {{ $labels.instance }} connection pool >90% of max_connections
+      description: Near the limit MariaDB starts rejecting new connections, and every OpenStack control
+        service that cannot get a connection returns 500 — a full control-plane outage.
+      runbook: 'Raise `max_connections` (and OS file-descriptor limits) for breathing room, then fix the
+        root cause: a service leaking connections or a reconnect storm after a restart.'
+      dashboard: dashboards/openstack/mariadb/performance.json
+  - alert: MariaDBSlowQuerySpike
+    expr: sum(rate(mysql_global_status_slow_queries[5m])) > 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: MariaDB slow-query rate above 10/s for 10m
+      description: A sustained slow-query rate usually follows a schema change or data growth that invalidated
+        an index, multiplying control-plane latency well before connections fill.
+      runbook: Add the missing index or fix the query/ORM call; if it is a one-off report, run it off
+        the primary write node.
+      dashboard: dashboards/openstack/mariadb/performance.json
+  - alert: MariaDBBufferPoolExhausted
+    expr: 100 * (1 - mysql_global_status_innodb_buffer_pool_pages_free / mysql_global_status_innodb_buffer_pool_pages_total)
+      > 98
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: InnoDB buffer pool >98% used on {{ $labels.instance }}
+      description: A buffer pool pinned near full means the working set no longer fits in RAM, so reads
+        hit disk and query latency climbs across the board.
+      runbook: Increase `innodb_buffer_pool_size` if RAM allows, or reduce the working set (archiving,
+        better indexes to avoid full scans).
+      dashboard: dashboards/openstack/mariadb/performance.json
+  - alert: NeutronAgentDown
+    expr: openstack_neutron_agent_state == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Neutron {{ $labels.agent }} on {{ $labels.hostname }} is dead
+      description: A dead agent stops serving DHCP, routing, metadata or OVS programming for every port
+        it owns.
+      runbook: Restart the failed agent service; if it won't register, verify RabbitMQ connectivity and
+        clock sync (agent heartbeats are time-based).
+      dashboard: dashboards/openstack/neutron/agents.json
+  - alert: NeutronAgentFlapping
+    expr: changes(openstack_neutron_agent_state[1h]) > 3
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Neutron {{ $labels.agent }} on {{ $labels.hostname }} flapping (>3 changes/h)
+      description: A flapping agent triggers repeated rescheduling; tenant traffic blackholes on every
+        transition, which is harder to debug than a clean outage.
+      runbook: Stabilise the message bus or move the agent to a healthier host; raise `agent_down_time`
+        if heartbeats are merely late, not lost.
+      dashboard: dashboards/openstack/neutron/agents.json
+  - alert: NeutronL3AgentOverloaded
+    expr: count by (l3_agent_host, job) (openstack_neutron_l3_agent_of_router) > 100
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: L3 agent {{ $labels.l3_agent_host }} hosts more than 100 routers
+      description: An L3 agent carrying too many routers becomes a single point of failure and a latency
+        bottleneck; losing it reschedules a huge blast radius.
+      runbook: Rebalance with `neutron l3-agent-router-remove`/`-add` or enable L3 HA so routers spread
+        across agents.
+      dashboard: dashboards/openstack/neutron/agents.json
+  - alert: NeutronAgentDown
+    expr: openstack_neutron_agent_state == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Neutron {{ $labels.agent }} on {{ $labels.hostname }} is dead
+      description: A dead DHCP/L3/metadata/OVS agent breaks address allocation, routing or metadata for
+        every port it serves, even though the API still answers.
+      runbook: Restart the agent service (neutron-dhcp-agent / neutron-l3-agent / neutron-metadata-agent
+        / neutron-openvswitch-agent); if it won't start, check RabbitMQ connectivity and the agent log
+        for the bind failure.
+      dashboard: dashboards/openstack/neutron/api.json
+  - alert: NeutronPortsWithoutIPs
+    expr: sum(openstack_neutron_ports_no_ips) > 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: More than 10 Neutron ports have no IP for 10m
+      description: Ports without a fixed IP mean instances boot with no usable networking — the classic
+        symptom of a stuck or dead DHCP agent or an exhausted subnet pool.
+      runbook: Restart the DHCP agent for the affected segment; if the subnet pool is exhausted, expand
+        the allocation pool or add a subnet.
+      dashboard: dashboards/openstack/neutron/api.json
+  - alert: NeutronExporterDown
+    expr: absent(openstack_neutron_agent_state)
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Neutron metrics absent — openstack-exporter not scraping Neutron
+      description: With no agent metrics every other panel is blind; you cannot tell a healthy control
+        plane from a dead one.
+      runbook: Restart openstack-exporter; confirm the Keystone endpoint, admin credentials and project
+        scope are valid.
+      dashboard: dashboards/openstack/neutron/api.json
+  - alert: FloatingIPPoolNearExhaustion
+    expr: 100 * sum(openstack_neutron_floating_ips) / 256 > 90
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Floating IP pool over 90% allocated
+      description: When the external pool fills, new `floatingip-create` calls fail and tenants can no
+        longer expose workloads — a hard, tenant-visible wall.
+      runbook: Reclaim dangling/unused FIPs, or extend the external network's allocation pool / add an
+        external subnet.
+      dashboard: dashboards/openstack/neutron/floating-ips.json
+  - alert: FloatingIPsDangling
+    expr: sum(openstack_neutron_floating_ips_associated_not_active) > 5
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: More than 5 dangling floating IPs for 30m
+      description: Dangling FIPs are associated to inactive ports — billed and counted against the pool
+        but not routing traffic, so they waste capacity and money.
+      runbook: Disassociate and release the orphaned FIPs, or fix the down ports they point at.
+      dashboard: dashboards/openstack/neutron/floating-ips.json
+  - alert: FloatingIPPoolPredictedExhaustion
+    expr: predict_linear(sum(openstack_neutron_floating_ips)[6h:], 7 * 86400) > 256
+    for: 1h
+    labels:
+      severity: critical
+    annotations:
+      summary: Floating IP pool projected to exhaust within 7 days
+      description: Catching exhaustion a week out leaves time to reclaim addresses or grow the pool instead
+        of fighting an outage.
+      runbook: Plan a pool extension or enforce per-tenant FIP quotas; clean up dangling addresses to
+        buy time.
+      dashboard: dashboards/openstack/neutron/floating-ips.json
+  - alert: NeutronRouterUnscheduled
+    expr: sum(openstack_neutron_routers) - count(count by (router_id) (openstack_neutron_l3_agent_of_router))
+      > 0
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: One or more Neutron routers are not scheduled to any L3 agent
+      description: An unscheduled router is ACTIVE in the API but has no agent forwarding its traffic,
+        so the tenant behind it loses external connectivity with no obvious error.
+      runbook: Bind the router to a live L3 agent with `neutron l3-agent-router-add`, or enable automatic
+        rescheduling; confirm at least one L3 agent is alive.
+      dashboard: dashboards/openstack/neutron/l3-routers.json
+  - alert: NeutronNoL3Agents
+    expr: count(count by (l3_agent_host) (openstack_neutron_l3_agent_of_router)) < 1
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: No L3 agents are carrying routers
+      description: With zero L3 agents scheduling routers, all routed (non-DVR) traffic for the deployment
+        is down.
+      runbook: Restart L3 agents and the Neutron server; verify the message bus so agents can re-register.
+      dashboard: dashboards/openstack/neutron/l3-routers.json
+  - alert: NeutronL3AgentImbalance
+    expr: max(count by (l3_agent_host) (openstack_neutron_l3_agent_of_router)) > 3 * avg(count by (l3_agent_host)
+      (openstack_neutron_l3_agent_of_router))
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: L3 router load is heavily skewed onto one agent
+      description: A single agent carrying far more than its share is a fragile bottleneck whose failure
+        reschedules a large blast radius.
+      runbook: Rebalance routers across L3 agents, or enable L3 HA so they spread automatically.
+      dashboard: dashboards/openstack/neutron/l3-routers.json
+  - alert: NovaComputeAgentDown
+    expr: openstack_nova_agent_state{adminState="enabled"} == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Nova agent {{ $labels.service }} on {{ $labels.hostname }} is down
+      description: An enabled nova-compute/conductor/scheduler agent that stops reporting cannot place
+        or run instances; a down conductor or scheduler degrades the whole cloud.
+      runbook: Restart the service; if it is RabbitMQ/conductor-wide, check the message bus and database
+        before chasing individual computes. Re-enable the host once it reports up.
+      dashboard: dashboards/openstack/nova/api.json
+  - alert: NovaInstancesStuckInError
+    expr: count(openstack_nova_server_status{status="ERROR"}) > 5
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $value }} Nova instances in ERROR state'
+      description: A growing pool of ERROR instances usually means failed scheduling, a full hypervisor,
+        or a sick image/volume back-end — and each one is a customer-visible failure.
+      runbook: Resolve the underlying cause (capacity, Glance/Cinder, placement), then hard-reboot or
+        rebuild affected instances; delete abandoned ones to clear the count.
+      dashboard: dashboards/openstack/nova/api.json
+  - alert: NovaBuildQueueBacklog
+    expr: sum(openstack_nova_current_workload) > 30
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Nova build/migrate queue backed up ({{ $value }} in flight)
+      description: A sustained high current_workload means new instances sit in BUILD for minutes — the
+        scheduler, image cache or volume back-end cannot keep up.
+      runbook: Throttle bulk provisioning, add scheduler workers, or fix the slow back-end; verify hosts
+        have free vCPU/RAM on the capacity dashboard.
+      dashboard: dashboards/openstack/nova/api.json
+  - alert: NovaMemoryOvercommitted
+    expr: 100 * sum(openstack_nova_memory_used_mb) / sum(openstack_nova_memory_mb) > 100
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Nova fleet memory allocated past physical ({{ $value | printf "%.0f" }}%)
+      description: Memory has no safe overcommit — past 100% of physical, hosts swap and every instance
+        on the affected nodes degrades, with no warning in guest metrics.
+      runbook: Stop scheduling to the affected tier, migrate instances out, or add RAM; set ram_allocation_ratio
+        to 1.0 unless you genuinely run KSM/ballooning.
+      dashboard: dashboards/openstack/nova/compute-utilisation.json
+  - alert: NovaVcpuAllocatableHeadroomLow
+    expr: 100 * (1 - sum(openstack_nova_vcpus_used) / (sum(openstack_nova_vcpus) * 4)) < 15
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: vCPU allocatable headroom below 15% (at 4× ratio)
+      description: With little allocatable vCPU left, larger flavours start failing to schedule and you
+        cannot drain a host without builds backing up.
+      runbook: Add compute capacity or rebalance; only increase the ratio after confirming acceptable
+        steal time on the busiest hosts.
+      dashboard: dashboards/openstack/nova/compute-utilisation.json
+  - alert: NovaComputeMemoryNearlyFull
+    expr: 100 * openstack_nova_memory_used_mb / openstack_nova_memory_mb > 95
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Hypervisor {{ $labels.hostname }} memory {{ $value | printf "%.0f" }}% allocated
+      description: A host above 95% allocated memory will reject new builds with "no valid host" and leaves
+        no room for live-migration targets during maintenance.
+      runbook: Migrate a few instances off the host, or stop scheduling to it; longer term add RAM or
+        rebalance flavours/aggregates.
+      dashboard: dashboards/openstack/nova/compute.json
+  - alert: NovaComputeVcpuOvercommitHigh
+    expr: openstack_nova_vcpus_used / openstack_nova_vcpus > 4
+    for: 20m
+    labels:
+      severity: warning
+    annotations:
+      summary: Hypervisor {{ $labels.hostname }} vCPU overcommit {{ $value | printf "%.1f" }}×
+      description: vCPU allocation well past your cpu_allocation_ratio causes scheduler skips and noisy-neighbour
+        steal for tenants on the host.
+      runbook: Migrate instances to less packed hosts or raise capacity; confirm the configured cpu_allocation_ratio
+        matches this threshold.
+      dashboard: dashboards/openstack/nova/compute.json
+  - alert: NovaFleetMemoryHeadroomLow
+    expr: 100 * (1 - sum(openstack_nova_memory_used_mb) / sum(openstack_nova_memory_mb)) < 15
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Nova fleet memory headroom below 15%
+      description: Below ~15% headroom you can no longer evacuate a host during maintenance, and a single
+        large flavour request starts failing with "no valid host".
+      runbook: Add compute capacity, reclaim ERROR/shutoff instances, or rebalance flavours; raise allocation
+        ratios only with steal-time headroom to spare.
+      dashboard: dashboards/openstack/nova/hypervisor-capacity.json
+  - alert: NovaHypervisorNearlyFull
+    expr: 100 * openstack_nova_memory_used_mb / openstack_nova_memory_mb > 95
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Hypervisor {{ $labels.hostname }} at {{ $value | printf "%.0f" }}% memory
+      description: A host above 95% allocation is effectively full — no new builds and no room as a live-migration
+        target.
+      runbook: Migrate a few instances off, stop scheduling to the host, or add RAM; keep at least one
+        host's slack for maintenance.
+      dashboard: dashboards/openstack/nova/hypervisor-capacity.json
+  - alert: NovaMemoryExhaustionImminent
+    expr: (sum(openstack_nova_memory_mb) - sum(openstack_nova_memory_used_mb)) / clamp_min(deriv(sum(openstack_nova_memory_used_mb)[6h:30m]),
+      0.001) / 3600 < 24
+    for: 30m
+    labels:
+      severity: critical
+    annotations:
+      summary: Nova memory projected to exhaust within 24h
+      description: At the current allocation growth rate the fleet runs out of memory within a day, after
+        which all new launches fail cloud-wide.
+      runbook: Bring capacity online now or throttle the growth source; this is a same-shift action, not
+        a backlog item.
+      dashboard: dashboards/openstack/nova/hypervisor-capacity.json
+  - alert: NovaInstancesInError
+    expr: count(openstack_nova_server_status{status="ERROR"}) > 5
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $value }} Nova instances in ERROR'
+      description: Each ERROR instance is a customer-visible failure; a growing pool usually points at
+        capacity, a sick back-end, or a tenant's bad automation.
+      runbook: Fix the root cause (capacity/back-end), then rebuild or delete the affected instances;
+        contact the tenant if one project dominates.
+      dashboard: dashboards/openstack/nova/instances.json
+  - alert: NovaInstancesStuckTransitioning
+    expr: count(openstack_nova_server_status{status=~"BUILD|REBUILD|MIGRATING|RESIZE|VERIFY_RESIZE"})
+      > 20
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $value }} Nova instances stuck transitioning'
+      description: Transitional states should clear in minutes; a standing pool means stuck migrations/resizes
+        holding resources and risking corruption if forced.
+      runbook: Resolve the back-end, then reset-state and retry or roll back the stuck operations; never
+        hard-delete a MIGRATING instance mid-flight.
+      dashboard: dashboards/openstack/nova/instances.json
+  - alert: NovaSchedulerAllDown
+    expr: sum(openstack_nova_agent_state{service="nova-scheduler"}) == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: All nova-scheduler agents are down
+      description: With no scheduler up, no new instance can be placed cloud-wide; every launch and migration
+        request queues or fails.
+      runbook: Restart nova-scheduler; if it will not start, check AMQP and the nova_api/placement databases
+        before declaring a wider outage.
+      dashboard: dashboards/openstack/nova/scheduler.json
+  - alert: NovaSchedulingFailingToError
+    expr: clamp_min(deriv(count(openstack_nova_server_status{status="ERROR"})[10m:1m]), 0) * 60 > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Instances are flipping to ERROR (>1/min)
+      description: A sustained climb in ERROR instances means placement keeps returning "no valid host"
+        or a back-end is rejecting builds — directly customer-visible.
+      runbook: Free or add capacity, re-enable wrongly disabled hosts, or relax over-strict aggregate/affinity
+        filters; then rebuild the failed instances.
+      dashboard: dashboards/openstack/nova/scheduler.json
+  - alert: NovaBuildQueueNotDraining
+    expr: count(openstack_nova_server_status{status="BUILD"}) > 20
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $value }} instances stuck in BUILD'
+      description: A standing BUILD pool that does not drain means the scheduler placed the work but the
+        back-end (image, volume, network) cannot finish it.
+      runbook: Fix the slow back-end or throttle provisioning; reset-state and rebuild instances wedged
+        in BUILD.
+      dashboard: dashboards/openstack/nova/scheduler.json
+  - alert: NovaFleetImbalanced
+    expr: (max(openstack_nova_running_vms) - min(openstack_nova_running_vms)) > 30
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Nova fleet instance spread is {{ $value }} (packed vs empty)
+      description: A large density gap means the scheduler is concentrating load — hot hosts hit steal/capacity
+        limits while paid-for hosts sit idle.
+      runbook: Re-enable wrongly disabled hosts, relax over-strict filters, or live-migrate instances
+        off the packed hosts to rebalance.
+      dashboard: dashboards/openstack/nova/vm-density.json
+  - alert: NovaHypervisorOverPacked
+    expr: openstack_nova_running_vms > 50
+    for: 20m
+    labels:
+      severity: warning
+    annotations:
+      summary: Hypervisor {{ $labels.hostname }} running {{ $value }} instances
+      description: Very high instance counts on one host raise noisy-neighbour contention and make the
+        host a single large blast radius.
+      runbook: Migrate some instances to emptier hosts; review the scheduler weights so new builds spread
+        more evenly.
+      dashboard: dashboards/openstack/nova/vm-density.json
+  - alert: OVSInterfaceDrops
+    expr: rate(ovs_interface_rx_dropped[5m]) + rate(ovs_interface_tx_dropped[5m]) > 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: OVS interface {{ $labels.interface }} on {{ $labels.instance }} dropping >10 pps
+      description: Sustained drops on the virtual switch cause retransmits and tail latency that look
+        like application problems, with every link reporting up.
+      runbook: rx drops point at receive overload (raise rx ring buffers / enable RPS, check for a traffic
+        storm); tx drops point at egress congestion or a saturated uplink.
+      dashboard: dashboards/openstack/ovs/openvswitch.json
+  - alert: OVSInterfaceErrors
+    expr: rate(ovs_interface_rx_errors[5m]) > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: OVS interface {{ $labels.interface }} on {{ $labels.instance }} erroring
+      description: rx errors (CRC/frame) usually mean a hardware or cabling fault on the physical NIC
+        behind the bridge, not just congestion — a different responder.
+      runbook: Inspect cabling/transceiver, move the uplink to a known-good port, or replace the NIC;
+        check for a duplex mismatch.
+      dashboard: dashboards/openstack/ovs/openvswitch.json
+  - alert: OVSDatapathFlowExplosion
+    expr: ovs_dp_flows_total > 200000
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: OVS datapath on {{ $labels.instance }} holds >200k flows
+      description: A bloated kernel flow table and exploding megaflow masks drive up per-packet lookup
+        cost and can saturate the network node's CPU (ovs-vswitchd).
+      runbook: Identify and rate-limit the traffic source; tune `ovs-vsctl` datapath flow limits / revalidator
+        threads; consider flow eviction tuning.
+      dashboard: dashboards/openstack/ovs/openvswitch.json
+  - alert: PlacementProviderExhausted
+    expr: "max by (hostname, resourcetype) (\n  openstack_placement_resource_provider_usage\n  / openstack_placement_resource_provider_capacity\n\
+      ) > 0.95"
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Provider {{ $labels.hostname }} has {{ $labels.resourcetype }} above 95% claimed
+      description: A resource class above 95% claimed means the scheduler will skip this provider for
+        any new claim of that class — the direct cause of "no valid host".
+      runbook: Migrate workloads off the provider, raise the allocation ratio if hardware allows, or add
+        providers; verify the ratio was not reset to 1.0 by a redeploy.
+      dashboard: dashboards/openstack/placement/resource-providers.json
+  - alert: PlacementResourceClassNearlyFull
+    expr: 100 * sum by (resourcetype) (openstack_placement_resource_provider_usage) / sum by (resourcetype)
+      (openstack_placement_resource_provider_capacity) > 90
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Placement {{ $labels.resourcetype }} {{ $value | printf "%.0f" }}% claimed fleet-wide
+      description: When a whole resource class is over 90% claimed across the fleet there is almost nowhere
+        left to place work needing it — capacity action is overdue.
+      runbook: Bring providers online for the tight class, or shift demand (flavours/aggregates) toward
+        the class with headroom.
+      dashboard: dashboards/openstack/placement/resource-providers.json
+  - alert: PlacementAllocationRatioCollapsed
+    expr: openstack_placement_resource_provider_allocation_ratio{resourcetype="VCPU"} <= 1
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Provider {{ $labels.hostname }} VCPU allocation ratio reset to {{ $value }}
+      description: A VCPU allocation ratio that drops to 1.0 (often after a redeploy or config drift)
+        silently strips most of a provider's effective capacity, making it look full long before the hardware
+        is.
+      runbook: Restore the intended cpu_allocation_ratio on the host and confirm placement picks up the
+        new inventory; re-check failed builds afterward.
+      dashboard: dashboards/openstack/placement/resource-providers.json
+  - alert: RabbitMQMemoryAlarmActive
+    expr: rabbitmq_alarms_memory_used_watermark == 1
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: RabbitMQ memory watermark alarm active on {{ $labels.instance }}
+      description: When the memory alarm trips RabbitMQ blocks all publishing connections cluster-wide;
+        OpenStack RPC stalls and Nova/Neutron operations start timing out.
+      runbook: Find and restart the dead/stuck consumers (oslo.messaging agents) to drain the queues;
+        if needed raise `vm_memory_high_watermark` temporarily, then add capacity.
+      dashboard: dashboards/openstack/rabbitmq/overview.json
+  - alert: RabbitMQDiskAlarmActive
+    expr: rabbitmq_alarms_free_disk_space_watermark == 1
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: RabbitMQ free-disk watermark alarm active on {{ $labels.instance }}
+      description: Below the free-disk watermark RabbitMQ blocks publishers to protect the broker from
+        running the disk to zero, halting OpenStack messaging.
+      runbook: Reclaim disk (rotate/ship logs, purge dead-letter queues), then grow the volume; review
+        why the backlog persisted long enough to fill disk.
+      dashboard: dashboards/openstack/rabbitmq/overview.json
+  - alert: RabbitMQNodeDown
+    expr: count(rabbitmq_build_info) < 3
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: RabbitMQ cluster has fewer than 3 nodes reporting
+      description: A shrunken cluster loses quorum/mirroring headroom; one more failure can split-brain
+        or lose mirrored queues used by OpenStack RPC.
+      runbook: Restart the down node, heal any network partition (`rabbitmqctl cluster_status`), and re-sync
+        mirrored queues.
+      dashboard: dashboards/openstack/rabbitmq/overview.json
+  - alert: RabbitMQQueueNoConsumers
+    expr: rabbitmq_queue_messages_ready > 100 and rabbitmq_queue_consumers == 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Queue {{ $labels.queue }} has {{ $value }} ready messages and no consumer
+      description: A backlog with zero consumers means the OpenStack agent that drains this queue has
+        died; the backlog will grow until it trips the broker memory alarm and stalls the control plane.
+      runbook: Restart the matching agent (e.g. `systemctl restart nova-compute`); verify it reconnects
+        and the queue drains, then check why it disconnected (network/AMQP heartbeat).
+      dashboard: dashboards/openstack/rabbitmq/queues.json
+  - alert: RabbitMQBacklogBuilding
+    expr: sum(rate(rabbitmq_queue_messages_published_total[5m])) > 1.2 * sum(rate(rabbitmq_queue_messages_delivered_total[5m]))
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: RabbitMQ publish rate exceeds delivery by >20% for 10m
+      description: Sustained publish-over-deliver means consumers cannot keep up and the backlog is compounding
+        toward a memory alarm.
+      runbook: Scale out or restart the lagging consumers; check for a slow database or storage backend
+        stalling message processing.
+      dashboard: dashboards/openstack/rabbitmq/queues.json

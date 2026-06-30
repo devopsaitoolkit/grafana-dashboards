@@ -1,0 +1,227 @@
+# Nova scheduler & placement health. Leads with the outcomes that say the scheduler
+# is failing tenants: instances landing in ERROR and a BUILD backlog that won't drain.
+title: OpenStack / Nova Scheduler
+description: >-
+  Scheduler and placement health for OpenStack Nova via openstack-exporter: how
+  many instances are landing in ERROR, how many are stuck in BUILD, whether the
+  nova-scheduler agents are up, and how evenly work is being placed across the
+  fleet. Answers "is the scheduler placing instances successfully, and fairly?".
+datasource: prometheus
+tags: [openstack, nova, scheduler, placement, openstack-exporter]
+seo_phrase: OpenStack Nova scheduler Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "Are new instances landing in ERROR (failed scheduling/placement)?"
+  - "How many instances are stuck in BUILD and not draining?"
+  - "Are the nova-scheduler agents up?"
+  - "Is the scheduler spreading load, or packing one host while others sit empty?"
+  - "Is the build/migrate workload backing up cloud-wide?"
+
+production_lessons: >-
+  Scheduler problems show up as *outcomes*, not as a tidy error counter: instances
+  pile into BUILD, then flip to ERROR when "no valid host" is returned. So this
+  dashboard leads with ERROR and BUILD counts and the rate at which ERROR is growing,
+  not with internal scheduler stats the exporter does not expose. The distribution
+  panel earns its place during capacity crunches — a healthy scheduler spreads new
+  VMs, and when you see every new instance landing on the same two hosts it usually
+  means the others are filtered out (full, disabled, or failing the affinity/aggregate
+  filters), which is the real root cause behind a wave of failed builds.
+
+data_sources:
+  - "`openstack-exporter` (github.com/openstack-exporter/openstack-exporter) scraping
+    the Nova API: `openstack_nova_server_status` (status label), the per-host
+    `openstack_nova_current_workload`, `openstack_nova_running_vms`, and
+    `openstack_nova_agent_state{service=\"nova-scheduler\"}`."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(openstack_nova_agent_state, job)
+    description: Prometheus scrape job for your openstack-exporter target.
+    multi: false
+    includeAll: false
+  - name: cloud
+    label: Cloud
+    query: label_values(openstack_nova_agent_state{job="$job"}, cloud)
+    description: Cloud/region in multi-cloud mode; All if single-cloud.
+    multi: false
+    includeAll: true
+  - name: hostname
+    label: Hypervisor
+    query: label_values(openstack_nova_current_workload{job="$job", cloud=~"$cloud"}, hostname)
+    description: Compute host(s) to scope the distribution and workload panels to.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Scheduling outcomes — read these first
+    panels:
+      - type: stat
+        title: Instances in ERROR
+        description: Servers Nova flipped to ERROR — most often a placement/scheduling failure ("no valid host").
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 1}
+          - {color: red, value: 5}
+        targets:
+          - expr: count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status="ERROR"}) or vector(0)
+            instant: true
+            legend: error
+      - type: stat
+        title: Instances in BUILD
+        description: Servers still building. A handful is normal; a standing pool that never drains is a stuck scheduler or slow back-end.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 20}
+        targets:
+          - expr: count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status="BUILD"}) or vector(0)
+            instant: true
+            legend: build
+      - type: stat
+        title: Scheduler agents up
+        description: Fraction of nova-scheduler agents reporting up. Below 1 means reduced or zero scheduling capacity.
+        unit: percentunit
+        min: 0
+        max: 1
+        colorMode: value
+        thresholds:
+          - {color: red, value: null}
+          - {color: yellow, value: 0.5}
+          - {color: green, value: 1}
+        targets:
+          - expr: >-
+              avg(openstack_nova_agent_state{job="$job", cloud=~"$cloud", service="nova-scheduler"}) or vector(0)
+            instant: true
+            legend: up
+      - type: stat
+        title: Build/migrate backlog
+        description: Total in-flight current_workload across the fleet — the queue the scheduler and back-end are working through.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 10}
+          - {color: red, value: 30}
+        targets:
+          - expr: >-
+              sum(openstack_nova_current_workload{job="$job", cloud=~"$cloud", hostname=~"$hostname"}) or vector(0)
+            instant: true
+            legend: backlog
+
+  - title: Outcomes over time
+    panels:
+      - type: timeseries
+        title: BUILD vs ERROR instances
+        description: Transitional and failed states together. ERROR rising while BUILD falls is failed scheduling, not slow scheduling.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status="BUILD"}) or vector(0)
+            legend: build
+          - expr: count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status="ERROR"}) or vector(0)
+            legend: error
+      - type: timeseries
+        title: New ERROR instances per minute
+        description: Positive change in the ERROR count — the rate at which scheduling/placement is failing right now.
+        unit: short
+        min: 0
+        drawStyle: bars
+        fillOpacity: 40
+        legend: hidden
+        targets:
+          - expr: >-
+              clamp_min(deriv(count(openstack_nova_server_status{job="$job", cloud=~"$cloud", status="ERROR"})[10m:1m]), 0) * 60
+            legend: new errors/min
+
+  - title: Placement distribution
+    panels:
+      - type: bargauge
+        title: Running instances per host
+        description: How the scheduler has spread instances. A steep imbalance means most hosts are being filtered out.
+        unit: short
+        orientation: horizontal
+        displayMode: gradient
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: openstack_nova_running_vms{job="$job", cloud=~"$cloud", hostname=~"$hostname"}
+            instant: true
+            legend: "{{hostname}}"
+      - type: timeseries
+        title: Workload per host
+        description: Per-host current_workload over time. Concentration on a few hosts points at a slow back-end or restrictive filters.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: openstack_nova_current_workload{job="$job", cloud=~"$cloud", hostname=~"$hostname"} > 0
+            legend: "{{hostname}}"
+
+alerts:
+  - name: NovaSchedulerAllDown
+    severity: critical
+    expr: >-
+      sum(openstack_nova_agent_state{service="nova-scheduler"}) == 0
+    for: 5m
+    summary: "All nova-scheduler agents are down"
+    why: With no scheduler up, no new instance can be placed cloud-wide; every launch and migration request queues or fails.
+    investigate: "Open Nova Scheduler; check the scheduler hosts' service status and the message bus (RabbitMQ) / database the scheduler depends on."
+    runbook: "Restart nova-scheduler; if it will not start, check AMQP and the nova_api/placement databases before declaring a wider outage."
+    recovery: Clears when at least one nova-scheduler reports up for 5m.
+    false_positives: A full control-plane redeploy — silence during the maintenance window.
+  - name: NovaSchedulingFailingToError
+    severity: warning
+    expr: >-
+      clamp_min(deriv(count(openstack_nova_server_status{status="ERROR"})[10m:1m]), 0) * 60 > 1
+    for: 10m
+    summary: "Instances are flipping to ERROR (>1/min)"
+    why: A sustained climb in ERROR instances means placement keeps returning "no valid host" or a back-end is rejecting builds — directly customer-visible.
+    investigate: "Check capacity headroom and host filters; `openstack server show` a failed instance to read the fault reason."
+    runbook: "Free or add capacity, re-enable wrongly disabled hosts, or relax over-strict aggregate/affinity filters; then rebuild the failed instances."
+    recovery: Clears when the new-ERROR rate falls back to zero for 5m.
+    false_positives: A burst of intentionally failing test launches — scope by tenant or raise the threshold.
+  - name: NovaBuildQueueNotDraining
+    severity: warning
+    expr: count(openstack_nova_server_status{status="BUILD"}) > 20
+    for: 15m
+    summary: "{{ $value }} instances stuck in BUILD"
+    why: A standing BUILD pool that does not drain means the scheduler placed the work but the back-end (image, volume, network) cannot finish it.
+    investigate: "Correlate with current_workload per host and Glance/Cinder/Neutron latency; look for one host carrying the backlog."
+    runbook: "Fix the slow back-end or throttle provisioning; reset-state and rebuild instances wedged in BUILD."
+    recovery: Clears when fewer than 20 instances are in BUILD for 5m.
+    false_positives: A deliberate mass-launch that is expected to drain over several minutes.
+
+troubleshooting:
+  - symptom: New-ERROR-per-minute panel is always flat at zero but instances are failing
+    cause: Failed instances are deleted faster than the 1m sampling, so the count never rises.
+    action: Watch the absolute ERROR/BUILD counts and the Nova API logs instead for fast-cycling failures.
+  - symptom: Distribution looks lopsided but nothing is wrong
+    cause: Anti-affinity, host aggregates or flavour extra-specs intentionally pin workloads.
+    action: Confirm the intent before rebalancing; filter `$hostname` to the relevant aggregate.
+  - symptom: Scheduler-up reads 1 but builds still fail
+    cause: The scheduler is healthy; the failure is capacity or a filter, not the scheduler process.
+    action: Move to the hypervisor-capacity and placement dashboards to find the exhausted resource.
+
+performance: >-
+  ERROR/BUILD panels use `count by`/`count` over `openstack_nova_server_status`, which
+  is one series per instance — counting is cheap, graphing the raw series is not, so
+  never drop the aggregation. The new-ERROR rate uses a subquery (`[10m:1m]`); keep the
+  range modest so it stays light on large clouds. Distribution panels are one series
+  per host.
+
+customization: >-
+  Tune the BUILD (5/20) and backlog (10/30) thresholds to your provisioning volume.
+  To watch a single tier, scope `$hostname` to its aggregate. On clouds with very fast
+  instance churn, widen the subquery window so the rate panel isn't aliased by short-lived
+  ERROR instances.

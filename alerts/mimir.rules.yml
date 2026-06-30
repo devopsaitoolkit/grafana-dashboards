@@ -1,0 +1,79 @@
+# Alerting rules for the mimir dashboards.
+# Generated from tools/specs/mimir/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: mimir.rules
+  rules:
+  - alert: MimirHighErrorRatio
+    expr: 100 * sum(rate(cortex_request_duration_seconds_count{status_code=~"5.."}[5m])) / clamp_min(sum(rate(cortex_request_duration_seconds_count[5m])),
+      1) > 5
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Mimir cluster 5xx ratio above 5%
+      description: A high server-error ratio means writes are being rejected or queries are failing across
+        the backend.
+      runbook: Scale the saturated component (ingesters for writes, queriers for reads); check object
+        storage availability.
+      dashboard: dashboards/mimir/overview.json
+  - alert: MimirIngesterSeriesHigh
+    expr: sum(cortex_ingester_memory_series) > 25000000
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Mimir ingesters above 25M in-memory series
+      description: High in-memory series drive ingester memory and make replays slow; unchecked growth
+        ends in OOM kills.
+      runbook: Scale out ingesters, enforce per-tenant series limits, or have the offending tenant reduce
+        label cardinality.
+      dashboard: dashboards/mimir/overview.json
+  - alert: MimirRequestLatencyHigh
+    expr: histogram_quantile(0.99, sum by (le, route) (rate(cortex_request_duration_seconds_bucket[5m])))
+      > 2
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Mimir route {{ $labels.route }} p99 latency above 2s
+      description: Sustained high latency on a route degrades writes or queries and can cascade into timeouts
+        upstream.
+      runbook: Scale the component, tune query limits, or add caching for read-path routes.
+      dashboard: dashboards/mimir/overview.json
+  - alert: MimirWritePathLatencyHigh
+    expr: histogram_quantile(0.99, sum by (le, route) (rate(cortex_request_duration_seconds_bucket{route=~".*push.*|.*write.*"}[5m])))
+      > 2
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Mimir write path p99 above 2s on {{ $labels.route }}
+      description: Slow writes cause Prometheus remote_write upstreams to buffer and eventually drop samples.
+      runbook: Scale ingesters/distributors; review per-tenant ingest limits; check the hash-ring for
+        unhealthy ingesters.
+      dashboard: dashboards/mimir/reads-writes.json
+  - alert: MimirReadPathLatencyHigh
+    expr: histogram_quantile(0.99, sum by (le, route) (rate(cortex_request_duration_seconds_bucket{route=~".*query.*|.*prom.*"}[5m])))
+      > 5
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Mimir read path p99 above 5s on {{ $labels.route }}
+      description: Slow queries break Grafana panels and recording/alerting rules that read from Mimir.
+      runbook: Enable results caching, raise querier concurrency, or split heavy queries; scale store-gateways.
+      dashboard: dashboards/mimir/reads-writes.json
+  - alert: MimirPathErrorsHigh
+    expr: 100 * sum by (route) (rate(cortex_request_duration_seconds_count{status_code=~"5.."}[5m])) /
+      clamp_min(sum by (route) (rate(cortex_request_duration_seconds_count[5m])), 1) > 5
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Mimir route {{ $labels.route }} 5xx ratio above 5%
+      description: A route-level error spike means a specific read or write path is failing, dropping
+        data or breaking queries.
+      runbook: Scale or roll back the failing component; verify object storage and the hash-ring health.
+      dashboard: dashboards/mimir/reads-writes.json

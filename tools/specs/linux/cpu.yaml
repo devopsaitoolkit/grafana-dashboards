@@ -1,0 +1,222 @@
+# Reference spec — copy this shape for new dashboards.
+# Compact, high-signal YAML; `make build` compiles it into a complete Grafana
+# dashboard, a docs page, an annotated screenshot, and Prometheus alert rules.
+uid: linux-cpu
+title: Linux / CPU
+description: >-
+  CPU saturation, utilisation by mode, run-queue pressure and steal time for a
+  fleet of Linux hosts scraped by node_exporter. Answers "is this host CPU-bound,
+  and on what?" rather than just drawing raw counters.
+datasource: prometheus
+tags: [linux, cpu, node-exporter, saturation]
+seo_phrase: Node Exporter CPU Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+# Drives the "What to look for" panel and the docs header.
+questions:
+  - "Which hosts are CPU-saturated right now?"
+  - "Is the CPU busy with user, system, iowait or steal?"
+  - "Is the run queue longer than the core count (scheduling pressure)?"
+  - "Are we losing cycles to a noisy hypervisor neighbour (steal)?"
+
+production_lessons: >-
+  Average CPU "utilisation" hides the problems that page you. A box at 55% average
+  can still be dropping requests if one core is pinned or the run queue is deep, so
+  this dashboard leads with **saturation** (load vs cores, run queue, steal) and only
+  then breaks utilisation down **by mode**. The single most useful panel in incidents
+  is iowait vs system: high iowait points at storage, high system at syscalls/network,
+  high steal at the hypervisor — three completely different responders.
+
+data_sources:
+  - "`node_exporter` running on each host (the `node_cpu_seconds_total`, `node_load1`
+    and `node_uname_info` series)."
+
+templating:
+  - name: job
+    label: Job
+    query: label_values(node_uname_info, job)
+    description: Prometheus scrape job for your node_exporter targets.
+    multi: false
+    includeAll: false
+  - name: instance
+    label: Instance
+    query: label_values(node_uname_info{job="$job"}, instance)
+    description: Host(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Saturation — read these first
+    panels:
+      - type: stat
+        title: Hosts CPU-saturated (load > cores)
+        description: Count of selected hosts whose 1m load average exceeds their core count.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 1}
+        targets:
+          - expr: >-
+              count(
+                node_load1{job="$job", instance=~"$instance"}
+                > count without (cpu, mode) (node_cpu_seconds_total{job="$job", instance=~"$instance", mode="idle"})
+              ) or vector(0)
+            instant: true
+            legend: saturated
+      - type: stat
+        title: Busiest host CPU
+        description: Highest non-idle CPU utilisation across selected hosts.
+        unit: percent
+        min: 0
+        max: 100
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 75}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              max(
+                100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job="$job", instance=~"$instance", mode="idle"}[5m])))
+              )
+            instant: true
+            legend: max
+      - type: gauge
+        title: Fleet mean CPU busy
+        description: Mean non-idle CPU across all selected hosts.
+        unit: percent
+        min: 0
+        max: 100
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 70}
+          - {color: red, value: 85}
+        targets:
+          - expr: >-
+              avg(100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job="$job", instance=~"$instance", mode="idle"}[5m]))))
+            instant: true
+            legend: mean
+      - type: stat
+        title: Max steal %
+        description: Highest steal time — cycles the hypervisor took from a guest.
+        unit: percent
+        min: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 2}
+          - {color: red, value: 10}
+        targets:
+          - expr: >-
+              max(100 * avg by (instance) (rate(node_cpu_seconds_total{job="$job", instance=~"$instance", mode="steal"}[5m]))) or vector(0)
+            instant: true
+            legend: steal
+
+  - title: Utilisation by mode
+    panels:
+      - type: timeseries
+        title: CPU usage by mode (fleet)
+        description: Aggregate CPU time per mode. Stacks to 100% × core count.
+        unit: percent
+        min: 0
+        stacking: normal
+        fillOpacity: 30
+        legend: table
+        targets:
+          - expr: >-
+              100 * avg by (mode) (rate(node_cpu_seconds_total{job="$job", instance=~"$instance", mode!="idle"}[5m]))
+            legend: "{{mode}}"
+      - type: timeseries
+        title: Non-idle CPU per host
+        description: Per-host busy percentage — spot the outlier.
+        unit: percent
+        min: 0
+        max: 100
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 90}
+        targets:
+          - expr: >-
+              100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{job="$job", instance=~"$instance", mode="idle"}[5m])))
+            legend: "{{instance}}"
+
+  - title: Scheduling pressure
+    panels:
+      - type: timeseries
+        title: Load average vs cores
+        description: 1m/5m/15m load. Sustained values above the core count mean a backlog.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: avg(node_load1{job="$job", instance=~"$instance"})
+            legend: load1
+          - expr: avg(node_load5{job="$job", instance=~"$instance"})
+            legend: load5
+          - expr: avg(node_load15{job="$job", instance=~"$instance"})
+            legend: load15
+          - expr: count without (cpu, mode) (node_cpu_seconds_total{job="$job", instance=~"$instance", mode="idle"})
+            legend: cores
+      - type: timeseries
+        title: iowait vs system vs steal
+        description: The three modes that explain *why* CPU is busy and who owns the fix.
+        unit: percent
+        min: 0
+        legend: table
+        targets:
+          - expr: 100 * avg(rate(node_cpu_seconds_total{job="$job", instance=~"$instance", mode="iowait"}[5m]))
+            legend: iowait (storage)
+          - expr: 100 * avg(rate(node_cpu_seconds_total{job="$job", instance=~"$instance", mode="system"}[5m]))
+            legend: system (syscalls)
+          - expr: 100 * avg(rate(node_cpu_seconds_total{job="$job", instance=~"$instance", mode="steal"}[5m]))
+            legend: steal (hypervisor)
+
+alerts:
+  - name: HostHighCPUSaturation
+    severity: warning
+    expr: >-
+      100 * (1 - avg by (instance, job) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 90
+    for: 10m
+    summary: "Host {{ $labels.instance }} CPU busy > 90% for 10m"
+    why: Sustained high CPU starves request handling and increases latency/queueing.
+    investigate: "Open Linux / CPU, scope to the instance, compare iowait vs system vs steal to pick the responder."
+    runbook: "Identify the top process (top/pidstat); if steal is high, the hypervisor is oversubscribed — move or resize the VM."
+    recovery: Alert clears when busy drops below 90% for 5m.
+    false_positives: Batch/CI hosts that are intentionally CPU-bound — scope the rule with a label selector or raise `for`.
+  - name: HostCPUStealHigh
+    severity: warning
+    expr: 100 * avg by (instance, job) (rate(node_cpu_seconds_total{mode="steal"}[5m])) > 10
+    for: 15m
+    summary: "Host {{ $labels.instance }} losing >10% CPU to steal"
+    why: High steal means the hypervisor is denying the guest CPU it asked for — app slowness with idle-looking guest metrics.
+    investigate: "Confirm on the hypervisor capacity dashboard; check neighbour density."
+    runbook: "Migrate the VM to a less contended hypervisor or resize the flavour."
+    recovery: Clears when steal falls below 10% for 5m.
+    false_positives: Brief steal spikes during live-migration are expected.
+
+troubleshooting:
+  - symptom: All panels show "No data"
+    cause: Wrong `$job` or node_exporter not scraped.
+    action: "Check `up{job=\"$job\"}` in Explore; confirm the job label matches your scrape config."
+  - symptom: The cores line is flat at 1
+    cause: "`node_cpu_seconds_total` collapsed by a recording rule that dropped the `cpu` label."
+    action: Point the dashboard at raw node_exporter series, not a downsampled copy.
+  - symptom: Busy % above 100
+    cause: Summing instead of averaging across cores.
+    action: Ensure mode aggregations use `avg by (instance)`, not `sum`.
+
+performance: >-
+  All rates use a 5m window (≥4× a 15s scrape) so counters stay smooth across a
+  reset. Panels aggregate with `avg by (instance)` to keep series count at one per
+  host. On fleets above ~500 hosts, back the per-host panel with the
+  `instance:node_cpu_utilisation:rate5m` recording rule in `recording-rules/`.
+
+customization: >-
+  Tune the 90%/85% thresholds to your SLO. To watch a single service tier, add a
+  `nodename`/`role` label selector to `$instance`. Swap the 5m rate window for 1m
+  on latency-sensitive fleets where you need faster reaction at the cost of noise.

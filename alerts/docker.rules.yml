@@ -1,0 +1,189 @@
+# Alerting rules for the docker dashboards.
+# Generated from tools/specs/docker/**. Do not edit by hand — edit the
+# spec `alerts:` block and re-run `make build`.
+# Load via Prometheus rule_files: or as a Grafana-managed ruleset.
+groups:
+- name: docker.rules
+  rules:
+  - alert: ComposeStackContainerRestart
+    expr: "sum by (container_label_com_docker_compose_project, instance) (\n  changes(container_start_time_seconds{container_label_com_docker_compose_project!=\"\
+      \", name!=\"\"}[15m])) > 3"
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Compose stack {{ $labels.container_label_com_docker_compose_project }} has {{ $value }}
+        restarts in 15m
+      description: Restarts concentrated in one stack point at a single failing app — a bad config, a
+        dead dependency, or an OOM loop in one of its services.
+      runbook: Inspect that service's logs, roll back its last change, and fix the dependency or resource
+        limit causing the crash.
+      dashboard: dashboards/docker/compose-stack.json
+  - alert: ComposeStackCPUHigh
+    expr: "sum by (container_label_com_docker_compose_project, instance) (\n  rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_project!=\"\
+      \", name!=\"\"}[5m]))\n/ scalar(machine_cpu_cores) > 0.8"
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Compose stack {{ $labels.container_label_com_docker_compose_project }} using over 80% of
+        host cores
+      description: A single stack consuming most of the host's CPU starves every other stack on the same
+        host, turning one app's problem into everyone's.
+      runbook: Add CPU limits to the stack's services, move the stack to its own host, or scale it out.
+      dashboard: dashboards/docker/compose-stack.json
+  - alert: ComposeStackMemoryGrowth
+    expr: "sum by (container_label_com_docker_compose_project, instance) (\n  deriv(container_memory_working_set_bytes{container_label_com_docker_compose_project!=\"\
+      \", name!=\"\"}[1h])) > 1.0e6"
+    for: 30m
+    labels:
+      severity: warning
+    annotations:
+      summary: Compose stack {{ $labels.container_label_com_docker_compose_project }} memory growing steadily
+      description: A stack whose working set climbs by more than ~1MB/s for half an hour is leaking and
+        will eventually OOM one of its containers.
+      runbook: Set memory limits to bound the blast radius and restart the leaking service while you ship
+        a fix.
+      dashboard: dashboards/docker/compose-stack.json
+  - alert: ContainerRestartLoop
+    expr: changes(container_start_time_seconds{name!=""}[15m]) > 3
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: Container {{ $labels.name }} restarted {{ $value }} times in 15m
+      description: A container restarting repeatedly is crash-looping — it serves no traffic while consuming
+        CPU and polluting logs, and it stays invisible in `docker ps`.
+      runbook: Fix the crash cause (bad config, failing dependency, OOM); roll back the last deploy if
+        the loop started with it.
+      dashboard: dashboards/docker/containers.json
+  - alert: ContainerStopped
+    expr: engine_daemon_container_states_containers{state="stopped"} > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: '{{ $labels.instance }} has {{ $value }} stopped container(s)'
+      description: A container that exited and was not restarted may be a failed service the orchestrator
+        gave up on.
+      runbook: Restart or remove the container; if it exits immediately, fix the root cause before restarting.
+      dashboard: dashboards/docker/containers.json
+  - alert: ContainerVanished
+    expr: time() - container_last_seen{name!=""} > 300
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: Container {{ $labels.name }} not seen by cAdvisor for 5m
+      description: A container cAdvisor stops seeing has usually been killed or the cgroup removed — but
+        a dashboard scoped to live containers would never show its absence.
+      runbook: If the container should be running, restart it; if cAdvisor is stale, restart cAdvisor.
+      dashboard: dashboards/docker/containers.json
+  - alert: DockerHostCPUExhausted
+    expr: 100 * avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) < 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Docker host {{ $labels.instance }} CPU idle below 10%
+      description: With almost no idle CPU the daemon and its containers contend for cores, so every container
+        slows together and new placements stall.
+      runbook: Move or throttle the heaviest container, or scale the host pool.
+      dashboard: dashboards/docker/engine-hosts.json
+  - alert: DockerHostMemoryLow
+    expr: 100 * node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 10
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Docker host {{ $labels.instance }} memory headroom below 10%
+      description: Low host memory triggers the OOM killer, which kills containers unpredictably and can
+        take down the daemon's own workloads.
+      runbook: Set/lower container memory limits, add RAM, or rebalance containers across hosts.
+      dashboard: dashboards/docker/engine-hosts.json
+  - alert: DockerContainersPaused
+    expr: engine_daemon_container_states_containers{state="paused"} > 0
+    for: 15m
+    labels:
+      severity: info
+    annotations:
+      summary: '{{ $labels.instance }} has {{ $value }} paused container(s)'
+      description: A long-paused container is almost always a forgotten manual `docker pause` that silently
+        removed capacity.
+      runbook: Unpause if it should be running (docker unpause), or remove it.
+      dashboard: dashboards/docker/engine-hosts.json
+  - alert: ContainerFilesystemNearFull
+    expr: sum by (name, instance) (container_fs_usage_bytes{name!=""}) / clamp_min(sum by (name, instance)
+      (container_fs_limit_bytes{name!=""}), 1) > 0.9
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Container {{ $labels.name }} filesystem {{ printf "%.0f" $value }}% full
+      description: A container that fills its filesystem starts failing writes, which crashes the app
+        or corrupts local state and can wedge the whole Docker storage pool.
+      runbook: Mount a volume for the growing path, enable log rotation, prune the writable layer, or
+        grow the backing filesystem.
+      dashboard: dashboards/docker/images-volumes.json
+  - alert: ContainerFilesystemFillingFast
+    expr: predict_linear(container_fs_usage_bytes{name!=""}[1h], 4 * 3600) > container_fs_limit_bytes{name!=""}
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: Container {{ $labels.name }} projected to fill its filesystem within 4h
+      description: Catching the trend lets you act during business hours instead of being paged at 3am
+        when the disk is already full.
+      runbook: Rotate/ship logs off the host, mount a volume, or expand storage before the projection
+        lands.
+      dashboard: dashboards/docker/images-volumes.json
+  - alert: HostContainerDiskExhausted
+    expr: sum by (instance) (container_fs_usage_bytes{name!=""}) / clamp_min(max by (instance) (container_fs_limit_bytes{name!=""}),
+      1) > 0.95
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: Docker host {{ $labels.instance }} container storage above 95%
+      description: When the shared storage pool is nearly full, every container on the host risks write
+        failures at once, not just the heaviest one.
+      runbook: Run docker system prune, remove unused volumes, or grow the storage backing /var/lib/docker.
+      dashboard: dashboards/docker/images-volumes.json
+  - alert: ContainerNetworkErrors
+    expr: sum by (name, instance) (rate(container_network_receive_errors_total{name!=""}[5m])) + sum by
+      (name, instance) (rate(container_network_transmit_errors_total{name!=""}[5m])) > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Container {{ $labels.name }} network errors {{ printf "%.1f" $value }}/s
+      description: NIC/bridge errors cause retransmits and tail latency the app feels as slowness, while
+        every utilisation gauge stays green.
+      runbook: Inspect the Docker bridge/overlay and host NIC; restart the container's network namespace
+        if wedged; replace failing hardware.
+      dashboard: dashboards/docker/networks.json
+  - alert: ContainerPacketDrops
+    expr: sum by (name, instance) (rate(container_network_receive_packets_dropped_total{name!=""}[5m]))
+      > 1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: Container {{ $labels.name }} dropping {{ printf "%.1f" $value }} pkts/s
+      description: Dropped packets mean lost data — the container's socket buffers or the bridge cannot
+        keep up, causing retransmits and stalls.
+      runbook: Increase socket buffer sizes, rate-limit the noisy container, or move heavy talkers to
+        separate networks.
+      dashboard: dashboards/docker/networks.json
+  - alert: ContainerBandwidthSpike
+    expr: sum by (name, instance) (rate(container_network_receive_bytes_total{name!=""}[5m])) + sum by
+      (name, instance) (rate(container_network_transmit_bytes_total{name!=""}[5m])) > 1.0e8
+    for: 10m
+    labels:
+      severity: info
+    annotations:
+      summary: Container {{ $labels.name }} sustained ~100 MB/s of network
+      description: A container pushing ~800 Mbps for ten minutes can saturate a 1GbE host link and starve
+        its neighbours.
+      runbook: Throttle or schedule the transfer off-peak, or move it to a dedicated network/host.
+      dashboard: dashboards/docker/networks.json

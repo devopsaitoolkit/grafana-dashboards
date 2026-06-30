@@ -1,0 +1,231 @@
+# Redis replication and cluster topology. Leads with how many replicas the master sees
+# and the replica's lag since last contact with the master — the two facts that decide
+# whether a failover would be clean.
+uid: redis-cluster
+title: Redis / Replication & Cluster
+description: >-
+  Replication and topology health for Redis via redis_exporter: connected replicas, the
+  master replication offset, replica lag measured as seconds since last master contact,
+  rejected connections, and per-node memory. Answers "are my replicas attached and
+  current, and would a failover lose data?".
+datasource: prometheus
+tags: [redis, cache, redis-exporter, replication]
+seo_phrase: Redis replication Grafana dashboard
+refresh: 30s
+time_from: now-6h
+
+questions:
+  - "How many replicas is the master streaming to right now?"
+  - "How long since each replica last heard from its master?"
+  - "Is the replication offset advancing on both master and replicas?"
+  - "Are connections being rejected (maxclients reached)?"
+  - "How is memory distributed across the nodes?"
+
+production_lessons: >-
+  Redis replication is asynchronous, so a replica can silently fall behind or detach and
+  you only discover it during a failover that loses the un-replicated tail of writes.
+  This dashboard leads with the **connected-replica count** (a drop is a detached
+  replica that no longer protects you) and **seconds since last master contact** (the
+  replica's freshness — Sentinel and Cluster failover decisions hinge on it). Watch
+  **rejected connections** too: under a connection storm Redis hits maxclients and starts
+  refusing clients, which looks like an application bug but is really a topology limit.
+
+data_sources:
+  - "`redis_exporter` on every node (the `redis_connected_slaves`,
+    `redis_master_repl_offset`, `redis_master_last_io_seconds_ago`,
+    `redis_rejected_connections_total`, `redis_connected_clients` and
+    `redis_memory_used_bytes` series)."
+
+templating:
+  - name: instance
+    label: Instance
+    query: label_values(redis_up, instance)
+    description: Redis node(s) to display; supports multi-select.
+    multi: true
+    includeAll: true
+
+rows:
+  - title: Replication health — read these first
+    panels:
+      - type: stat
+        title: Replicas connected
+        description: Replicas the master is currently streaming to. A drop means a replica detached.
+        unit: short
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: red, value: null}
+          - {color: green, value: 1}
+        targets:
+          - expr: max(redis_connected_slaves{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: replicas
+      - type: stat
+        title: Max replica lag
+        description: Longest time any replica has gone without contact from its master, in seconds.
+        unit: s
+        decimals: 0
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: yellow, value: 5}
+          - {color: red, value: 10}
+        targets:
+          - expr: max(redis_master_last_io_seconds_ago{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: max lag
+      - type: stat
+        title: Rejected connections
+        description: Connections refused per second because maxclients was reached.
+        unit: ops
+        colorMode: background
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 0.001}
+        targets:
+          - expr: sum(rate(redis_rejected_connections_total{instance=~"$instance"}[5m])) or vector(0)
+            instant: true
+            legend: rejected/s
+      - type: stat
+        title: Connected clients
+        description: Total open client connections across the selected nodes.
+        unit: short
+        decimals: 0
+        colorMode: value
+        thresholds:
+          - {color: green, value: null}
+        targets:
+          - expr: sum(redis_connected_clients{instance=~"$instance"}) or vector(0)
+            instant: true
+            legend: clients
+
+  - title: Replication detail
+    panels:
+      - type: timeseries
+        title: Connected replicas over time
+        description: Replica count per master node. A step down marks the moment a replica detached.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: redis_connected_slaves{instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Replica lag (seconds since master I/O)
+        description: How fresh each replica is. A sustained climb means the replica lost its link to the master.
+        unit: s
+        min: 0
+        legend: table
+        thresholdsStyle: dashed
+        thresholds:
+          - {color: green, value: null}
+          - {color: red, value: 10}
+        targets:
+          - expr: redis_master_last_io_seconds_ago{instance=~"$instance"}
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Master replication offset
+        description: The replication stream position. It must keep advancing on master and replicas alike.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: redis_master_repl_offset{instance=~"$instance"}
+            legend: "{{instance}}"
+
+  - title: Connections
+    panels:
+      - type: timeseries
+        title: Rejected connections
+        description: Connections refused per second. Above zero means the node hit maxclients.
+        unit: ops
+        min: 0
+        drawStyle: bars
+        fillOpacity: 50
+        targets:
+          - expr: sum(rate(redis_rejected_connections_total{instance=~"$instance"}[5m]))
+            legend: rejected/s
+      - type: timeseries
+        title: Connected clients
+        description: Open client connections per node. Compare against maxclients to find the node under pressure.
+        unit: short
+        min: 0
+        legend: table
+        targets:
+          - expr: redis_connected_clients{instance=~"$instance"}
+            legend: "{{instance}}"
+
+  - title: Per-node memory
+    panels:
+      - type: bargauge
+        title: Memory used per node
+        description: Memory consumed on each node — spot an unbalanced shard or a replica drifting from its master.
+        unit: bytes
+        orientation: horizontal
+        targets:
+          - expr: redis_memory_used_bytes{instance=~"$instance"}
+            instant: true
+            legend: "{{instance}}"
+      - type: timeseries
+        title: Memory used over time
+        description: Per-node memory trend. Master and its replicas should track closely; divergence signals a sync problem.
+        unit: bytes
+        min: 0
+        legend: table
+        targets:
+          - expr: redis_memory_used_bytes{instance=~"$instance"}
+            legend: "{{instance}}"
+
+alerts:
+  - name: RedisNoConnectedReplicas
+    severity: warning
+    expr: redis_connected_slaves == 0
+    for: 5m
+    summary: "Redis {{ $labels.instance }} has no connected replicas"
+    why: With zero replicas there is no failover target — the node is a single point of failure for its data.
+    investigate: "Check the replicas' replication state and the master's client list; look for a network or auth break."
+    runbook: "Restart replication on the replica (REPLICAOF), fix connectivity, and confirm Sentinel/Cluster sees the node."
+    recovery: Clears once at least one replica reconnects.
+    false_positives: Standalone instances with no replicas by design — scope this rule to masters that should have them.
+  - name: RedisReplicaLagHigh
+    severity: warning
+    expr: redis_master_last_io_seconds_ago > 10
+    for: 5m
+    summary: "Redis replica {{ $labels.instance }} >10s since last master contact"
+    why: A replica that has not heard from its master in seconds is stale and may be dropped or trigger a failover.
+    investigate: "Check the network between replica and master, master load, and whether the replication link broke."
+    runbook: "Restore connectivity, reduce master write pressure, or re-point the replica at a healthy master."
+    recovery: Clears when last-I/O age drops below 10s for 5m.
+    false_positives: A brief gap during a planned failover or master restart.
+  - name: RedisRejectedConnections
+    severity: warning
+    expr: sum by (instance) (rate(redis_rejected_connections_total[5m])) > 0
+    for: 5m
+    summary: "Redis {{ $labels.instance }} is rejecting connections (maxclients)"
+    why: The node hit its maxclients limit and is refusing new clients, surfacing as connection errors in the application.
+    investigate: "Check connected_clients against maxclients and look for a client leak or a missing connection pool."
+    runbook: "Raise maxclients if RAM allows, fix the client leak, or add a connection pool/proxy in front of Redis."
+    recovery: Clears when rejected connections stop for 5m.
+    false_positives: A short connection storm during a deploy can trip this briefly.
+
+troubleshooting:
+  - symptom: Replica-lag panel is empty on the master
+    cause: redis_master_last_io_seconds_ago is reported by replicas, not the master.
+    action: Include the replica nodes in `$instance`; the master will not export this series.
+  - symptom: Connected-replicas count is 0 on a known master
+    cause: The replicas have detached, or the exporter is scraping a replica (which reports its own slave count).
+    action: Scrape the master and confirm replicas with REPLICAOF pointed at it.
+  - symptom: Replication offset is flat
+    cause: No writes are flowing, or the replication link is broken.
+    action: Confirm writes on the master; a flat offset under active writes means replication has stalled.
+
+performance: >-
+  Counter panels use a 5m rate window so restarts never spike them. Replica count, lag
+  and offset read instantaneous gauges, so the dashboard stays cheap regardless of how
+  many nodes are in the topology.
+
+customization: >-
+  Set the 5s/10s lag thresholds to your failover sensitivity, and adjust the
+  connected-replica threshold to your expected replica count per master. For Cluster
+  mode, add the shard label to the legends so each shard's master and replicas group
+  together.
